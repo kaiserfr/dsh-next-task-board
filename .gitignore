@@ -1,0 +1,6 @@
+node_modules/
+*.log
+.DS_Store
+
+# lib/ is committed on purpose: `dsh plugin add github:kaiserfr/dsh-next-task-board`
+# must install without a build step and without a pnpm allowBuilds approval.
