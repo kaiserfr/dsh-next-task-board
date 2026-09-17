@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-> **分支版本 — `kaiserfr/dsh-next-task-board`。** 上游为 [`zhu1090093659/dsh-web` 的 `packages/dsh-task-board`](https://github.com/zhu1090093659/dsh-web/tree/dev/packages/dsh-task-board)（基线 **0.3.23**，Apache-2.0）。差异：新增 Host 侧 **WIP 并发上限**（`maxConcurrentRuns`，默认 `1`，FIFO 排队），并移除上游的安装心跳遥测。详见 [FORK-NOTES.md](FORK-NOTES.md)。
+> **分支版本 — `kaiserfr/dsh-next-task-board`。** 上游为 [`zhu1090093659/dsh-web` 的 `packages/dsh-task-board`](https://github.com/zhu1090093659/dsh-web/tree/dev/packages/dsh-task-board)（基线 **0.3.23**，Apache-2.0）。本分支新增 Host 侧 **WIP 并发上限** 与 **把卡片拖到 running 列即启动**，并移除上游的安装心跳遥测——详见[本分支相对上游的增强](#本分支相对上游的增强)与 [FORK-NOTES.md](FORK-NOTES.md)。
 
 一个可热插拔的 DeepSeek Harness (DSH) Web GUI 插件，提供 Host 权威任务账本、真实 DSH 会话执行、Host cron 调度和可选的跨平台空闲睡眠保护。插件只通过 `cordis.patch.yml` 与 profile 机制挂载，不修改 DSH 源码。
 
@@ -10,9 +10,36 @@
 - 每次运行在发送任务 Prompt 前应用钉住的工作区、agent 预设与权限；默认每次新建独立 DSH 会话，任务也可选择改为在上一会话中继续（issue #1419）。
 - 可选电源保护允许显示器熄灭，同时阻止整机因空闲进入系统睡眠。
 
+## 本分支相对上游的增强
+
+本包是上游 `@linxin666/dsh-client-ui-task-board` 0.3.23 的**直接替换**：读写同一个账本（`$DSH_HOME/task-board/ledger-v2.json`，schema v3），已有任务不受影响；两者不可同时安装（都挂载同一 Host 路由与同一系统提示段）。
+
+| 方面 | 上游 0.3.23 | 本分支 |
+| --- | --- | --- |
+| **执行并发** | 到点即启动，不限制同时持有会话的运行数。 | **Host 侧 WIP 上限** `maxConcurrentRuns`（默认 **1**）：超出的运行先入 FIFO 队列，按先来后到、在某个运行结算后立刻启动。 |
+| **从看板启动** | 拖拽只是在 `backlog` 与 `todo` 之间手动改状态。 | **把卡片拖到 running 列即启动任务**，与详情页「运行」按钮走同一个宿主动作。 |
+| **遥测** | 客户端每个 UTC 日向 `dsh-market.com` 发送一次匿名安装心跳。 | **已移除**：挂载时不再发送心跳；`src/client/telemetry.ts` 文件保留以备自建端点，但客户端入口不再引用。 |
+| **分发方式** | 属于 `dsh-web` monorepo，从 npm 或 `web-ui-all` 聚合包安装。 | **独立仓库**：`lib/` 随仓库提交，`dsh plugin --profile web add github:kaiserfr/dsh-next-task-board` 无需构建步骤，也无需 `allowBuilds` 批准。 |
+| **Agent 播报** | 播报 `dsh-task-board` 与上游聚合包。 | 播报本分支名称，并向 agent 说明 WIP 排队语义。 |
+
+### Host 侧 WIP 并发上限
+
+- 由 `TaskBoardHostService` 在 Host 侧强制，不只是浏览器里的显示效果。
+- 释放名额的时机是运行**结算（settle）**，而不是会话附加；否则看板只是在启动阶段被限流，并非真正串行。
+- 排队中的运行在账本里已是 `running` 但尚无 session，因此其卡片读作进行中，不会被重复启动。
+- 调低上限不会中止正在运行的任务：多余的槽位随结算自然收敛，队列拦住其余的启动。
+- 队列会自愈：执行已不再处于打开状态（被删除、归档或等待期间已结算）的条目在下一次 pump 时被丢弃。
+- 手动运行与 cron 运行共用同一条启动队列，因此同样受限。
+
+### 拖到 running 列即启动
+
+- `running` 列是拖放目标，发送与详情页「运行」按钮相同的 Host `rerun` 动作，任务真正经过 Host 队列启动，而不是仅在本地改状态。
+- 排队中、运行中、已归档以及未知的卡片一律忽略；`backlog`/`todo` 仍是纯手动状态切换。
+
 ## 功能
 
-- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供五列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。卡片可在 backlog 与 todo 两列之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页「运行」按钮相同的宿主动作，真正启动该任务。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
+- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供五列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。卡片可在 backlog 与 todo 两列之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页「运行」按钮相同的宿主动作，真正启动该任务**（本分支新增）**。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
+- **Host 侧 WIP 并发上限（本分支新增）**：同一时间最多 `maxConcurrentRuns` 个任务运行持有会话（默认 `1`）；其余手动与 cron 运行进入 FIFO 队列，在某个运行结算后按先来后到启动。详见[本分支相对上游的增强](#本分支相对上游的增强)。
 - **续接卡片（数据面）**：新建任务时可粘贴会话输出的 `<<<FREEZE … >>>FREEZE` 冻结块，解析为「目标/进度/下一步」快照随任务持久化（v3 账本）；卡片带冻结徽标，详情页可读完整快照与冻结时间，搜索覆盖快照文本，归档/恢复与普通任务一致。快照在协议层复用冻结安全门：敏感模式自动替换为 `[REDACTED]` 并标记、以 `/` 开头的命令行整体拒绝、每字段 8 KiB 上限。
 - **交接包与权限确认门**：续接卡片可附交接包——钉住三元组（工作区/agent 预设/权限）加文档与脚本引用。执行时交接包三元组覆盖普通钉住字段，引用以交接前言随 Prompt 下发。有效权限高于 `sessionDefaultPermission`（默认 `read-only`）的绑定处于待确认状态：手动执行被拒绝、cron 跳过该卡并滚动到下一触发点，任务详情中的确认按钮完成人工确认；此后任何权限或交接包变更都会重新武装确认门。
 - **领卡来源声明包裹与来源审计**：执行续接卡片（带冻结快照的卡片）时，任务指令被来源声明模板强制包裹——冻结时间、来源会话与未经人工审查提示，组合在交接前言之后，使接手 Agent 对卡片文本中的存储型提示注入保持警惕。create/update 动作的发起方会话织入快照（frozenBy，快照被替换时重新盖章），run/rerun 的发起方会话连同冻结来源的捕获副本一起落在执行记录（initiatedBy）上，两者均可在任务详情查看。发起方为客户端断言的审计元数据，不构成信任边界。
@@ -66,6 +93,7 @@ dsh plugin --profile web add link:$(pwd)
 | `enabled` | `true` | 启用 Host 服务与浏览器看板。 |
 | `announceToAgent` | `false` | 按需开启：开启后向 agent 系统提示加入任务看板说明。 |
 | `preventIdleSleep` | `false` | 存在运行中的 DSH 会话、已启用计划或未知会话状态时，持有一个系统空闲睡眠断言。 |
+| `maxConcurrentRuns` | `1` | **本分支新增。** WIP 并发上限：同一时间允许持有会话的任务运行数。超出的运行进入 FIFO 队列，在某个运行结算、名额空出后自动启动。排队中的卡片已显示为运行中（尚无 session），若 Host 在其启动前重启则该执行记为 `cancelled`。 |
 | `trustedProxyHosts` | `[]` | 仅通过已认证 loopback 反向代理路径接受的规范 `host[:port]` authority 白名单。 |
 | `proxyTokenEnv` | `DSH_TASK_BOARD_PROXY_TOKEN` | 保存反向代理 token 的环境变量名；token 本身不会写入插件配置。 |
 | `sessionDefaultPermission` | `read-only` | 部署的会话默认权限。卡片有效权限（交接包或钉住字段）高于该值时，运行前必须经人工确认；cron 拒绝调度待确认卡片。 |
@@ -114,21 +142,23 @@ pnpm build
 4. 启用一个即将到期的 cron，关闭全部浏览器页面，确认 Host 仍只创建并结算一次 execution。
 5. 让 Host 停止并错过一个 cron 触发点，重启后确认该次被跳过，`nextRunAt` 从当前 Host 时间向后滚动。
 6. 开启 `preventIdleSleep` 并运行长任务，让显示器自动熄灭；恢复显示后确认会话继续且 execution 已结算。
-7. 关闭设置并禁用所有计划，再停止 DSH，确认 helper 退出；macOS 可用 `pmset -g assertions` 辅助确认插件没有 display-sleep assertion。
-8. Linux 可用 `systemd-inhibit --list` 确认只存在 `idle`/`block` 条目；显示器仍按桌面设置关闭，手动睡眠和合盖仍由系统策略处理。
+7. 同时触发三个运行，确认 Host 默认（WIP 上限 1）按到达顺序逐个启动；把 `maxConcurrentRuns` 调到 2 后确认两个同时启动。
+8. 关闭设置并禁用所有计划，再停止 DSH，确认 helper 退出；macOS 可用 `pmset -g assertions` 辅助确认插件没有 display-sleep assertion。
+9. Linux 可用 `systemd-inhibit --list` 确认只存在 `idle`/`block` 条目；显示器仍按桌面设置关闭，手动睡眠和合盖仍由系统策略处理。
 
 ## 已知限制
 
 - Host 停止、系统睡眠或长暂停期间错过的触发点会跳过，绝不排队补跑。
-- 同一任务已在运行时会跳过到期出现并滚动到下一 cron 匹配点；任务运行不并发、不排队。
+- 同一任务已在运行时会跳过到期出现并滚动到下一 cron 匹配点；同一任务的两个出现绝不重叠。不同任务的运行会在 WIP 上限处排队（本分支新增）。
 - DST 采用 Host 本地墙上时钟语义：春季跳时中不存在的分钟会跳过，秋季回拨中重复的分钟不会执行第二次。
 - 电源保护只阻止空闲系统睡眠，明确允许显示器睡眠与锁屏。
 - 合盖、手动睡眠、休眠、关机、低电量强制睡眠和企业电源策略不在保证范围内。
 - 插件不创建唤醒定时器，也不能唤醒已经睡眠的机器。
 - Linux 需要 systemd-logind 及允许当前用户取得 idle block lock 的策略；容器、WSL、无 system bus 或非 systemd 系统可能显示 `unsupported` 或 `error`。桌面环境是否把 logind idle lock 与显示器空闲联动属于其自身策略，插件不请求屏保或显示器 inhibitor。
 - 已启用计划会从未来触发点之前持续持锁，因此可能增加电池消耗。
+- 在 WIP 队列中等待的运行（本分支新增）尚无 session；若 Host 在其启动前重启，该 execution 结算为 `cancelled`，任务需要重新启动。
 - Host 执行消耗与普通 DSH agent 会话相同的 API 额度。
 
 ## 数据遥测
 
-浏览器半区每个 UTC 日向 dsh-market.com 发送一次匿名安装心跳：仅含一个 localStorage 随机 ID 与本包名，无其他数据。服务端只存储该 ID 的加盐哈希，不存 IP，且只暴露聚合计数。完整契约见 [docs/telemetry.md](../../docs/telemetry.md)。
+**本分支不发送任何遥测。** 上游 0.3.23 的浏览器半区每个 UTC 日向 `dsh-market.com` 发送一次匿名安装心跳（仅含一个 localStorage 随机 ID 与本包名）。本分支移除了该调用，看板不再发出遥测请求。`src/client/telemetry.ts` 仍留在仓库里以备自建端点，但客户端入口不再引用它；被移除的算法见上游 `docs/telemetry.md`（不属于本仓库）。
