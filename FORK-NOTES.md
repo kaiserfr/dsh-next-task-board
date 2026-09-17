@@ -12,6 +12,21 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
+Kurzfassung: **zwei echte Zusatz-Fähigkeiten** (1 und 4) plus drei
+Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
+übernommen (siehe unten).
+
+| Nr. | Art | Änderung |
+| --- | --- | --- |
+| 1 | **Mehr können** | Host-erzwungenes WIP-Limit `maxConcurrentRuns` (Default `1`) mit FIFO-Queue |
+| 2 | Datenschutz | Installations-Heartbeat an `dsh-market.com` entfernt |
+| 3 | Paketierung | Eigenständiges Repo statt Monorepo (Build-Preset vendored in `build/`) |
+| 4 | **Mehr können** | Karte auf „In Arbeit" ziehen startet den Task (Host-Aktion `rerun`) |
+| 5 | Paketierung | `lib/` wird committet → Installation ohne Build-Schritt |
+
+Die englische Fassung dieser Übersicht steht im README unter
+„What this fork adds over the upstream task board".
+
 1. **WIP-Limit (`maxConcurrentRuns`, Default `1`)** — Host-seitig erzwungen, nicht
    nur im Browser:
    - Neue Einstellung im Settings-Namespace `task-board`, editierbar in der

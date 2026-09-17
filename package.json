@@ -1,6 +1,6 @@
 {
   "name": "dsh-next-task-board",
-  "description": "Host-authoritative task board for the DSH Web GUI: independent fork of @linxin666/dsh-client-ui-task-board (base 0.3.23) adding a Host-enforced WIP limit (maxConcurrentRuns, FIFO queue, default 1); real session execution, Host cron scheduling, optional idle-sleep protection.",
+  "description": "Host-authoritative task board for the DSH Web GUI: independent fork of @linxin666/dsh-client-ui-task-board (base 0.3.23) adding a Host-enforced WIP limit (maxConcurrentRuns, FIFO queue, default 1) and drag-to-start (drop a card on \"In progress\" runs it), with the upstream install heartbeat removed; real session execution, Host cron scheduling, optional idle-sleep protection.",
   "version": "0.4.0",
   "type": "module",
   "main": "lib/index.js",

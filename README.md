@@ -4,9 +4,10 @@ English | [中文](README.zh.md)
 
 > **Fork — `kaiserfr/dsh-next-task-board`.** Independent fork of
 > [`zhu1090093659/dsh-web`'s `packages/dsh-task-board`](https://github.com/zhu1090093659/dsh-web/tree/dev/packages/dsh-task-board)
-> (base **0.3.23**, Apache-2.0). Delta: a **Host-enforced WIP limit**
-> (`maxConcurrentRuns`, default `1`, FIFO queue) and the upstream install
-> heartbeat removed. See [FORK-NOTES.md](FORK-NOTES.md).
+> (base **0.3.23**, Apache-2.0). It adds a **Host-enforced WIP limit** and
+> **drag-to-start**, and drops upstream's telemetry heartbeat — see
+> [What this fork adds over the upstream task board](#what-this-fork-adds-over-the-upstream-task-board)
+> and [FORK-NOTES.md](FORK-NOTES.md) (German).
 
 
 A hot-pluggable DeepSeek Harness (DSH) Web GUI plugin with a Host-authoritative task ledger, real DSH session execution, Host cron scheduling, and optional cross-platform idle-sleep protection. It is mounted through `cordis.patch.yml` and the profile mechanism and does not modify DSH source code.
@@ -15,9 +16,48 @@ A hot-pluggable DeepSeek Harness (DSH) Web GUI plugin with a Host-authoritative 
 - Every run applies the pinned workspace, agent preset, and permission before sending the task prompt; by default each run creates its own DSH session, and a task can opt into continuing in its previous session instead (issue #1419).
 - The display may turn off while optional power protection keeps the computer from entering idle system sleep.
 
+## What this fork adds over the upstream task board
+
+This package is a **drop-in replacement** for upstream
+`@linxin666/dsh-client-ui-task-board` 0.3.23: it reads and writes the same ledger
+(`$DSH_HOME/task-board/ledger-v2.json`, schema v3), so existing tasks survive, and
+the two packages must not be installed side by side (both mount the same Host
+route and system-prompt section).
+
+| Area | Upstream 0.3.23 | This fork |
+| --- | --- | --- |
+| **Execution concurrency** | Every run starts as soon as it is due; nothing bounds how many runs hold a session at once. | **Host-enforced WIP limit** `maxConcurrentRuns` (default **1**): runs above the limit wait in a FIFO queue and start in arrival order as soon as a running execution settles. |
+| **Starting from the board** | Dragging a card only moves it between `backlog` and `todo`. | **Dragging a card onto "In progress" starts the task** through the same Host action as the detail view's Run button. |
+| **Telemetry** | The client sends one anonymous install heartbeat per UTC day to `dsh-market.com`. | **Removed.** No heartbeat is sent at mount; `src/client/telemetry.ts` stays on disk for a possible own endpoint but is not imported. |
+| **Distribution** | Part of the `dsh-web` monorepo, installed from npm or the `web-ui-all` aggregate. | **Standalone repo**: `lib/` is committed, so `dsh plugin --profile web add github:kaiserfr/dsh-next-task-board` installs without a build step and without an `allowBuilds` approval. |
+| **Agent announcement** | Names `dsh-task-board` and the upstream aggregate package. | Names this fork and spells out the WIP queue semantics to the agent. |
+
+### Host-enforced WIP limit
+
+- Enforced in `TaskBoardHostService`, not merely in the browser.
+- A slot is freed when a running execution **settles**, not when its session is
+  attached; otherwise the board would only be throttled at start instead of truly
+  serial.
+- A waiting run is already `running` in the ledger without a session, so its card
+  reads as in progress and cannot be started a second time.
+- Lowering the limit never aborts a running task: surplus slots drain as their
+  executions settle while the queue holds the remaining launches back.
+- The queue self-heals — an entry whose execution is no longer open (deleted,
+  archived, or settled while it waited) is dropped on the next pump.
+- Manual runs and cron runs share the launch queue, so both are limited.
+
+### Drag a card onto "In progress" to start it
+
+- The `running` column is a drop target and sends the same Host `rerun` action as
+  the detail view's Run button, so the task really goes through the Host queue
+  instead of being relabelled locally.
+- Waiting, running, archived, and unknown cards are ignored; `backlog`/`todo`
+  remain pure manual status moves.
+
 ## Features
 
-- **Task board UI**: a sidebar entry below New Session shows icon and text in the wide sidebar and an icon in the collapsed rail; the board provides five kanban columns, search, task details, archive/restore, execution history, and links to execution transcripts. Cards drag between the backlog and todo columns for a manual status change; dragging a card onto the running column starts it through the same Host action as the detail view's Run button. Archived tasks are read-only except for restore, delete, and transcript viewing, and cannot run manually or on schedule until restored.
+- **Task board UI**: a sidebar entry below New Session shows icon and text in the wide sidebar and an icon in the collapsed rail; the board provides five kanban columns, search, task details, archive/restore, execution history, and links to execution transcripts. Cards drag between the backlog and todo columns for a manual status change; dragging a card onto the running column starts it through the same Host action as the detail view's Run button **(fork addition)**. Archived tasks are read-only except for restore, delete, and transcript viewing, and cannot run manually or on schedule until restored.
+- **Host-enforced WIP limit (fork addition)**: at most `maxConcurrentRuns` task runs (default `1`) hold a session at once; further manual and cron runs wait in a FIFO queue and start as a running execution settles. See [What this fork adds](#what-this-fork-adds-over-the-upstream-task-board).
 - **Continuation cards (data plane)**: a new task may paste a `<<<FREEZE ... >>>FREEZE` block from a session; it parses into a goal/progress/next snapshot persisted with the task (ledger v3). Cards carry a frozen badge, the detail view shows the full snapshot and freeze time, search covers snapshot text, and archive/restore matches plain tasks. The snapshot reuses the freeze security gate at the protocol layer: sensitive patterns become `[REDACTED]` with a marker, slash-prefixed command lines reject the whole snapshot, and each field is capped at 8 KiB.
 - **Handover bundles and the permission confirmation gate**: a continuation card may attach a handover bundle — the pinned execution triplet (workspace / agent preset / permission) plus doc/script references. The bundle's triplet overrides the plain pin fields at execution, and the references ride the prompt as a handover preamble. A binding whose effective permission is above `sessionDefaultPermission` (default `read-only`) is unconfirmed: manual run refuses, cron skips the card and rolls to the next occurrence, and the confirm button in the task detail resolves the binding; any later permission or bundle change re-arms the gate.
 - **Claim provenance wrap and source audit**: executing a continuation card (a card with a frozen snapshot) mandatorily wraps the task instruction in a source-declaration template — freeze instant, source session, and an unreviewed-content warning — composed after the handover preamble so the picking-up agent stays wary of stored prompt injection in card text. The session issuing a create/update action is stamped into the snapshot (frozenBy, re-stamped when the snapshot is replaced), and the session issuing a run/rerun lands on the execution record (initiatedBy) together with a captured copy of the freeze provenance; both are visible in the task detail. The initiator is client-asserted audit metadata, not a trust boundary.
@@ -72,7 +112,7 @@ dsh plugin --profile web add link:$(pwd)
 | `enabled` | `true` | Enables the Host service and browser board. |
 | `announceToAgent` | `false` | Opt-in: when true, adds the task-board guidance section to agent system prompts. |
 | `preventIdleSleep` | `false` | Holds one system idle-sleep assertion while any DSH session runs, any schedule is enabled, or session state is unknown. |
-| `maxConcurrentRuns` | `1` | WIP limit: how many task runs may hold a session at once. Runs above the limit wait in a FIFO queue and start as soon as a running task settles. Queued cards already read as running (no session yet) and are recorded as `cancelled` when the Host restarts before they start. |
+| `maxConcurrentRuns` | `1` | **Fork addition.** WIP limit: how many task runs may hold a session at once. Runs above the limit wait in a FIFO queue and start as soon as a running task settles. Queued cards already read as running (no session yet) and are recorded as `cancelled` when the Host restarts before they start. |
 | `trustedProxyHosts` | `[]` | Canonical `host[:port]` authorities accepted only through the authenticated loopback reverse-proxy path. |
 | `proxyTokenEnv` | `DSH_TASK_BOARD_PROXY_TOKEN` | Environment variable containing the reverse-proxy token; the token itself is never stored in plugin config. |
 | `sessionDefaultPermission` | `read-only` | The deployment's session-default permission. A card whose effective permission (handover bundle or pin) is above this value requires a human confirmation before it may run; cron refuses unconfirmed cards. |
@@ -122,21 +162,22 @@ Set `DSH_POWER_SMOKE=1` to opt into the native helper smoke test on Windows, mac
 5. Stop the Host past a cron occurrence, restart it, and confirm the missed occurrence is skipped and `nextRunAt` rolls forward from current Host time.
 6. Enable `preventIdleSleep`, run a long session, and let the display turn off; after restoring the display, confirm the session continued and the execution settled.
 7. Trigger three runs at once and confirm the Host starts them one after another in arrival order (default WIP limit 1), and that raising `maxConcurrentRuns` to 2 starts two at once.
-7. Disable the setting and all schedules, stop DSH, and confirm the helper exits; on macOS, `pmset -g assertions` should show no display-sleep assertion from this plugin.
-8. On Linux, use `systemd-inhibit --list` to confirm that only an `idle`/`block` entry exists; the display should still follow desktop settings, while manual sleep and lid close remain under system policy.
+8. Disable the setting and all schedules, stop DSH, and confirm the helper exits; on macOS, `pmset -g assertions` should show no display-sleep assertion from this plugin.
+9. On Linux, use `systemd-inhibit --list` to confirm that only an `idle`/`block` entry exists; the display should still follow desktop settings, while manual sleep and lid close remain under system policy.
 
 ## Known limitations
 
 - Missed occurrences during Host downtime, system sleep, or a long pause are skipped and never queued for catch-up.
-- A task that is already running skips its due occurrence and rolls to the next cron match; task runs never overlap or queue.
+- A task that is already running skips its due occurrence and rolls to the next cron match; two occurrences of the same task never overlap. Runs of *different* tasks do queue at the WIP limit (fork addition).
 - DST follows the Host local wall clock: a nonexistent spring-forward minute is skipped, and a repeated fall-back minute is not replayed a second time.
 - Power protection prevents only idle system sleep. It deliberately allows display sleep and lock.
 - Lid close, manual sleep, hibernation, shutdown, low-battery forced sleep, and enterprise power policy are outside the guarantee.
 - The plugin does not schedule wake timers and cannot wake a computer that is already asleep.
 - Linux requires systemd-logind and policy permission for the current user to acquire an idle block lock. Containers, WSL, hosts without a system bus, and non-systemd systems may report `unsupported` or `error`. Whether a desktop also associates a logind idle lock with display idleness is desktop policy; the plugin does not request a screensaver or display inhibitor.
 - Keeping enabled schedules armed may increase battery consumption because protection starts before their future trigger time.
+- A run waiting in the WIP queue (fork addition) has no session yet; if the Host restarts before it starts, the execution settles as `cancelled` and the task must be started again.
 - Host execution consumes the same API quota as an ordinary DSH agent session.
 
 ## Telemetry
 
-The browser half sends one anonymous install heartbeat per UTC day to dsh-market.com: a random localStorage id plus this package's name, nothing else. The server stores only a salted hash of that id, never IP addresses, and exposes aggregate counts only. See [docs/telemetry.md](../../docs/telemetry.md) for the full contract.
+**This fork sends no telemetry.** Upstream 0.3.23's browser half reported one anonymous install heartbeat per UTC day to `dsh-market.com` (a random localStorage id plus the package name, nothing else). This fork removed that call, so the board makes no telemetry request. `src/client/telemetry.ts` is kept on disk for a possible own endpoint but is not imported by the client entry. The removed algorithm is documented upstream in `docs/telemetry.md`, which is not part of this repository.
