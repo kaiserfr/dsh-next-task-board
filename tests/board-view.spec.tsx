@@ -178,6 +178,56 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     expect(moveCalls).toEqual([{ id: 't-backlog', status: 'todo' }])
   })
 
+  it('drops a todo card onto the running column and starts it like Run', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+
+    const runCalls: string[] = []
+    const moveCalls: Array<{ id: string; status: string }> = []
+    const controller = fakeController(
+      {
+        tasks: [
+          task({ id: 't-todo', status: 'todo' }),
+          task({ id: 't-running', status: 'running' }),
+          task({ id: 't-pending', status: 'done' }),
+        ],
+        pendingTaskIds: ['t-pending'],
+      },
+      {
+        rerunTask: async (id) => { runCalls.push(id) },
+        moveTask: (id, status) => { moveCalls.push({ id, status }) },
+      },
+    )
+    await act(async () => { root.render(<TaskBoard controller={controller} />) })
+
+    const runningColumn = container.querySelector('section[data-status="running"]')
+    expect(runningColumn).not.toBeNull()
+
+    const drop = async (id: string): Promise<void> => {
+      const dataTransfer = {
+        getData: (type: string) => (type === 'text/plain' ? id : ''),
+      }
+      await act(async () => {
+        runningColumn!.dispatchEvent(
+          Object.assign(new Event('drop', { bubbles: true, cancelable: true }), { dataTransfer }),
+        )
+      })
+    }
+
+    await drop('t-todo')
+    expect(runCalls).toEqual(['t-todo'])
+
+    // Already running, unknown, or pending tasks are not started again.
+    await drop('t-running')
+    await drop('t-missing')
+    await drop('t-pending')
+    expect(runCalls).toEqual(['t-todo'])
+    // The running column never performs a plain status move.
+    expect(moveCalls).toHaveLength(0)
+  })
+
   it('rejects invalid drops (same column or dropping running tasks)', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

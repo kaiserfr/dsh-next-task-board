@@ -268,22 +268,33 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
           COLUMNS.map(column => {
             const tasks = visible.filter(task => task.status === column.status)
             const isManualDropTarget = column.status === 'backlog' || column.status === 'todo'
+            // Dropping onto the running column starts the task — same Host
+            // action as the detail view's Run button; the Host owns the
+            // running transition and the execution record.
+            const isRunDropTarget = column.status === 'running'
+            const isDropTarget = isManualDropTarget || isRunDropTarget
             return (
               <section
                 key={column.status}
                 className={css.column}
                 data-status={column.status}
                 data-dsh-part="column"
-                onDragOver={isManualDropTarget ? (event) => {
+                onDragOver={isDropTarget ? (event) => {
                   event.preventDefault()
                   event.dataTransfer.dropEffect = 'move'
                 } : undefined}
-                onDrop={isManualDropTarget ? (event) => {
+                onDrop={isDropTarget ? (event) => {
                   event.preventDefault()
                   const taskId = event.dataTransfer.getData('text/plain')
                   if (!taskId) return
                   const dropped = snapshot.tasks.find(t => t.id === taskId)
-                  if (dropped && canMoveManually(dropped.status, column.status) && dropped.status !== column.status) {
+                  if (dropped === undefined || dropped.archivedAt !== undefined || dropped.status === 'running') return
+                  if (isRunDropTarget) {
+                    if (snapshot.pendingTaskIds.includes(taskId)) return
+                    void controller.rerunTask(taskId)
+                    return
+                  }
+                  if (canMoveManually(dropped.status, column.status) && dropped.status !== column.status) {
                     controller.moveTask(taskId, column.status)
                   }
                 } : undefined}

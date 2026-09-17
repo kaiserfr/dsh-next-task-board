@@ -38,7 +38,13 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
      Workspace-Wurzel).
    - `README.i18n.yaml` (Hash-Register des Monorepo-Doku-Checks) entfällt; die
      `scripts/`-Werkzeuge des Monorepos existieren hier nicht.
-4. **`lib/` wird committet** — damit `dsh plugin --profile web add
+4. **Ziehen nach „In Arbeit" startet den Task** — die `running`-Spalte ist ein
+   Drop-Ziel: eine Karte aus einer anderen Spalte dorthin zu ziehen sendet
+   dieselbe Host-Aktion wie der „Run"-Button im Detail (`rerun`), der Task läuft
+   also wirklich über die Host-Queue an und wird nicht nur manuell umgebucht.
+   Wartende und bereits laufende Karten werden ignoriert; `backlog`/`todo`
+   bleiben reine manuelle Spaltenwechsel.
+5. **`lib/` wird committet** — damit `dsh plugin --profile web add
    github:kaiserfr/dsh-next-task-board` ohne Build-Schritt und ohne
    `allowBuilds`-Freigabe installiert. Es gibt bewusst **keinen**
    `prepare`-Hook. Nach Änderungen an `src/` also `pnpm build` ausführen und das
