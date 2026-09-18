@@ -21,6 +21,7 @@ export declare const zh: {
     'board.status.backlog': string;
     'board.status.todo': string;
     'board.status.running': string;
+    'board.status.ready_for_test': string;
     'board.status.done': string;
     'board.status.failed': string;
     'board.runs': string;
@@ -127,6 +128,8 @@ export declare const zh: {
     'delete.cancel': string;
     'status.move.backlog': string;
     'status.move.todo': string;
+    'status.move.ready_for_test': string;
+    'status.move.done': string;
     'exec.error.noWorkspace': string;
     'exec.error.promptRejected': string;
     'run.failed': string;

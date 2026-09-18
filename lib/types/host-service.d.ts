@@ -1,6 +1,7 @@
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway';
 import { HostTaskLedger } from './host-ledger.ts';
 import { HostExecutionRunner, type SessionCommandDispatcher, type TaskBoardWorkspaceRegistry } from './host-runner.ts';
+import { GitWorkflow } from './git-workflow.ts';
 import { PowerInhibitor } from './power-inhibitor.ts';
 import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts';
 import type { TaskPermission } from './core/handover.ts';
@@ -8,6 +9,8 @@ export declare class TaskBoardHostService {
     readonly ledger: HostTaskLedger;
     readonly runner: HostExecutionRunner;
     readonly power: PowerInhibitor;
+    /** Shared git integration: branch hooks in the ledger, checkout before a run. */
+    readonly git: GitWorkflow;
     private readonly listeners;
     private timers;
     private lastScheduleTick;
@@ -38,6 +41,7 @@ export declare class TaskBoardHostService {
         commandDispatcher?: SessionCommandDispatcher;
         workspaceRegistry?: TaskBoardWorkspaceRegistry;
         sessionDefaultPermission?: TaskPermission;
+        git?: GitWorkflow;
     });
     start(): void;
     setConfiguration(active: boolean, preventIdleSleep: boolean): void;

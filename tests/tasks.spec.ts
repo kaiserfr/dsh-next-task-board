@@ -18,12 +18,12 @@ function sampleTask() {
 }
 
 describe('createTask', () => {
-  it('trims inputs, defaults to todo, and records timestamps', () => {
+  it('trims inputs, defaults to backlog, and records timestamps', () => {
     const task = sampleTask()
     expect(task.title).toBe('修复登录页样式')
     expect(task.description).toBe('按钮颜色不对')
     expect(task.prompt).toBe('请修复登录页按钮的样式问题')
-    expect(task.status).toBe('todo')
+    expect(task.status).toBe('backlog')
     expect(task.createdAt).toBe(NOW)
     expect(task.updatedAt).toBe(NOW)
     expect(task.executions).toEqual([])
@@ -71,12 +71,14 @@ describe('createTask', () => {
 })
 
 describe('status transitions', () => {
-  it('manual moves are allowed only to backlog/todo', () => {
+  it('manual moves go to backlog/todo/ready_for_test/done but never out of running', () => {
     expect(canMoveManually('todo', 'backlog')).toBe(true)
     expect(canMoveManually('failed', 'todo')).toBe(true)
     expect(canMoveManually('done', 'backlog')).toBe(true)
+    expect(canMoveManually('ready_for_test', 'done')).toBe(true)
+    expect(canMoveManually('todo', 'ready_for_test')).toBe(true)
     expect(canMoveManually('todo', 'running')).toBe(false)
-    expect(canMoveManually('backlog', 'done')).toBe(false)
+    expect(canMoveManually('running', 'done')).toBe(false)
   })
 
   it('withStatus bumps updatedAt and swaps the status', () => {
@@ -98,10 +100,10 @@ describe('status transitions', () => {
 })
 
 describe('settleExecution', () => {
-  it('settles a run as done on success', () => {
+  it('parks a successful run in ready_for_test (done stays manual)', () => {
     const { task } = startExecution(sampleTask(), NOW, 'exec-1')
     const settled = settleExecution(task, 'exec-1', 'succeeded', NOW + 10, undefined)
-    expect(settled.status).toBe('done')
+    expect(settled.status).toBe('ready_for_test')
     expect(settled.executions[0].endedAt).toBe(NOW + 10)
     expect(settled.executions[0].result).toBe('succeeded')
     expect(settled.executions[0].error).toBeUndefined()
@@ -122,11 +124,11 @@ describe('settleExecution', () => {
     expect(settled.executions[0].result).toBe('cancelled')
   })
 
-  it('keeps recurring task in todo on successful execution', () => {
+  it('parks a recurring task in ready_for_test too on successful execution', () => {
     const recurring = withSchedule(sampleTask(), { enabled: true, cron: '0 12 * * *' }, NOW)
     const { task } = startExecution(recurring, NOW, 'exec-1')
     const settled = settleExecution(task, 'exec-1', 'succeeded', NOW + 10, undefined)
-    expect(settled.status).toBe('todo')
+    expect(settled.status).toBe('ready_for_test')
     expect(settled.executions[0].result).toBe('succeeded')
   })
 

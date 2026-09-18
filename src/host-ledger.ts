@@ -13,6 +13,7 @@ import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-sc
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
 import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 import { DEFAULT_SESSION_PERMISSION, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
+import type { GitWorkflow } from './git-workflow.ts'
 
 interface PersistedScheduler extends TaskBoardSchedulerSnapshot {
   importedSources?: string[]
@@ -290,8 +291,12 @@ export class HostTaskLedger {
   /** Session-default permission the confirmation gate compares against. */
   readonly sessionDefaultPermission: TaskPermission
 
-  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission } = {}) {
+  /** Optional git integration; undefined disables the branch/merge hooks. */
+  private readonly git: GitWorkflow | undefined
+
+  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission; git?: GitWorkflow } = {}) {
     this.sessionDefaultPermission = options.sessionDefaultPermission ?? DEFAULT_SESSION_PERMISSION
+    this.git = options.git
     mkdirSync(dir, { recursive: true })
     this.file = join(dir, 'ledger-v2.json')
     this.lockFile = join(dir, 'ledger-v2.lock')
@@ -392,6 +397,18 @@ export class HostTaskLedger {
     return () => { this.listeners.delete(listener) }
   }
 
+  /**
+   * Ensure the card has a feature branch before it starts. The backlog → todo
+   * pull normally opens it; a cron trigger, a drag straight to "In progress",
+   * or the detail Run button may bypass that, and those runs must not land on
+   * the base branch. No-op without a repository or when a branch already exists.
+   */
+  private withFeatureBranch(task: TaskRecord): TaskRecord {
+    if (task.git !== undefined) return task
+    const opened = this.git?.openBranch(task)
+    return opened === undefined ? task : { ...task, git: opened }
+  }
+
   dispose(): void {
     const fd = this.lockFd
     if (fd === undefined) return
@@ -447,7 +464,7 @@ export class HostTaskLedger {
       this.commit()
       return undefined
     }
-    const opened = startExecution(task, triggeredAt, crypto.randomUUID())
+    const opened = startExecution(this.withFeatureBranch(task), triggeredAt, crypto.randomUUID())
     this.document.tasks = this.document.tasks.map(item => item.id === taskId ? opened.task : item)
     this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, triggeredAt, triggeredAt)]
     this.commit()
@@ -573,7 +590,19 @@ export class HostTaskLedger {
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
         if (!canMoveManually(task.status, action.status)) throw new Error('invalid manual status')
-        this.document.tasks = this.document.tasks.map(item => item.id === action.taskId ? withStatus(item, action.status, now) : item)
+        // Git hooks of the agentic-programming flow (no-ops without a repo):
+        // pulling a card from backlog into todo opens its feature branch, and
+        // accepting the work (ready_for_test → done) commits and merges it back
+        // into the base branch. Both fail the move when git refuses, so the
+        // card never claims a branch or a merge that did not happen.
+        const git = task.status === 'backlog' && action.status === 'todo'
+          ? this.git?.openBranch(task) ?? task.git
+          : task.status === 'ready_for_test' && action.status === 'done'
+            ? this.git?.mergeBranch(task, now) ?? task.git
+            : task.git
+        this.document.tasks = this.document.tasks.map(item => item.id === action.taskId
+          ? { ...withStatus(item, action.status, now), ...(git === undefined ? {} : { git }) }
+          : item)
         break
       }
       case 'archive': {
@@ -614,7 +643,10 @@ export class HostTaskLedger {
           throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
         }
         const base = action.kind === 'rerun' ? withStatus(task, 'todo', now) : task
-        run = startExecution(base, now, crypto.randomUUID(), initiator)
+        // Safety net for a card started without the backlog → todo pull (drag
+        // straight to "In progress", the detail Run button, or a cron trigger):
+        // still work on a feature branch when the workspace has a repository.
+        run = startExecution(this.withFeatureBranch(base), now, crypto.randomUUID(), initiator)
         this.document.tasks = this.document.tasks.map(item => item.id === task.id ? run!.task : item)
         break
       }

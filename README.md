@@ -4,8 +4,10 @@ English | [中文](README.zh.md)
 
 > **Fork — `kaiserfr/dsh-next-task-board`.** Independent fork of
 > [`zhu1090093659/dsh-web`'s `packages/dsh-task-board`](https://github.com/zhu1090093659/dsh-web/tree/dev/packages/dsh-task-board)
-> (base **0.3.23**, Apache-2.0). It adds a **Host-enforced WIP limit** and
-> **drag-to-start**, and drops upstream's telemetry heartbeat — see
+> (base **0.3.23**, Apache-2.0). It adds a **Host-enforced WIP limit**,
+> **drag-to-start**, and an **agentic-programming workflow** (Ready-for-test
+> column, Backlog-by-default, automatic git feature branch and merge), and
+> drops upstream's telemetry heartbeat — see
 > [What this fork adds over the upstream task board](#what-this-fork-adds-over-the-upstream-task-board)
 > and [FORK-NOTES.md](FORK-NOTES.md) (German).
 
@@ -28,6 +30,8 @@ route and system-prompt section).
 | --- | --- | --- |
 | **Execution concurrency** | Every run starts as soon as it is due; nothing bounds how many runs hold a session at once. | **Host-enforced WIP limit** `maxConcurrentRuns` (default **1**): runs above the limit wait in a FIFO queue and start in arrival order as soon as a running execution settles. |
 | **Starting from the board** | Dragging a card only moves it between `backlog` and `todo`. | **Dragging a card onto "In progress" starts the task** through the same Host action as the detail view's Run button. |
+| **Board workflow** | Five columns; new tasks start in `todo`. | **Agentic-programming defaults**: six columns with **Ready for test** directly before Done; new tasks start in **Backlog**; a successful run parks the card in Ready for test, and Done is reached only by a manual move. |
+| **Git integration** | None. | When the card's pinned workspace is a local git worktree, the board **opens `task/<slug>-<id8>` when the card enters Todo, checks it out for the run, and commits + merges it back into the base branch when the card reaches Done** (no-op without a repository). |
 | **Telemetry** | The client sends one anonymous install heartbeat per UTC day to `dsh-market.com`. | **Removed.** No heartbeat is sent at mount; `src/client/telemetry.ts` stays on disk for a possible own endpoint but is not imported. |
 | **Distribution** | Part of the `dsh-web` monorepo, installed from npm or the `web-ui-all` aggregate. | **Standalone repo**: `lib/` is committed, so `dsh plugin --profile web add github:kaiserfr/dsh-next-task-board` installs without a build step and without an `allowBuilds` approval. |
 | **Agent announcement** | Names `dsh-task-board` and the upstream aggregate package. | Names this fork and spells out the WIP queue semantics to the agent. |
@@ -54,9 +58,33 @@ route and system-prompt section).
 - Waiting, running, archived, and unknown cards are ignored; `backlog`/`todo`
   remain pure manual status moves.
 
+### Agentic-programming workflow and git integration
+
+- Columns: `backlog → todo → running → ready_for_test → done → failed`.
+- New tasks are created in **Backlog**; pulling a card into **Todo** is the
+  manual start signal.
+- A successful execution parks the card in **Ready for test** (a failed one in
+  Failed); the runner never produces `done`, so accepting the work is always a
+  human move.
+- When the card's pinned workspace is a git worktree, the Host keeps the work on
+  a feature branch and runs the whole flow in the background:
+  - Backlog → Todo opens `task/<title-slug>-<id8>`, cut from the current branch
+    (or `main`/`master` when HEAD is already on a board branch, so a second card
+    does not nest on the first).
+  - Before every run the branch is checked out, so "In progress" works on it; a
+    run that skipped the Todo pull (cron, dragged straight to In progress, or
+    the Run button) opens the branch at start.
+  - Ready for test → Done commits whatever the run left in the worktree and
+    merges the branch back with `--no-ff`. A git failure (e.g. a merge conflict)
+    fails the move and keeps the card in Ready for test.
+- Limits: git needs a pinned workspace (without one the board cannot know which
+  repository is meant); the flow shares one worktree, which matches the default
+  WIP limit of 1 — parallel runs (`maxConcurrentRuns > 1`) would race on the
+  checkout.
+
 ## Features
 
-- **Task board UI**: a sidebar entry below New Session shows icon and text in the wide sidebar and an icon in the collapsed rail; the board provides five kanban columns, search, task details, archive/restore, execution history, and links to execution transcripts. Cards drag between the backlog and todo columns for a manual status change; dragging a card onto the running column starts it through the same Host action as the detail view's Run button **(fork addition)**. Archived tasks are read-only except for restore, delete, and transcript viewing, and cannot run manually or on schedule until restored.
+- **Task board UI**: a sidebar entry below New Session shows icon and text in the wide sidebar and an icon in the collapsed rail; the board provides six kanban columns, search, task details, archive/restore, execution history, and links to execution transcripts. New tasks land in Backlog and cards drag between Backlog, Todo, Ready for test, and Done for a manual status change; dragging a card onto the running column starts it through the same Host action as the detail view's Run button **(fork addition)**. Archived tasks are read-only except for restore, delete, and transcript viewing, and cannot run manually or on schedule until restored.
 - **Host-enforced WIP limit (fork addition)**: at most `maxConcurrentRuns` task runs (default `1`) hold a session at once; further manual and cron runs wait in a FIFO queue and start as a running execution settles. See [What this fork adds](#what-this-fork-adds-over-the-upstream-task-board).
 - **Continuation cards (data plane)**: a new task may paste a `<<<FREEZE ... >>>FREEZE` block from a session; it parses into a goal/progress/next snapshot persisted with the task (ledger v3). Cards carry a frozen badge, the detail view shows the full snapshot and freeze time, search covers snapshot text, and archive/restore matches plain tasks. The snapshot reuses the freeze security gate at the protocol layer: sensitive patterns become `[REDACTED]` with a marker, slash-prefixed command lines reject the whole snapshot, and each field is capped at 8 KiB.
 - **Handover bundles and the permission confirmation gate**: a continuation card may attach a handover bundle — the pinned execution triplet (workspace / agent preset / permission) plus doc/script references. The bundle's triplet overrides the plain pin fields at execution, and the references ride the prompt as a handover preamble. A binding whose effective permission is above `sessionDefaultPermission` (default `read-only`) is unconfirmed: manual run refuses, cron skips the card and rolls to the next occurrence, and the confirm button in the task detail resolves the binding; any later permission or bundle change re-arms the gate.

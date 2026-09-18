@@ -6,8 +6,13 @@
  */
 import type { FreezeSnapshot } from './freeze-snapshot.ts';
 import type { TaskHandover, TaskHandoverInput } from './handover.ts';
-/** Task lifecycle status, one per kanban column. */
-export type TaskStatus = 'backlog' | 'todo' | 'running' | 'done' | 'failed';
+/**
+ * Task lifecycle status, one per kanban column. `ready_for_test` is where a
+ * successful run lands (the agentic-programming workflow): the agent finishing
+ * its "In progress" work parks the card for review, and only a human moves it
+ * on to `done`.
+ */
+export type TaskStatus = 'backlog' | 'todo' | 'running' | 'ready_for_test' | 'done' | 'failed';
 /**
  * One real execution attempt: the run's own id, the dsh session that ran it
  * (filled once the session is created), and the settled outcome once the
@@ -63,6 +68,22 @@ export interface ScheduleRule {
     nextRunAt: number | undefined;
     /** Instant of the latest scheduled trigger (ms epoch). */
     lastTriggeredAt: number | undefined;
+}
+/**
+ * Git workflow state of a task on the board's feature-branch flow: the branch
+ * opened when the card entered `todo`, the branch it was cut from (the merge
+ * target), and the worktree it lives in. Absent on cards whose workspace has
+ * no git repository (the git integration is opt-in per workspace).
+ */
+export interface TaskGit {
+    /** Feature branch opened for this task. */
+    branch: string;
+    /** Branch the feature branch was cut from and merges back into. */
+    base: string;
+    /** Repository worktree the branches belong to. */
+    repoPath: string;
+    /** When the feature branch was merged back into `base` (ms epoch). */
+    mergedAt?: number;
 }
 /**
  * Frozen context snapshot carried by a continuation card (issue #4): the
@@ -207,6 +228,11 @@ export interface TaskRecord {
      */
     permissionConfirmedAt?: number;
     /**
+     * Git feature-branch state for the agentic-programming workflow; absent on
+     * cards whose workspace is not a git worktree.
+     */
+    git?: TaskGit;
+    /**
      * When the task was archived (ms epoch). Archived tasks keep their status
      * and execution history, leave the main board, and cannot run until restored;
      * absent means on-board.
@@ -269,14 +295,22 @@ export interface NewTaskInput {
      */
     tags?: TaskTag[];
 }
-/** The five kanban columns, in display order. */
+/** The kanban columns, in display order: `ready_for_test` sits right before `done`. */
 export declare const COLUMNS: readonly {
     status: TaskStatus;
     label: string;
 }[];
-/** Statuses a user may move a card to manually (execution states are owned by the runner). */
+/**
+ * Statuses a user may move a card to manually (execution states are owned by
+ * the runner). `done` is manual-only by design: the git merge back into the
+ * base branch happens exactly on the `ready_for_test` → `done` move.
+ */
 export declare const MANUAL_STATUSES: readonly TaskStatus[];
-/** Statuses the runner may move a card to from 'running'. */
+/**
+ * Statuses the runner may move a card to when an execution settles. A
+ * successful run parks the card in `ready_for_test`; `done` is reached only by
+ * a manual move (which also merges the feature branch).
+ */
 export declare const RUNNER_SETTLE_STATUSES: readonly TaskStatus[];
 /** All valid statuses (closed union guard). */
 export declare const ALL_STATUSES: readonly TaskStatus[];

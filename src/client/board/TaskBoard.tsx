@@ -5,7 +5,7 @@
  */
 import { memo, useCallback, useEffect, useState } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
-import { COLUMNS, canMoveManually, collectKnownTags, tagTone, type TaskRecord } from '../../core/tasks.ts'
+import { COLUMNS, MANUAL_STATUSES, canMoveManually, collectKnownTags, tagTone, type TaskRecord } from '../../core/tasks.ts'
 import { t } from '../locales.ts'
 import css from '../board.module.css'
 import { NewTaskModal } from './NewTaskModal.tsx'
@@ -267,7 +267,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         ) : (
           COLUMNS.map(column => {
             const tasks = visible.filter(task => task.status === column.status)
-            const isManualDropTarget = column.status === 'backlog' || column.status === 'todo'
+            const isManualDropTarget = (MANUAL_STATUSES as readonly string[]).includes(column.status)
             // Dropping onto the running column starts the task — same Host
             // action as the detail view's Run button; the Host owns the
             // running transition and the execution record.

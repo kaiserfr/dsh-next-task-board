@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **zwei echte Zusatz-Fähigkeiten** (1 und 4) plus drei
+Kurzfassung: **drei echte Zusatz-Fähigkeiten** (1, 4 und 6) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -23,6 +23,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 3 | Paketierung | Eigenständiges Repo statt Monorepo (Build-Preset vendored in `build/`) |
 | 4 | **Mehr können** | Karte auf „In Arbeit" ziehen startet den Task (Host-Aktion `rerun`) |
 | 5 | Paketierung | `lib/` wird committet → Installation ohne Build-Schritt |
+| 6 | **Mehr können** | Agentic-Programming-Defaults: Spalte „Ready for test" vor „Done", neue Tasks ins Backlog, git-Feature-Branch-Automatik |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -64,6 +65,30 @@ Die englische Fassung dieser Übersicht steht im README unter
    `allowBuilds`-Freigabe installiert. Es gibt bewusst **keinen**
    `prepare`-Hook. Nach Änderungen an `src/` also `pnpm build` ausführen und das
    gebaute `lib/` mitcommitten.
+6. **Agentic-Programming-Defaults** — der Board-Ablauf ist auf agentische
+   Programmierung zugeschnitten:
+   - Spaltenreihenfolge: `backlog → todo → running → ready_for_test → done →
+     failed`; „Ready for test" sitzt direkt vor „Done".
+   - Neue Tasks landen im **Backlog** und müssen manuell nach „Todo" gezogen
+     werden. Der Backlog→Todo-Zug ist der Startschuss des Workflows.
+   - Ein erfolgreicher Lauf (`succeeded`) parkt die Karte in **Ready for test**;
+     „Done" wird ausschließlich manuell erreicht (Runner-Settles erzeugen es nie).
+   - **Git-Integration** (`src/git-workflow.ts`, nur wenn die gepinnte
+     Workspace ein git-Worktree ist, sonst überall No-op):
+     Backlog→Todo legt den Feature-Branch `task/<titel-slug>-<id8>` an
+     (Basis: aktueller Branch bzw. `main`/`master`, damit eine zweite Karte
+     nicht auf der ersten aufsetzt); fehlt der Branch bei einem Start, der den
+     Todo-Zug übersprungen hat (Cron, direkt nach „In progress" gezogen), wird
+     er beim Start nachgeholt; vor jedem Lauf wird dieser Branch
+     ausgecheckt („In progress" arbeitet darauf); Ready-for-test→Done
+     committet die Änderungen im Worktree (`task: <titel>`, nur wenn dirty) und
+     merged den Branch mit `--no-ff` zurück in den Basis-Branch. Schlägt git
+     fehl (z. B. Merge-Konflikt), schlägt der Spaltenwechsel fehl und die Karte
+     bleibt in „Ready for test" — kein stiller Merge.
+   - Grenzen: git greift nur bei gepinnter Workspace (ohne Pin ist nicht
+     bekannt, welches Repo gemeint ist); ein einzelner Worktree wird geteilt,
+     was zum Default-WIP-Limit 1 passt — parallele Läufe (`maxConcurrentRuns > 1`)
+     würden sich beim Auschecken überholen.
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

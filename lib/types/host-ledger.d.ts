@@ -1,6 +1,7 @@
 import { type ExecutionRecord, type TaskRecord } from './core/tasks.ts';
 import { type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts';
 import { type TaskPermission } from './core/handover.ts';
+import type { GitWorkflow } from './git-workflow.ts';
 export interface LedgerState {
     revision: number;
     tasks: TaskRecord[];
@@ -50,8 +51,11 @@ export declare class HostTaskLedger {
     readonly schedulerFile: string;
     /** Session-default permission the confirmation gate compares against. */
     readonly sessionDefaultPermission: TaskPermission;
+    /** Optional git integration; undefined disables the branch/merge hooks. */
+    private readonly git;
     constructor(dir?: string, now?: () => number, options?: {
         sessionDefaultPermission?: TaskPermission;
+        git?: GitWorkflow;
     });
     /** Remove leftover *.tmp-* files from previous crashes or interrupted writes. */
     private cleanStaleTemporaryFiles;
@@ -72,6 +76,13 @@ export declare class HostTaskLedger {
     /** Return value-only references for schedules due at the supplied Host time. */
     dueSchedules(now: number): DueScheduleReference[];
     subscribe(listener: () => void): () => void;
+    /**
+     * Ensure the card has a feature branch before it starts. The backlog → todo
+     * pull normally opens it; a cron trigger, a drag straight to "In progress",
+     * or the detail Run button may bypass that, and those runs must not land on
+     * the base branch. No-op without a repository or when a branch already exists.
+     */
+    private withFeatureBranch;
     dispose(): void;
     applyRequest(requestId: string, action: TaskBoardAction, initiator?: string): {
         state: LedgerState;

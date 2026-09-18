@@ -29,8 +29,7 @@ export interface StorageEvents {
 }
 /** A task record is structurally valid if it round-trips through the UI. */
 export declare function isTaskRecord(value: unknown): value is TaskRecord;
-/** Parse + validate a persisted ledger document; invalid rows are dropped. */
-export declare function parseLedger(raw: string | null): TaskRecord[];
+/** Parse + validate a persisted ledger document; invalid rows are dropped. */ export declare function parseLedger(raw: string | null): TaskRecord[];
 /** localStorage-backed store (the browser backend). */
 export declare class LocalStorageTaskStore implements TaskStore {
     private readonly key;

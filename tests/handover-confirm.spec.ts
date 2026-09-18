@@ -136,7 +136,7 @@ describe('confirmation gate: unconfirmed high-permission binding refuses executi
     const { service } = makeService(ledger, () => NOW)
     expect(() => service.apply('req-run', { kind: 'run', taskId: 'card' })).toThrow(/confirmation-required/)
     expect(ledger.state().tasks[0].executions).toEqual([])
-    expect(ledger.state().tasks[0].status).toBe('todo')
+    expect(ledger.state().tasks[0].status).toBe('backlog')
     service.dispose()
   })
 

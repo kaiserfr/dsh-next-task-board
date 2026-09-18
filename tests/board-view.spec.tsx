@@ -178,8 +178,44 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     expect(moveCalls).toEqual([{ id: 't-backlog', status: 'todo' }])
   })
 
-  it('drops a todo card onto the running column and starts it like Run', async () => {
+  it('renders Ready for test directly before Done', async () => {
     const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+    await act(async () => { root.render(<TaskBoard controller={fakeController()} />) })
+
+    const statuses = Array.from(container.querySelectorAll('section[data-status]'))
+      .map(column => column.getAttribute('data-status'))
+    expect(statuses[statuses.indexOf('ready_for_test') + 1]).toBe('done')
+  })
+
+  it('drops a ready_for_test card onto the done column and triggers controller.moveTask', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+
+    const moveCalls: Array<{ id: string; status: string }> = []
+    const controller = fakeController(
+      { tasks: [task({ id: 't-ready', status: 'ready_for_test' })] },
+      { moveTask: (id, status) => { moveCalls.push({ id, status }) } },
+    )
+    await act(async () => { root.render(<TaskBoard controller={controller} />) })
+
+    const doneColumn = container.querySelector('section[data-status="done"]')
+    expect(doneColumn).not.toBeNull()
+    const dataTransfer = { getData: (type: string) => (type === 'text/plain' ? 't-ready' : '') }
+    await act(async () => {
+      doneColumn!.dispatchEvent(
+        Object.assign(new Event('drop', { bubbles: true, cancelable: true }), { dataTransfer }),
+      )
+    })
+
+    expect(moveCalls).toEqual([{ id: 't-ready', status: 'done' }])
+  })
+
+  it('drops a todo card onto the running column and starts it like Run', async () => {    const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
     roots.push(root)

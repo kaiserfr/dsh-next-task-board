@@ -393,7 +393,7 @@ describe('run loop', () => {
     const task = controller.createTask({ title: 'x', description: '', prompt: '' })!
     expect(await controller.runTask(task.id)).toBe(false)
     await controller.rerunTask(task.id)
-    expect(controller.getSnapshot().tasks[0].status).toBe('todo')
+    expect(controller.getSnapshot().tasks[0].status).toBe('backlog')
   })
 })
 

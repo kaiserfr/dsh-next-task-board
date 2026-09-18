@@ -197,7 +197,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.setConfiguration(false, false)
     await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
     expect(ledger.state().tasks[0].executions[0].result).toBe('succeeded')
-    expect(ledger.state().tasks[0].status).toBe('done')
+    expect(ledger.state().tasks[0].status).toBe('ready_for_test')
     expect(stream).toHaveBeenCalledOnce()
     service.dispose()
   })

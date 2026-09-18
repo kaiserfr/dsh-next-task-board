@@ -32,7 +32,7 @@ export const DEFAULT_PROXY_TOKEN_ENV = 'DSH_TASK_BOARD_PROXY_TOKEN'
 export const inject = ['systemPrompt', 'typertGateway', 'workspaceRegistry', 'webServer', 'agents', 'commands']
 
 /** Model-facing announcement: plugin presence, capabilities, and limits. */
-export const TASK_BOARD_GUIDANCE = '本机已安装 dsh-next-task-board 插件（DSH Web GUI 的任务看板，kaiserfr/dsh-next-task-board 维护的 dsh-task-board 分支）：侧边栏「任务看板」入口；Host 按 WIP 上限串行/限流执行（设置命名空间 task-board 的 maxConcurrentRuns，默认 1），超出的运行先排队、按先来后到在名额空出后启动，排队中的卡片已显示为进行中但尚无会话。能力：多列看板管理任务；Host 权威账本；关闭浏览器后仍由 Host 执行和结算；任务可钉住工作区、agent 预设和权限；支持 Host 本地时区的 5 段 cron，错过的触发点不补跑；可选且默认关闭的空闲系统睡眠保护允许屏幕熄灭，但不承诺拦截合盖、手动睡眠、休眠、关机或唤醒已睡眠机器。执行消耗 API 额度。用户提到「任务看板 / 看板 / 定时任务」时即指本插件，请据此协作。若你同时用 todo_write 维护会话顶部的可见计划列表，最终回复前必须再次调用 todo_write 收尾：没有剩余工作时不要保留 in_progress，已完成的最后一步要标为 completed。'
+export const TASK_BOARD_GUIDANCE = '本机已安装 dsh-next-task-board 插件（DSH Web GUI 的任务看板，kaiserfr/dsh-next-task-board 维护的 dsh-task-board 分支）：侧边栏「任务看板」入口；Host 按 WIP 上限串行/限流执行（设置命名空间 task-board 的 maxConcurrentRuns，默认 1），超出的运行先排队、按先来后到在名额空出后启动，排队中的卡片已显示为进行中但尚无会话。列为：待规划 → 待办 → 进行中 → 待测试 → 已完成 → 已失败；新任务落在待规划，需人工拖到待办；执行成功后卡片停在待测试，只有人工移到已完成才会结束。工作区若是本地 git 仓库：拖到待办开 feature 分支、进行中在该分支上工作、移到已完成时提交改动并把分支合并回基线分支。能力：多列看板管理任务；Host 权威账本；关闭浏览器后仍由 Host 执行和结算；任务可钉住工作区、agent 预设和权限；支持 Host 本地时区的 5 段 cron，错过的触发点不补跑；可选且默认关闭的空闲系统睡眠保护允许屏幕熄灭，但不承诺拦截合盖、手动睡眠、休眠、关机或唤醒已睡眠机器。执行消耗 API 额度。用户提到「任务看板 / 看板 / 定时任务」时即指本插件，请据此协作。若你同时用 todo_write 维护会话顶部的可见计划列表，最终回复前必须再次调用 todo_write 收尾：没有剩余工作时不要保留 in_progress，已完成的最后一步要标为 completed。'
 
 /**
  * Settings namespace of the board's announcement capability — the section the

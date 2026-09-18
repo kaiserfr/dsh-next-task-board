@@ -3,6 +3,7 @@ import { nextRunAtMs } from './core/schedule.ts'
 import { reusableSessionId } from './core/session-reuse.ts'
 import { HostTaskLedger, type OpenedRun, type OpenExecutionReference } from './host-ledger.ts'
 import { HostExecutionRunner, SessionLaunchError, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import { GitWorkflow } from './git-workflow.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts'
 import type { TaskPermission } from './core/handover.ts'
@@ -15,6 +16,8 @@ export class TaskBoardHostService {
   readonly ledger: HostTaskLedger
   readonly runner: HostExecutionRunner
   readonly power: PowerInhibitor
+  /** Shared git integration: branch hooks in the ledger, checkout before a run. */
+  readonly git: GitWorkflow
   private readonly listeners = new Set<() => void>()
   private timers: Array<ReturnType<typeof setInterval>> = []
   private lastScheduleTick: number | undefined
@@ -46,8 +49,10 @@ export class TaskBoardHostService {
     commandDispatcher?: SessionCommandDispatcher
     workspaceRegistry?: TaskBoardWorkspaceRegistry
     sessionDefaultPermission?: TaskPermission
+    git?: GitWorkflow
   } = {}) {
-    this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission })
+    this.git = options.git ?? new GitWorkflow(options.workspaceRegistry)
+    this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git })
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry)
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
@@ -159,6 +164,9 @@ export class TaskBoardHostService {
 
   private async launch(opened: OpenedRun): Promise<void> {
     try {
+      // Work happens on the card's feature branch: check it out in the pinned
+      // workspace worktree before the session starts (no-op without git state).
+      this.git.useBranch(opened.task)
       const reuseSessionId = reusableSessionId(opened.task, this.idleSessionIds)
       const sessionId = await this.runner.launch(opened.task, reuseSessionId === undefined ? {} : { reuseSessionId })
       this.ledger.attachSession(opened.task.id, opened.execution.id, sessionId)

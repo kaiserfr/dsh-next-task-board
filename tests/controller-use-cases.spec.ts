@@ -112,9 +112,9 @@ describe('use-case: update content editability', () => {
     expect(running.status).toBe('running')
     expect(canEditTaskContent(running)).toBe(false)
 
-    const done = settleExecution(running, 'e-run', 'succeeded', NOW + 1, undefined)
-    expect(done.status).toBe('done')
-    expect(canEditTaskContent(done)).toBe(false)
+    const parked = settleExecution(running, 'e-run', 'succeeded', NOW + 1, undefined)
+    expect(parked.status).toBe('ready_for_test')
+    expect(canEditTaskContent(parked)).toBe(false)
 
     const cancelled = settleExecution(startExecution(fresh, NOW, 'e-cancel').task, 'e-cancel', 'cancelled', NOW + 1, undefined)
     expect(cancelled.status).toBe('todo')

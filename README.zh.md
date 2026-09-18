@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-> **分支版本 — `kaiserfr/dsh-next-task-board`。** 上游为 [`zhu1090093659/dsh-web` 的 `packages/dsh-task-board`](https://github.com/zhu1090093659/dsh-web/tree/dev/packages/dsh-task-board)（基线 **0.3.23**，Apache-2.0）。本分支新增 Host 侧 **WIP 并发上限** 与 **把卡片拖到 running 列即启动**，并移除上游的安装心跳遥测——详见[本分支相对上游的增强](#本分支相对上游的增强)与 [FORK-NOTES.md](FORK-NOTES.md)。
+> **分支版本 — `kaiserfr/dsh-next-task-board`。** 上游为 [`zhu1090093659/dsh-web` 的 `packages/dsh-task-board`](https://github.com/zhu1090093659/dsh-web/tree/dev/packages/dsh-task-board)（基线 **0.3.23**，Apache-2.0）。本分支新增 Host 侧 **WIP 并发上限**、**把卡片拖到 running 列即启动** 与 **面向 agentic programming 的默认流程**（Ready for test 列、新任务入 Backlog、自动开 feature 分支并在完成时合并），并移除上游的安装心跳遥测——详见[本分支相对上游的增强](#本分支相对上游的增强)与 [FORK-NOTES.md](FORK-NOTES.md)。
 
 一个可热插拔的 DeepSeek Harness (DSH) Web GUI 插件，提供 Host 权威任务账本、真实 DSH 会话执行、Host cron 调度和可选的跨平台空闲睡眠保护。插件只通过 `cordis.patch.yml` 与 profile 机制挂载，不修改 DSH 源码。
 
@@ -18,6 +18,8 @@
 | --- | --- | --- |
 | **执行并发** | 到点即启动，不限制同时持有会话的运行数。 | **Host 侧 WIP 上限** `maxConcurrentRuns`（默认 **1**）：超出的运行先入 FIFO 队列，按先来后到、在某个运行结算后立刻启动。 |
 | **从看板启动** | 拖拽只是在 `backlog` 与 `todo` 之间手动改状态。 | **把卡片拖到 running 列即启动任务**，与详情页「运行」按钮走同一个宿主动作。 |
+| **看板流程** | 五列；新任务落在 `todo`。 | **面向 agentic programming 的默认值**：六列，**待测试（Ready for test）** 紧邻 Done 之前；新任务落在 **Backlog**；执行成功后卡片停在 Ready for test，Done 只能手动到达。 |
+| **Git 集成** | 无。 | 卡片钉住的工作区若是本地 git 仓库：**进入 Todo 时开 `task/<slug>-<id8>` 分支，运行时检出该分支，进入 Done 时提交改动并把分支合并回基线分支**（没有仓库时全部为 no-op）。 |
 | **遥测** | 客户端每个 UTC 日向 `dsh-market.com` 发送一次匿名安装心跳。 | **已移除**：挂载时不再发送心跳；`src/client/telemetry.ts` 文件保留以备自建端点，但客户端入口不再引用。 |
 | **分发方式** | 属于 `dsh-web` monorepo，从 npm 或 `web-ui-all` 聚合包安装。 | **独立仓库**：`lib/` 随仓库提交，`dsh plugin --profile web add github:kaiserfr/dsh-next-task-board` 无需构建步骤，也无需 `allowBuilds` 批准。 |
 | **Agent 播报** | 播报 `dsh-task-board` 与上游聚合包。 | 播报本分支名称，并向 agent 说明 WIP 排队语义。 |
@@ -36,9 +38,20 @@
 - `running` 列是拖放目标，发送与详情页「运行」按钮相同的 Host `rerun` 动作，任务真正经过 Host 队列启动，而不是仅在本地改状态。
 - 排队中、运行中、已归档以及未知的卡片一律忽略；`backlog`/`todo` 仍是纯手动状态切换。
 
+### Agentic-programming 流程与 Git 集成
+
+- 列顺序：`backlog → todo → running → ready_for_test → done → failed`。
+- 新任务创建在 **Backlog**；把卡片拖进 **Todo** 就是人工下达的开工信号。
+- 执行成功把卡片停在 **Ready for test**（失败则进入 Failed）；runner 不会产生 `done`，验收永远是人工动作。
+- 卡片钉住的工作区是 git worktree 时，Host 在后台把工作留在 feature 分支上：
+  - Backlog → Todo 开 `task/<标题slug>-<id8>`，从当前分支切出（若 HEAD 已在看板分支上则以 `main`/`master` 为基线，避免第二张卡叠在第一张上）。
+  - 每次运行前检出该分支，即「In progress」在该分支上工作；若启动跳过了 Todo（cron、直接拖到 running 或详情页运行按钮），则在启动时补开分支。
+  - Ready for test → Done 提交工作区里的改动，并用 `--no-ff` 把分支合并回基线分支。git 失败（如合并冲突）会让这次移动失败，卡片留在 Ready for test。
+- 边界：git 需要钉住工作区（没有 pin 就无法知道指哪个仓库）；整个流程共用一个 worktree，与默认 WIP 上限 1 匹配——并行运行（`maxConcurrentRuns > 1`）会在检出上互相干扰。
+
 ## 功能
 
-- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供五列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。卡片可在 backlog 与 todo 两列之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页「运行」按钮相同的宿主动作，真正启动该任务**（本分支新增）**。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
+- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供六列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。新任务落在 Backlog，卡片可在 Backlog、Todo、Ready for test、Done 之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页「运行」按钮相同的宿主动作，真正启动该任务**（本分支新增）**。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
 - **Host 侧 WIP 并发上限（本分支新增）**：同一时间最多 `maxConcurrentRuns` 个任务运行持有会话（默认 `1`）；其余手动与 cron 运行进入 FIFO 队列，在某个运行结算后按先来后到启动。详见[本分支相对上游的增强](#本分支相对上游的增强)。
 - **续接卡片（数据面）**：新建任务时可粘贴会话输出的 `<<<FREEZE … >>>FREEZE` 冻结块，解析为「目标/进度/下一步」快照随任务持久化（v3 账本）；卡片带冻结徽标，详情页可读完整快照与冻结时间，搜索覆盖快照文本，归档/恢复与普通任务一致。快照在协议层复用冻结安全门：敏感模式自动替换为 `[REDACTED]` 并标记、以 `/` 开头的命令行整体拒绝、每字段 8 KiB 上限。
 - **交接包与权限确认门**：续接卡片可附交接包——钉住三元组（工作区/agent 预设/权限）加文档与脚本引用。执行时交接包三元组覆盖普通钉住字段，引用以交接前言随 Prompt 下发。有效权限高于 `sessionDefaultPermission`（默认 `read-only`）的绑定处于待确认状态：手动执行被拒绝、cron 跳过该卡并滚动到下一触发点，任务详情中的确认按钮完成人工确认；此后任何权限或交接包变更都会重新武装确认门。
