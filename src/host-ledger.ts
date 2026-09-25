@@ -5,10 +5,12 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import { canMoveManually, retainRecentExecutions, settleExecution, startExecution, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, normalizeReworkNote, retainRecentExecutions, settleExecution, startExecution, taskLane, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
 import { applyDeleteTask } from './core/use-cases/task-delete.ts'
+import { enforceDoneLimit } from './core/use-cases/done-limit.ts'
 import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-schedule.ts'
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
 import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
@@ -52,6 +54,8 @@ export interface OpenExecutionReference {
   readonly executionId: string
   readonly sessionId: string | undefined
   readonly startedAt: number
+  /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
+  readonly lane: string
 }
 
 /** Minimal value copy used by the Host scheduler. */
@@ -79,6 +83,13 @@ function timeZone(): string {
 
 function cloneTasks(tasks: readonly TaskRecord[]): TaskRecord[] {
   return JSON.parse(JSON.stringify(tasks)) as TaskRecord[]
+}
+
+/** Clamp a configured Done-column limit; a missing/invalid value keeps the default. */
+function normalizeMaxDoneTasks(limit: number | undefined): number {
+  return limit !== undefined && Number.isFinite(limit)
+    ? Math.max(1, Math.floor(limit))
+    : DEFAULT_MAX_DONE_TASKS
 }
 
 function hasOpenExecution(task: TaskRecord): boolean {
@@ -294,9 +305,17 @@ export class HostTaskLedger {
   /** Optional git integration; undefined disables the branch/merge hooks. */
   private readonly git: GitWorkflow | undefined
 
-  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission; git?: GitWorkflow } = {}) {
+  /** Done-column limit: on-board `done` cards allowed before FIFO displacement. */
+  private maxDoneTasks: number
+
+  /** The configurable state machine that validates every move and names its actions. */
+  private machine: StateMachine
+
+  constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission; git?: GitWorkflow; maxDoneTasks?: number; stateMachine?: unknown } = {}) {
     this.sessionDefaultPermission = options.sessionDefaultPermission ?? DEFAULT_SESSION_PERMISSION
     this.git = options.git
+    this.maxDoneTasks = normalizeMaxDoneTasks(options.maxDoneTasks)
+    this.machine = resolveStateMachine(options.stateMachine).machine
     mkdirSync(dir, { recursive: true })
     this.file = join(dir, 'ledger-v2.json')
     this.lockFile = join(dir, 'ledger-v2.lock')
@@ -349,6 +368,44 @@ export class HostTaskLedger {
   }
 
   /**
+   * The state machine currently in force, i.e. what the Host validates moves
+   * against and what the browser renders its columns and drop targets from.
+   */
+  get stateMachine(): StateMachine {
+    return this.machine
+  }
+
+  /**
+   * Apply the board's state machine (settings namespace `task-board`, field
+   * `stateMachine`). Takes effect on the next move; an invalid config is
+   * ignored by the resolver, which keeps the machine already in force.
+   * @param config - raw machine config; undefined keeps the shipped machine.
+   * @returns the refusals of an invalid config (empty when it was applied).
+   */
+  setStateMachine(config: unknown): string[] {
+    const resolved = resolveStateMachine(config)
+    this.machine = resolved.machine
+    return resolved.errors
+  }
+
+  /**
+   * Apply the board's Done-column limit (settings namespace `task-board`,
+   * `maxDoneTasks`) and converge the column immediately: an already over-limit
+   * `done` column (a lowered limit, restored cards, a freshly imported ledger)
+   * is trimmed right here, so the board never keeps showing more than N cards
+   * until the next move. Displacement keeps the FIFO order and archives (never
+   * deletes) exactly the surplus.
+   * @param limit - configured maximum; values below 1 or non-finite keep the default.
+   */
+  setMaxDoneTasks(limit: number): void {
+    this.maxDoneTasks = normalizeMaxDoneTasks(limit)
+    const { tasks, archivedIds } = enforceDoneLimit(this.document.tasks, this.maxDoneTasks, this.now())
+    if (archivedIds.length === 0) return
+    this.document.tasks = [...tasks]
+    this.commit()
+  }
+
+  /**
    * Runtime-only projection for the 5 s Host poll. It copies just primitive
    * identifiers and timestamps, never the complete task/execution history or
    * an authoritative mutable object from the ledger.
@@ -365,6 +422,7 @@ export class HostTaskLedger {
           executionId: execution.id,
           sessionId: execution.sessionId,
           startedAt: execution.startedAt,
+          lane: taskLane(task),
         })
       }
     }
@@ -407,6 +465,24 @@ export class HostTaskLedger {
     if (task.git !== undefined) return task
     const opened = this.git?.openBranch(task)
     return opened === undefined ? task : { ...task, git: opened }
+  }
+
+  /**
+   * The card's `git` after a transition's git hooks ran, in configured order.
+   * `"git": false` on the transition skips them entirely; without a repository
+   * the hooks are no-ops. Shared by the single-card and the batch move so a
+   * group drop fires exactly the hooks a single drop of the same card would.
+   */
+  private transitionGit(task: TaskRecord, transition: StateTransition, now: number): TaskRecord['git'] {
+    let gitTask = transition.git === false ? task : undefined
+    for (const action of transition.actions ?? []) {
+      if (action === 'git.openBranch' && gitTask === undefined) gitTask = this.withFeatureBranch(task)
+      else if (action === 'git.mergeBranch' && gitTask === undefined) {
+        const merged = this.git?.mergeBranch(task, now)
+        gitTask = merged === undefined ? task : { ...task, git: merged }
+      }
+    }
+    return (gitTask ?? task).git
   }
 
   dispose(): void {
@@ -551,7 +627,7 @@ export class HostTaskLedger {
         const input = action.input.freeze === undefined || initiator === undefined || initiator === ''
           ? action.input
           : { ...action.input, freeze: { ...action.input.freeze, frozenBy: initiator } }
-        const result = applyCreateTask(this.document.tasks, input, now, action.id)
+        const result = applyCreateTask(this.document.tasks, input, now, action.id, this.machine.initialStatus)
         if (result.task === undefined) throw new Error('invalid task')
         this.document.tasks = [...result.tasks]
         break
@@ -560,12 +636,14 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(task => task.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-        // The task content (title/description/prompt) is the record of what
-        // was planned; once an execution started it must not change under a
-        // running session or an executed history. Execution targets stay
-        // editable (they only affect future runs).
+        // The task content (title/description/prompt and the parse source) is
+        // the record of what was planned. It stays editable only while the
+        // card waits in a pre-execution column: a running task must not change
+        // under its session, and a card that moved on to
+        // ready_for_test/done/failed keeps the content that ran. Execution
+        // targets stay editable (they only affect future runs).
         if (hasContentPatch(action.patch) && !canEditTaskContent(task)) {
-          throw new Error('task has already been executed')
+          throw new Error('task content is locked outside backlog and todo')
         }
         if ('title' in action.patch && action.patch.title?.trim() === '') throw new Error('title is required')
         // A replaced snapshot is re-stamped with the updating session (the
@@ -589,20 +667,76 @@ export class HostTaskLedger {
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
-        if (!canMoveManually(task.status, action.status)) throw new Error('invalid manual status')
-        // Git hooks of the agentic-programming flow (no-ops without a repo):
-        // pulling a card from backlog into todo opens its feature branch, and
-        // accepting the work (ready_for_test → done) commits and merges it back
-        // into the base branch. Both fail the move when git refuses, so the
-        // card never claims a branch or a merge that did not happen.
-        const git = task.status === 'backlog' && action.status === 'todo'
-          ? this.git?.openBranch(task) ?? task.git
-          : task.status === 'ready_for_test' && action.status === 'done'
-            ? this.git?.mergeBranch(task, now) ?? task.git
-            : task.git
-        this.document.tasks = this.document.tasks.map(item => item.id === action.taskId
-          ? { ...withStatus(item, action.status, now), ...(git === undefined ? {} : { git }) }
+        // The state machine decides whether this move exists at all: an
+        // unconfigured transition is refused here, not in the browser. The
+        // browser validates its drop targets against the same machine.
+        const transition = this.machine.transition(task.status, action.status, 'manual')
+        if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → ${action.status}`)
+        // Transition actions, in their configured order: the git hooks of the
+        // agentic-programming workflow (no-ops without a repository), then the
+        // `run` action that opens an execution. A git hook that throws fails
+        // the whole move, so a card never claims a branch or merge that did
+        // not happen. `"git": false` on the transition skips the hooks.
+        const actions = transition.actions ?? []
+        const git = this.transitionGit(task, transition, now)
+        // `run` moves the card by opening an execution (drag onto the run
+        // column); everything else is a plain status change. The execution's
+        // entry column is the transition target, so a configured machine may
+        // park runs wherever its `run` transitions point.
+        if (actions.includes('run')) {
+          if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
+            throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
+          }
+          const opened = startExecution(
+            { ...withStatus(task, action.status, now), ...(git === undefined ? {} : { git }) },
+            now,
+            crypto.randomUUID(),
+            initiator,
+          )
+          run = { task: { ...opened.task, status: action.status }, execution: opened.execution }
+        }
+        const moved = this.document.tasks.map(item => item.id === action.taskId
+          ? run === undefined
+            ? { ...withStatus(item, action.status, now), ...(git === undefined ? {} : { git }) }
+            : run.task
           : item)
+        // The Done-column limit: a move that would leave more than N on-board
+        // cards in `done` archives the oldest ones (FIFO) until it holds again.
+        // Every other column is untouched and surviving cards keep their order.
+        this.document.tasks = action.status === 'done'
+          ? [...enforceDoneLimit(moved, this.maxDoneTasks, now).tasks]
+          : moved
+        break
+      }
+      case 'move-many': {
+        // Group drag: validate every card in the batch before writing any, so
+        // an invalid card aborts the whole drop and the ledger is untouched
+        // (the browser only submits cards whose transition it already checked;
+        // this is the authority for the ones it did not).
+        const batch = action.taskIds.map(id => {
+          const task = this.document.tasks.find(item => item.id === id)
+          if (task === undefined) throw new Error(`task not found: ${id}`)
+          if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+          if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
+          const transition = this.machine.transition(task.status, action.status, 'manual')
+          if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → ${action.status}`)
+          // A batch never opens executions: the runner owns the single run
+          // slot and the board routes the run column through `rerun`.
+          if ((transition.actions ?? []).includes('run')) throw new Error('batch move cannot start executions')
+          return { task, transition }
+        })
+        const moved = new Map<string, TaskRecord>()
+        for (const { task, transition } of batch) {
+          const git = this.transitionGit(task, transition, now)
+          moved.set(task.id, { ...withStatus(task, action.status, now), ...(git === undefined ? {} : { git }) })
+        }
+        // `map` over the ledger array keeps every untouched card in place and
+        // the moved cards in their existing order among themselves; the
+        // Done-column limit then trims exactly as the single-card move does.
+        const next = this.document.tasks.map(item => moved.get(item.id) ?? item)
+        this.document.tasks = action.status === 'done'
+          ? [...enforceDoneLimit(next, this.maxDoneTasks, now).tasks]
+          : next
         break
       }
       case 'archive': {
@@ -632,6 +766,33 @@ export class HostTaskLedger {
         const result = applySetSchedule(this.document.tasks, action.taskId, action.patch, now)
         if (!result.applied) throw new Error('invalid schedule')
         this.document.tasks = [...result.tasks]
+        break
+      }
+      case 'rework': {
+        // Send a card back for correction with the reviewer's note attached.
+        // The machine still decides whether the move exists at all (in the
+        // built-in machine: `ready_for_test → todo`), so a host that has been
+        // configured without that transition refuses the rework instead of
+        // inventing it. The note itself is data, not an action: it is stored on
+        // the card and consumed by the card's next run.
+        const task = this.document.tasks.find(item => item.id === action.taskId)
+        if (task === undefined) throw new Error('task not found')
+        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+        if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
+        // The wire gate already normalizes the note; the authority re-checks it
+        // here so no other entry point can open a round with a blank remark.
+        const note = normalizeReworkNote(action.note)
+        if (note === undefined) throw new Error('rework needs a non-blank note')
+        const transition = this.machine.transition(task.status, 'todo', 'manual')
+        if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → todo`)
+        // A rework only parks the card back in `todo`: the human decides when
+        // the agent works again, and the run slot stays owned by the run
+        // transitions (drag onto the run column, the detail Run button, cron).
+        if ((transition.actions ?? []).includes('run')) throw new Error('rework cannot start an execution')
+        const git = this.transitionGit(task, transition, now)
+        this.document.tasks = this.document.tasks.map(item => item.id === task.id
+          ? { ...withStatus(item, 'todo', now), ...(git === undefined ? {} : { git }), reworkNote: note }
+          : item)
         break
       }
       case 'rerun':

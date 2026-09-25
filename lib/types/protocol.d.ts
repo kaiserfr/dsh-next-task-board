@@ -1,5 +1,6 @@
 import type { TaskUpdatePatch } from './core/use-cases/task-update.ts';
 import { type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts';
+import type { StateMachineConfig } from './core/state-machine.ts';
 export declare const TASK_BOARD_SCHEMA_VERSION: 3;
 /** Ledger documents written before v3; loaded once and migrated on startup. */
 export declare const TASK_BOARD_LEGACY_SCHEMA_VERSION: 2;
@@ -29,6 +30,13 @@ export interface TaskBoardSnapshot {
     power: TaskBoardPowerSnapshot;
     /** Session-default permission the confirmation gate compares against. */
     sessionDefaultPermission?: TaskPermission;
+    /**
+     * The state machine the Host is enforcing: the columns the board renders and
+     * the transitions (with their actions) a drag & drop is validated against.
+     * Absent on a snapshot from an older Host; the browser then falls back to the
+     * shipped machine.
+     */
+    stateMachine?: StateMachineConfig;
 }
 /** SSE event frame: revision/scheduler/power only, never the task list. */
 export interface TaskBoardEventPayload {
@@ -75,6 +83,10 @@ export type TaskBoardAction = {
     taskId: string;
     status: TaskStatus;
 } | {
+    kind: 'move-many';
+    taskIds: string[];
+    status: TaskStatus;
+} | {
     kind: 'archive';
     taskId: string;
 } | {
@@ -94,6 +106,10 @@ export type TaskBoardAction = {
     kind: 'rerun';
     taskId: string;
 } | {
+    kind: 'rework';
+    taskId: string;
+    note: string;
+} | {
     kind: 'confirm-permission';
     taskId: string;
 };
@@ -107,4 +123,10 @@ export interface TaskBoardActionEnvelope {
      */
     initiator?: string;
 }
+/**
+ * Upper bound on one `move-many` batch. The board's group drag submits at most
+ * every on-board card at once; the cap keeps a hand-crafted request from
+ * making the Host do unbounded work in a single ledger write.
+ */
+export declare const MAX_BATCH_MOVE = 500;
 export declare function parseActionEnvelope(value: unknown): TaskBoardActionEnvelope | undefined;

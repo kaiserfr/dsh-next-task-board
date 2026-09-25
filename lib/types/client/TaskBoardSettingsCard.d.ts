@@ -5,8 +5,9 @@
  */
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client';
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client';
 import { type CardActions, type CardShell, type FieldState as CardFieldState } from './settings-form.ts';
+import { type StateMachineConfig } from '../core/state-machine.ts';
 /** The task-board fields this card edits (the namespace's full schema). */
 export interface TaskBoardSettings {
     /** Master switch for the plugin. */
@@ -15,8 +16,12 @@ export interface TaskBoardSettings {
     announceToAgent?: boolean;
     /** Prevent host idle sleep while sessions run or schedules are armed. */
     preventIdleSleep?: boolean;
-    /** WIP limit: how many task runs may hold a session at once (default 1). */
+    /** WIP limit per workspace: how many task runs of one workspace may hold a session at once (default 1). */
     maxConcurrentRuns?: number;
+    /** Done-column limit: on-board Done cards before the oldest is archived (default 20). */
+    maxDoneTasks?: number;
+    /** The board's state machine: columns, allowed transitions, transition actions. */
+    stateMachine?: StateMachineConfig;
 }
 /** What the task-board card renders. */
 export interface TaskBoardSettingsCardState extends CardShell {
@@ -28,6 +33,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
     preventIdleSleep: CardFieldState;
     /** WIP limit draft. */
     maxConcurrentRuns: CardFieldState;
+    /** Done-column limit draft. */
+    maxDoneTasks: CardFieldState;
+    /** State-machine JSON draft. */
+    stateMachine: CardFieldState;
 }
 /** The registration-side face the card's slot entry injects. */
 export interface TaskBoardSettingsCardFace extends CardActions {
@@ -41,7 +50,7 @@ export declare class TaskBoardSettingsCardController {
     private readonly form;
     private readonly store;
     /** @param scope - the bound settings scope for the `task-board` namespace. */
-    constructor(scope: SettingsScope<TaskBoardSettings>);
+    constructor(scope: ConfigForm<TaskBoardSettings>);
     private projection;
     /**
      * Build the face the card's slot registration injects.

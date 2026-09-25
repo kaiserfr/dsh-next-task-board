@@ -10,8 +10,9 @@
  * - `ready_for_test` → `done` (a human accepts the work) commits what the run
  *   left behind and merges the feature branch back into its base branch.
  *
- * The board runs one execution at a time by default (WIP limit 1), so one
- * shared worktree is enough; concurrent runs would race on the checkout.
+ * The board's WIP limit is per workspace (WIP lane), so runs of one workspace
+ * never overlap and one shared worktree per workspace is enough; different
+ * workspaces have their own worktrees and `useBranch` targets the card's own.
  */
 import { spawnSync } from 'node:child_process'
 import type { TaskGit, TaskRecord } from './core/tasks.ts'

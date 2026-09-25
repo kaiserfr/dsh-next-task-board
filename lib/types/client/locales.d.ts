@@ -35,6 +35,8 @@ export declare const zh: {
     'board.hostError.timeout': string;
     'board.hostError.unreachable': string;
     'board.hostError.unexpected': string;
+    'board.sessionOpenError': string;
+    'board.dismiss': string;
     'board.project': string;
     'board.projectAll': string;
     'board.projectNew': string;
@@ -74,6 +76,9 @@ export declare const zh: {
     'detail.freeze.frozenBy': string;
     'detail.freeze.redacted': string;
     'card.frozen': string;
+    'card.running': string;
+    'card.queued': string;
+    'card.openSession': string;
     'new.handover': string;
     'new.handoverPlaceholder': string;
     'detail.handover': string;
@@ -89,6 +94,9 @@ export declare const zh: {
     'new.tagRemove': string;
     'board.tagFilter': string;
     'board.tagFilterClear': string;
+    'board.selectedCount': string;
+    'board.selectionClear': string;
+    'board.dragCount': string;
     'board.tagEmpty': string;
     'detail.permissionPending': string;
     'detail.permissionConfirm': string;
@@ -101,9 +109,17 @@ export declare const zh: {
     'detail.close': string;
     'edit.title': string;
     'edit.save': string;
+    'edit.aiParseHint': string;
     'new.duplicateTitle': string;
     'new.archiveOriginal': string;
     'detail.prompt': string;
+    'detail.rework.label': string;
+    'detail.rework.hint': string;
+    'detail.rework.placeholder': string;
+    'detail.rework.send': string;
+    'detail.rework.pending': string;
+    'detail.rework.pendingHint': string;
+    'detail.execution.reworkNote': string;
     'detail.description': string;
     'detail.execution': string;
     'detail.noExecution': string;
@@ -177,6 +193,10 @@ export declare const zh: {
     'settings.preventIdleSleepHint': string;
     'settings.maxConcurrentRuns': string;
     'settings.maxConcurrentRunsHint': string;
+    'settings.maxDoneTasks': string;
+    'settings.maxDoneTasksHint': string;
+    'settings.stateMachine': string;
+    'settings.stateMachineHint': string;
     'settings.powerStatus': string;
     'settings.powerBoundary': string;
     'settings.powerUnknown': string;

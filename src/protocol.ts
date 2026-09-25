@@ -1,5 +1,6 @@
 import type { TaskUpdatePatch } from './core/use-cases/task-update.ts'
-import { isTaskPermission, isTaskStatus, isTaskTagList, type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts'
+import { isTaskPermission, isTaskStatus, isTaskTagList, normalizeReworkNote, type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts'
+import type { StateMachineConfig } from './core/state-machine.ts'
 import { parseLedger } from './core/store.ts'
 import { sanitizeFreezeSnapshot, type FreezeSnapshot } from './core/freeze-snapshot.ts'
 import { sanitizeHandover, type TaskHandoverInput } from './core/handover.ts'
@@ -40,6 +41,13 @@ export interface TaskBoardSnapshot {
   power: TaskBoardPowerSnapshot
   /** Session-default permission the confirmation gate compares against. */
   sessionDefaultPermission?: TaskPermission
+  /**
+   * The state machine the Host is enforcing: the columns the board renders and
+   * the transitions (with their actions) a drag & drop is validated against.
+   * Absent on a snapshot from an older Host; the browser then falls back to the
+   * shipped machine.
+   */
+  stateMachine?: StateMachineConfig
 }
 
 /** SSE event frame: revision/scheduler/power only, never the task list. */
@@ -89,11 +97,13 @@ export type TaskBoardAction =
   | { kind: 'update'; taskId: string; patch: TaskUpdatePatch }
   | { kind: 'delete'; taskId: string }
   | { kind: 'move'; taskId: string; status: TaskStatus }
+  | { kind: 'move-many'; taskIds: string[]; status: TaskStatus }
   | { kind: 'archive'; taskId: string }
   | { kind: 'restore'; taskId: string }
   | { kind: 'set-schedule'; taskId: string; patch: { enabled?: boolean; cron?: string } }
   | { kind: 'run'; taskId: string }
   | { kind: 'rerun'; taskId: string }
+  | { kind: 'rework'; taskId: string; note: string }
   | { kind: 'confirm-permission'; taskId: string }
 
 export interface TaskBoardActionEnvelope {
@@ -122,6 +132,14 @@ function optionalString(value: unknown): boolean {
 }
 
 const FORBIDDEN_IMPORT_FIELDS = new Set(['args', 'command', 'executable', 'powershell', 'shell'])
+
+/**
+ * Upper bound on one `move-many` batch. The board's group drag submits at most
+ * every on-board card at once; the cap keeps a hand-crafted request from
+ * making the Host do unbounded work in a single ledger write.
+ */
+export const MAX_BATCH_MOVE = 500
+
 
 function hasForbiddenImportField(value: unknown): boolean {
   if (Array.isArray(value)) return value.some(hasForbiddenImportField)
@@ -170,6 +188,7 @@ function importedTask(value: unknown): TaskRecord | undefined {
     title: task.title,
     description: task.description,
     prompt: task.prompt,
+    ...(task.parseText === undefined ? {} : { parseText: task.parseText }),
     status: task.status,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
@@ -197,6 +216,7 @@ function importedTask(value: unknown): TaskRecord | undefined {
     ...(task.permission === undefined ? {} : { permission: task.permission }),
     ...(task.reuseSession === undefined ? {} : { reuseSession: task.reuseSession }),
     ...(task.archivedAt === undefined ? {} : { archivedAt: task.archivedAt }),
+    ...(task.doneAt === undefined ? {} : { doneAt: task.doneAt }),
     ...(task.freeze === undefined ? {} : { freeze: task.freeze }),
     ...(task.handover === undefined ? {} : { handover: task.handover }),
     ...(task.tags === undefined ? {} : { tags: task.tags }),
@@ -233,8 +253,9 @@ function handoverPayload(value: unknown): TaskHandoverInput | undefined {
 
 function createInput(value: unknown): value is NewTaskInput {
   const input = record(value)
-  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'tags'])) return false
+  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'tags'])) return false
   if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.prompt !== 'string') return false
+  if (!optionalString(input.parseText)) return false
   if (!optionalString(input.workspaceId) || !optionalString(input.mode) || !optionalString(input.model)) return false
   if (input.reuseSession !== undefined && typeof input.reuseSession !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false
@@ -251,10 +272,10 @@ function createInput(value: unknown): value is NewTaskInput {
 
 function updatePatch(value: unknown): boolean {
   const patch = record(value)
-  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'tags'])) return false
+  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'tags'])) return false
   // null (or false) clears the reuse opt-in; only a real boolean is accepted.
   if (patch.reuseSession !== undefined && patch.reuseSession !== null && typeof patch.reuseSession !== 'boolean') return false
-  for (const key of ['title', 'description', 'prompt', 'workspaceId', 'mode', 'model'] as const) {
+  for (const key of ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'model'] as const) {
     if (!optionalString(patch[key])) return false
   }
   if (patch.permission !== undefined && !isTaskPermission(patch.permission)) return false
@@ -336,6 +357,30 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
       return taskId !== undefined && isTaskStatus(action.status)
         ? { requestId: envelope.requestId, action: action as unknown as Extract<TaskBoardAction, { kind: 'move' }> }
         : undefined
+    case 'move-many': {
+      if (!exactKeys(action, ['kind', 'taskIds', 'status'])) return undefined
+      const raw = action.taskIds
+      if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_BATCH_MOVE) return undefined
+      if (!raw.every(id => typeof id === 'string' && id !== '')) return undefined
+      if (!isTaskStatus(action.status)) return undefined
+      // Dedupe so one card is never written twice; the Host keeps the cards'
+      // ledger order among themselves.
+      return {
+        requestId: envelope.requestId,
+        action: { kind: 'move-many', taskIds: [...new Set(raw)], status: action.status },
+      }
+    }
+    case 'rework': {
+      // Send a card back for correction with the reviewer's note. The move
+      // itself is validated against the machine in the ledger; the gate only
+      // proves the note is a usable string, so a blank remark can never open a
+      // rework round (and never reach a session).
+      if (!exactKeys(action, ['kind', 'taskId', 'note'])) return undefined
+      const note = normalizeReworkNote(action.note)
+      return taskId === undefined || note === undefined
+        ? undefined
+        : { requestId: envelope.requestId, action: { kind: 'rework', taskId, note } }
+    }
     case 'confirm-permission':
     case 'delete':
     case 'archive':

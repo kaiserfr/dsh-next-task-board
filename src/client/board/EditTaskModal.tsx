@@ -1,15 +1,17 @@
 /**
  * Edit-task modal: title + description + the prompt the next execution will
- * send, pre-filled from the task. Shown only for tasks that have never
- * started executing (the detail view gates on canEditTaskContent); the Host
- * still re-checks at submit, so a task that started running while the modal
- * was open fails closed and the error surfaces here.
+ * send, pre-filled from the task, plus the task's "Parse with AI" source text
+ * so the user can rewrite it and fill the fields again. Shown only for tasks
+ * that still sit in a pre-execution column (the detail view gates on
+ * canEditTaskContent); the Host still re-checks at submit, so a task that
+ * started running while the modal was open fails closed and the error surfaces
+ * here.
  */
 import { useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { collectKnownTags, type TaskRecord, type TaskTag } from '../../core/tasks.ts'
 import { t } from '../locales.ts'
-import { ModalShell, TaskContentFields, TaskTagFields, cleanTags } from './TaskForm.tsx'
+import { AiParseSection, ModalShell, TaskContentFields, TaskTagFields, cleanTags, parseSourceText, useAiParse } from './TaskForm.tsx'
 
 /** Edit-task form overlay. */
 export function EditTaskModal({ controller, task, onClose }: { controller: BoardController; task: TaskRecord; onClose: () => void }) {
@@ -19,6 +21,18 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
   const [tags, setTags] = useState<TaskTag[]>(task.tags ?? [])
   const [error, setError] = useState<string | undefined>(undefined)
   const [pending, setPending] = useState(false)
+  const [canParse] = useState(controller.getSnapshot().canParseTask === true)
+  // The box opens on the text the card was created with; when that text is
+  // gone it opens on the card's own title/description/prompt, so the user can
+  // rewrite that block and run "Parse and fill" again. That fallback is derived
+  // and stays frozen for the modal's lifetime, so it can be told apart from a
+  // text the user actually worked in.
+  const [openingText] = useState(() => parseSourceText(task))
+  const parse = useAiParse(controller, openingText, draft => {
+    setTitle(draft.title)
+    setDescription(draft.description)
+    setPrompt(draft.prompt)
+  })
 
   const submit = async (): Promise<void> => {
     if (title.trim() === '') {
@@ -36,6 +50,11 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
       title,
       description,
       prompt,
+      // The source round-trips only where the deployment can parse, and only
+      // when the user actually worked in the box: an untouched box leaves the
+      // stored text as it is, so a card that never used the box does not
+      // suddenly carry the derived fallback as its source.
+      ...(canParse && parse.text !== openingText ? { parseText: parse.text } : {}),
       ...(tagList.length > 0 ? { tags: tagList } : (task.tags === undefined ? {} : { tags: null })),
     }
     if (await controller.updateTask(task.id, patch)) {
@@ -56,6 +75,8 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
       onSubmit={() => { void submit() }}
       onClose={onClose}
     >
+      {canParse && <AiParseSection parse={parse} hintKey="edit.aiParseHint" />}
+
       <TaskContentFields
         title={title}
         description={description}

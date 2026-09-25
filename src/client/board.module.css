@@ -277,10 +277,22 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 
 /* --- cards -------------------------------------------------------------------- */
 
+/* Card + its sibling session link. The link must not live inside the card
+   button (a button may not hold interactive content, and a nested anchor is
+   not keyboard-reachable), so the wrapper positions it over the card corner
+   while the button keeps the whole card surface and its drag behavior. */
+.cardBox {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
 .card {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  width: 100%;
+  box-sizing: border-box;
   padding: 10px 12px;
   text-align: left;
   background: var(--dsw-alias-bg-base);
@@ -292,6 +304,13 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   transition: box-shadow 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
 
+/* Reserve the card's right edge for the session link in the bottom corner, so
+   the meta row's chips never run under it (and the 1px-smaller executing
+   variant below re-reserves it). */
+.card[data-has-session] {
+  padding-right: 30px;
+}
+
 .card:hover {
   box-shadow: var(--dsw-shadow-lv2);
   border-color: var(--dsw-alias-border-l3);
@@ -300,6 +319,76 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 
 .card[data-status='running'] {
   border-color: var(--dsw-alias-state-warn-primary);
+}
+
+/* The card the runner is executing right now: warn-tinted surface, thick warn
+   border and a pulsing ring. Deliberately louder than the thin `data-status`
+   border above, so the card that actually holds a session stands out from the
+   queued cards of the same column (which keep only that thin border).
+   The 1px-smaller padding keeps the outer card box the same size as a plain
+   card's (1px border + 10/12px padding). */
+.card[data-executing='true'] {
+  padding: 9px 11px;
+  border: 2px solid var(--dsw-alias-state-warn-primary);
+  background: var(--dsw-alias-state-warn-tertiary);
+  box-shadow: 0 0 0 2px var(--dsw-alias-state-warn-primary);
+  animation: dshTbRunningPulse 1.6s ease-in-out infinite;
+}
+
+/* The executing variant's padding shorthand resets the corner reservation. */
+.card[data-executing='true'][data-has-session] {
+  padding-right: 29px;
+}
+
+@keyframes dshTbRunningPulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--dsw-alias-state-warn-primary); }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--dsw-alias-state-warn-primary) 50%, transparent); }
+}
+
+/* --- multi-selection ---------------------------------------------------------- */
+
+/* Selected for a group drag: the accent border and tint make membership
+   unmistakable at a glance, independent of the status colour. */
+.card[data-selected='true'] {
+  border-color: var(--dsw-alias-button-info-fill);
+  background: color-mix(in srgb, var(--dsw-alias-button-info-fill) 12%, var(--dsw-alias-bg-base));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-button-info-fill) 38%, transparent);
+}
+
+/* Cards currently under the cursor read as "in flight" while the badge names
+   how many cards the drop will carry. */
+.card[data-dragging='true'] {
+  opacity: 0.55;
+}
+
+.dragBadge {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--dsw-alias-button-info-fill);
+  color: var(--dsw-alias-label-primary-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: var(--dsw-shadow-lv3);
+  pointer-events: none;
+}
+
+/* Header chip: names the selection size and offers the explicit way out. */
+.selectionBar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-button-info-fill);
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-active);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .cardTitle {
@@ -361,14 +450,48 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   color: var(--dsw-alias-state-success-primary);
 }
 
+/* Direct card → session link: a bare glyph in the card's bottom corner, over
+   the meta row. It is a sibling of the card button (the wrapper is the
+   positioning context), so the card keeps a single click target for the detail
+   and the link stays keyboard-reachable. The card reserves the corner via
+   [data-has-session] (see above). No ring/background on purpose: the glyph
+   itself is the affordance, only hover and focus draw attention to it. */
 .cardSession {
-  flex: none;
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px;
   color: var(--dsw-alias-state-business-primary);
+  font-size: 16px;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.cardSession:hover {
+  color: var(--dsw-alias-label-primary);
 }
 
 .cardRunningLabel {
   font-size: 11px;
   color: var(--dsw-alias-state-warn-primary);
+}
+
+/* "Running now" tag of the executing card: a light chip on the warn-tinted
+   surface, label colour kept on the theme's primary label so the text stays
+   readable on every skin (same reasoning as the tag badges). */
+.cardExecutingBadge {
+  align-self: flex-start;
+  padding: 1px 8px;
+  border: 1px solid var(--dsw-alias-state-warn-primary);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
 }
 
 .cardSpinner {
@@ -1027,6 +1150,7 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 /* --- one themed focus-visible ring (approx 2px, 2px offset) --- */
 .entry:focus-visible,
 .card:focus-visible,
+.cardSession:focus-visible,
 .primaryButton:focus-visible,
 .ghostButton:focus-visible,
 .dangerButton:focus-visible,
@@ -1124,6 +1248,11 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   }
 
   .cardSpinner {
+    animation: none;
+  }
+
+  /* keep the static ring and the heavier border, drop the pulse */
+  .card[data-executing='true'] {
     animation: none;
   }
 }

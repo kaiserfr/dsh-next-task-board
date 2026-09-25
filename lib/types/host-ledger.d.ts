@@ -1,4 +1,5 @@
 import { type ExecutionRecord, type TaskRecord } from './core/tasks.ts';
+import { type StateMachine } from './core/state-machine.ts';
 import { type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts';
 import { type TaskPermission } from './core/handover.ts';
 import type { GitWorkflow } from './git-workflow.ts';
@@ -17,6 +18,8 @@ export interface OpenExecutionReference {
     readonly executionId: string;
     readonly sessionId: string | undefined;
     readonly startedAt: number;
+    /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
+    readonly lane: string;
 }
 /** Minimal value copy used by the Host scheduler. */
 export interface DueScheduleReference {
@@ -53,9 +56,15 @@ export declare class HostTaskLedger {
     readonly sessionDefaultPermission: TaskPermission;
     /** Optional git integration; undefined disables the branch/merge hooks. */
     private readonly git;
+    /** Done-column limit: on-board `done` cards allowed before FIFO displacement. */
+    private maxDoneTasks;
+    /** The configurable state machine that validates every move and names its actions. */
+    private machine;
     constructor(dir?: string, now?: () => number, options?: {
         sessionDefaultPermission?: TaskPermission;
         git?: GitWorkflow;
+        maxDoneTasks?: number;
+        stateMachine?: unknown;
     });
     /** Remove leftover *.tmp-* files from previous crashes or interrupted writes. */
     private cleanStaleTemporaryFiles;
@@ -65,6 +74,29 @@ export declare class HostTaskLedger {
         scheduler: TaskBoardSchedulerSnapshot;
     };
     state(): LedgerState;
+    /**
+     * The state machine currently in force, i.e. what the Host validates moves
+     * against and what the browser renders its columns and drop targets from.
+     */
+    get stateMachine(): StateMachine;
+    /**
+     * Apply the board's state machine (settings namespace `task-board`, field
+     * `stateMachine`). Takes effect on the next move; an invalid config is
+     * ignored by the resolver, which keeps the machine already in force.
+     * @param config - raw machine config; undefined keeps the shipped machine.
+     * @returns the refusals of an invalid config (empty when it was applied).
+     */
+    setStateMachine(config: unknown): string[];
+    /**
+     * Apply the board's Done-column limit (settings namespace `task-board`,
+     * `maxDoneTasks`) and converge the column immediately: an already over-limit
+     * `done` column (a lowered limit, restored cards, a freshly imported ledger)
+     * is trimmed right here, so the board never keeps showing more than N cards
+     * until the next move. Displacement keeps the FIFO order and archives (never
+     * deletes) exactly the surplus.
+     * @param limit - configured maximum; values below 1 or non-finite keep the default.
+     */
+    setMaxDoneTasks(limit: number): void;
     /**
      * Runtime-only projection for the 5 s Host poll. It copies just primitive
      * identifiers and timestamps, never the complete task/execution history or
@@ -83,6 +115,13 @@ export declare class HostTaskLedger {
      * the base branch. No-op without a repository or when a branch already exists.
      */
     private withFeatureBranch;
+    /**
+     * The card's `git` after a transition's git hooks ran, in configured order.
+     * `"git": false` on the transition skips them entirely; without a repository
+     * the hooks are no-ops. Shared by the single-card and the batch move so a
+     * group drop fires exactly the hooks a single drop of the same card would.
+     */
+    private transitionGit;
     dispose(): void;
     applyRequest(requestId: string, action: TaskBoardAction, initiator?: string): {
         state: LedgerState;

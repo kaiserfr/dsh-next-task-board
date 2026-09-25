@@ -1,20 +1,77 @@
 /**
  * Board view: the multi-column kanban that replaces the middle column while
- * active. Cards open the task detail (never execute directly); the header
- * offers filter, new-task, and a back-to-chat escape.
+ * active. A card click marks it (Ctrl/Cmd adds one, Shift marks the range up to
+ * the anchor), a double click opens the task detail (never executes directly);
+ * the header offers filter, new-task, and a back-to-chat escape.
  */
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
-import { COLUMNS, MANUAL_STATUSES, canMoveManually, collectKnownTags, tagTone, type TaskRecord } from '../../core/tasks.ts'
+import { collectKnownTags, compareWipOrder, tagTone, type TaskRecord, type TaskStatus } from '../../core/tasks.ts'
+import { resolveStateMachine } from '../../core/state-machine.ts'
 import { t } from '../locales.ts'
 import css from '../board.module.css'
 import { NewTaskModal } from './NewTaskModal.tsx'
-import { STATUS_KEY } from './status-key.ts'
-import { TaskCard } from './TaskCard.tsx'
+import { isCardDraggable, TaskCard } from './TaskCard.tsx'
 import { TaskDetail } from './TaskDetail.tsx'
+import type { TaskBoardKey } from '../locales.ts'
 
 /** Sentinel option value of the project row's "register a new project" entry. */
 export const NEW_PROJECT_VALUE = '__dsh_new_project__'
+
+/**
+ * Drag payload MIME type carrying the whole group: a JSON array of card ids in
+ * board (display) order. `text/plain` keeps the lead card's id so an external
+ * drop target, an older board, or a plain single-card drag still works.
+ */
+export const BATCH_DRAG_MIME = 'application/x-dsh-taskboard-cards'
+
+/** Stable empty set, so clearing the drag marker keeps the same reference. */
+const NO_IDS: ReadonlySet<string> = new Set<string>()
+
+type BoardMachine = ReturnType<typeof resolveStateMachine>['machine']
+
+/**
+ * Dropping onto a column whose transition carries the `run` action starts the
+ * task (the same Host action as the detail view's Run button): the machine
+ * declares that entry, the runner owns it. Such a column accepts the drop even
+ * with `"drop": false` (the shipped `running` column does).
+ */
+function isRunColumn(machine: BoardMachine, status: TaskStatus): boolean {
+  return machine.config.transitions.some(item => item.to === status && (item.actions ?? []).includes('run'))
+}
+
+/**
+ * The cards of one column in the order the board renders them. The
+ * runner-owned column reads as a work queue — the card being executed now sits
+ * on top, the runs still waiting for a WIP slot follow in arrival order (the
+ * card dragged in last sits at the bottom) — every other column keeps the
+ * ledger's order. Rendering and the Shift-click range share this, so the two
+ * never disagree about what "between two cards" means.
+ */
+function columnTasks(machine: BoardMachine, visible: readonly TaskRecord[], status: TaskStatus): TaskRecord[] {
+  const tasks = visible.filter(task => task.status === status)
+  if (isRunColumn(machine, status)) tasks.sort(compareWipOrder)
+  return tasks
+}
+
+/**
+ * The dragged card ids: the batch payload when present and well-formed, else
+ * the lead id from `text/plain` (single-card drags and older writers).
+ */
+export function readDragIds(dataTransfer: DataTransfer, lead: string): string[] {
+  const raw = typeof dataTransfer.getData === 'function' ? dataTransfer.getData(BATCH_DRAG_MIME) : ''
+  if (raw !== '') {
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(id => typeof id === 'string' && id !== '')) {
+        return parsed
+      }
+    } catch {
+      // Malformed payload: fall back to the lead id below.
+    }
+  }
+  return lead === '' ? [] : [lead]
+}
 
 /** Case-insensitive title/description/tag/freeze-snapshot match. */
 export function matchesFilter(task: TaskRecord, filter: string): boolean {
@@ -43,9 +100,38 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, timeZone, onOpen }: { task: TaskRecord; pending: boolean; timeZone?: string; onOpen: (id: string) => void }) {
-  const onClick = useCallback(() => { onOpen(task.id) }, [task.id, onOpen])
-  return <TaskCard task={task} pending={pending} timeZone={timeZone} onClick={onClick} />
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, timeZone, selected, dragging, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession }: {
+  task: TaskRecord
+  pending: boolean
+  timeZone?: string
+  selected: boolean
+  dragging: boolean
+  onSelect: (id: string, event: ReactMouseEvent<HTMLButtonElement>) => void
+  onKeySelect: (id: string, event: ReactKeyboardEvent<HTMLButtonElement>) => void
+  onOpen: (id: string) => void
+  onDragStart: (id: string, event: ReactDragEvent<HTMLButtonElement>) => void
+  onDragEnd: () => void
+  onOpenSession: (sessionId: string) => void
+}) {
+  const onClick = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => { onSelect(task.id, event) }, [task.id, onSelect])
+  const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => { onKeySelect(task.id, event) }, [task.id, onKeySelect])
+  const onDoubleClick = useCallback(() => { onOpen(task.id) }, [task.id, onOpen])
+  const onStart = useCallback((event: ReactDragEvent<HTMLButtonElement>) => { onDragStart(task.id, event) }, [task.id, onDragStart])
+  return (
+    <TaskCard
+      task={task}
+      pending={pending}
+      timeZone={timeZone}
+      selected={selected}
+      dragging={dragging}
+      onClick={onClick}
+      onKeyDown={onKeyDown}
+      onDoubleClick={onDoubleClick}
+      onDragStart={onStart}
+      onDragEnd={onDragEnd}
+      onOpenSession={onOpenSession}
+    />
+  )
 })
 
 /** Board component; subscribes to the controller snapshot. */
@@ -65,17 +151,46 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const [newProjectPath, setNewProjectPath] = useState('')
   const [newProjectError, setNewProjectError] = useState<string | undefined>(undefined)
   const [newProjectPending, setNewProjectPending] = useState(false)
+  // Multi-selection (a browser-only view state, like the filter): the cards a
+  // group drag carries. `dragIds` marks the set currently under the cursor so
+  // the board can render the moved cards and the counter while dragging.
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(NO_IDS)
+  const [dragIds, setDragIds] = useState<ReadonlySet<string>>(NO_IDS)
+  // The Shift range starts at the anchor: the card the last plain or Ctrl click
+  // landed on. A ref, not state, so marking a card never changes the memoized
+  // cards' props — only the cards whose `selected` flag flips re-render.
+  const anchorRef = useRef<string | undefined>(undefined)
   const selected = selectedTaskOf(snapshot)
   const archiveView = snapshot.archiveView
+  // The Host sends the machine it enforces; without one (older Host, tests)
+  // the shipped machine applies. Columns, their labels, and which drops are
+  // allowed all come from here — the board's columns *are* the task states.
+  const machine = resolveStateMachine(snapshot.host?.stateMachine).machine
   // Every label in use across the ledger (board and archive alike), so the
   // filter never loses an option just because its task was archived.
   const knownTags = collectKnownTags(snapshot.tasks)
+  const pendingSet = useMemo(() => new Set(snapshot.pendingTaskIds), [snapshot.pendingTaskIds])
   // Archived tasks leave the columns; the archive view shows them instead.
-  const visible = snapshot.tasks.filter(task =>
+  // Memoized so the memoized cards keep their memo boundary across renders.
+  const visible = useMemo(() => snapshot.tasks.filter(task =>
     (archiveView ? task.archivedAt !== undefined : task.archivedAt === undefined)
     && (projectId === '' || task.workspaceId === projectId)
     && matchesFilter(task, filter)
     && matchesTagFilter(task, tagFilter),
+  ), [snapshot.tasks, archiveView, projectId, filter, tagFilter])
+  // The selection as it can actually be dragged: cards still on the board and
+  // not owned by the runner. A card that left the board (archived/deleted) or
+  // started running drops out here without a second source of truth.
+  const selectableIds = useMemo(
+    () => visible.filter(task => selectedIds.has(task.id) && isCardDraggable(task, pendingSet.has(task.id))).map(task => task.id),
+    [visible, selectedIds, pendingSet],
+  )
+  // The rendered card order — columns left to right, cards top to bottom within
+  // a column — which is the reference order a Shift click walks. Empty in the
+  // archive view: archived cards are read-only and never selectable.
+  const boardOrderIds = useMemo(
+    () => (archiveView ? [] : machine.states.flatMap(column => columnTasks(machine, visible, column.status).map(task => task.id))),
+    [archiveView, machine, visible],
   )
   const projects = snapshot.executionOptions.workspaces
   const canCreateProject = snapshot.canCreateWorkspace === true
@@ -100,10 +215,131 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       ? current.filter(entry => entry !== name)
       : [...current, name])
   }, [])
-  const openTask = useCallback((id: string): void => { controller.openTask(id) }, [controller])
+  const clearSelection = useCallback((): void => {
+    anchorRef.current = undefined
+    setSelectedIds(current => current.size === 0 ? current : NO_IDS)
+  }, [])
+  // The card mark, the way a file manager does it:
+  //   click        → this card alone becomes the selection (and the new anchor)
+  //   Ctrl/Cmd     → toggles this card in or out of the selection
+  //   Shift        → the range from the anchor to this card, in board order
+  //   Space        → the same three marks from the keyboard (selectCardByKey)
+  //   double click → open the detail (below); Enter does the same, because the
+  //                  browser turns it into the button's own click
+  // Archived cards are read-only: they always open, never select.
+  //
+  // Marking is shared by the mouse and the keyboard; the two entry points only
+  // differ in how they read the modifiers off their event.
+  const markCard = useCallback((id: string, modifiers: { shift: boolean; toggle: boolean }): void => {
+    const to = boardOrderIds.indexOf(id)
+    if (to < 0) return
+    if (modifiers.shift) {
+      const from = anchorRef.current === undefined ? -1 : boardOrderIds.indexOf(anchorRef.current)
+      // Without a (still visible) anchor there is no range to walk: the clicked
+      // card becomes the anchor itself.
+      if (from < 0) {
+        anchorRef.current = id
+        setSelectedIds(new Set([id]))
+        return
+      }
+      setSelectedIds(new Set(boardOrderIds.slice(Math.min(from, to), Math.max(from, to) + 1)))
+      return
+    }
+    if (modifiers.toggle) {
+      anchorRef.current = id
+      setSelectedIds(current => {
+        const next = new Set(current)
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+        return next
+      })
+      return
+    }
+    anchorRef.current = id
+    setSelectedIds(new Set([id]))
+  }, [boardOrderIds])
+  const selectCard = useCallback((id: string, event: ReactMouseEvent<HTMLButtonElement>): void => {
+    if (archiveView) { controller.openTask(id); return }
+    // A click carrying no mouse position is a keyboard/AT activation of the
+    // button, not a click on a spot; it keeps the direct route to the detail.
+    if (event.detail === 0) { controller.openTask(id); return }
+    markCard(id, { shift: event.shiftKey, toggle: event.metaKey || event.ctrlKey })
+  }, [archiveView, controller, markCard])
+  // Space is the keyboard's plain click: it marks the focused card with the
+  // same Shift/Ctrl semantics, so a keyboard has the whole marking vocabulary
+  // too. Enter is deliberately left alone — the browser's own click opens the
+  // detail through `selectCard` above. `preventDefault` suppresses both that
+  // synthetic click and the page scroll Space would otherwise start.
+  const selectCardByKey = useCallback((id: string, event: ReactKeyboardEvent<HTMLButtonElement>): void => {
+    if (event.key !== ' ') return
+    event.preventDefault()
+    if (archiveView) { controller.openTask(id); return }
+    markCard(id, { shift: event.shiftKey, toggle: event.metaKey || event.ctrlKey })
+  }, [archiveView, controller, markCard])
+  // The detail keeps the selection: marking cards and inspecting one of them
+  // are separate intentions.
+  const openDetail = useCallback((id: string): void => { controller.openTask(id) }, [controller])
+  // Direct card → session jump (active and inactive sessions alike). The
+  // controller refreshes a stale roster before it reports a failed jump.
+  const openSession = useCallback((sessionId: string): void => { controller.openSession?.(sessionId) }, [controller])
+  const endDrag = useCallback((): void => { setDragIds(NO_IDS) }, [])
+  // Drag start on a card: a selected card carries the whole draggable
+  // selection, any other card drags alone — the single-card behavior is
+  // untouched (requirement 3).
+  const startDrag = useCallback((id: string, event: ReactDragEvent<HTMLButtonElement>): void => {
+    const task = snapshot.tasks.find(item => item.id === id)
+    if (task === undefined || !isCardDraggable(task, pendingSet.has(id))) return
+    const ids = selectedIds.has(id) && selectableIds.includes(id) ? selectableIds : [id]
+    event.dataTransfer.setData('text/plain', id)
+    event.dataTransfer.setData(BATCH_DRAG_MIME, JSON.stringify(ids))
+    event.dataTransfer.effectAllowed = 'move'
+    setDragIds(new Set(ids))
+  }, [pendingSet, selectableIds, selectedIds, snapshot.tasks])
+  // One drop handler for every column. It takes the movable subset of the
+  // dragged cards: a card the machine does not allow into this column stays
+  // where it is, and a drop with nothing movable changes nothing at all.
+  const dropOnColumn = useCallback((columnStatus: TaskStatus, isRunTarget: boolean, event: ReactDragEvent<HTMLElement>): void => {
+    event.preventDefault()
+    const ids = readDragIds(event.dataTransfer, event.dataTransfer.getData('text/plain'))
+    setDragIds(NO_IDS)
+    const dragged = ids
+      .map(id => snapshot.tasks.find(task => task.id === id))
+      .filter((task): task is TaskRecord => task !== undefined)
+      .filter(task => isCardDraggable(task, pendingSet.has(task.id)))
+    const movable = dragged.filter(task => isRunTarget
+      ? task.status !== columnStatus && machine.actionsFor(task.status, columnStatus).includes('run')
+      : machine.canTransition(task.status, columnStatus))
+    if (movable.length === 0) return
+    // The runner owns the run entry; start each card in drag order so the
+    // queue keeps that order (the WIP limit still gates the launches).
+    if (isRunTarget) {
+      void (async () => {
+        for (const task of movable) await controller.rerunTask(task.id)
+      })()
+      clearSelection()
+      return
+    }
+    const moving = movable.map(task => task.id)
+    if (moving.length === 1) {
+      controller.moveTask(moving[0]!, columnStatus)
+      clearSelection()
+      return
+    }
+    void controller.moveTasks(moving, columnStatus).then(moved => { if (moved) clearSelection() })
+  }, [clearSelection, controller, machine, pendingSet, snapshot.tasks])
 
   return (
-    <div className={css.board} data-dsh-taskboard-board="" data-dsh-plugin="task-board">
+    <div
+      className={css.board}
+      data-dsh-taskboard-board=""
+      data-dsh-plugin="task-board"
+      // A click on free board space drops the selection; a click inside a card
+      // (or its session link) belongs to that card and is ignored.
+      onClick={(event) => {
+        if ((event.target as HTMLElement).closest('[data-dsh-part="card-box"]') !== null) return
+        clearSelection()
+      }}
+    >
       <header className={css.boardHeader}>
         {/* Shared hook: dsh-web-all offsets center-view back controls beside the collapsed mobile sidebar. */}
         <button
@@ -123,6 +359,14 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
               revision: String(snapshot.host.revision),
               timeZone: snapshot.host.scheduler.timeZone,
             })}
+          </span>
+        )}
+        {selectedIds.size > 0 && (
+          <span className={css.selectionBar} data-dsh-part="selection-bar" role="status">
+            {t('board.selectedCount', { count: String(selectedIds.size) })}
+            <button type="button" className={css.linkButton} onClick={clearSelection}>
+              {t('board.selectionClear')}
+            </button>
           </span>
         )}
         {(projects.length > 0 || canCreateProject) && (
@@ -162,7 +406,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         <button
           type="button"
           className={archiveView ? css.primaryButton : css.ghostButton}
-          onClick={() => { controller.toggleArchiveView() }}
+          onClick={() => { clearSelection(); controller.toggleArchiveView() }}
         >
           {archiveView
             ? t('board.backToBoard')
@@ -248,6 +492,21 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         </div>
       )}
 
+      {snapshot.sessionOpenError !== undefined && (
+        <div className={css.formError} data-dsh-part="session-error">
+          {t('board.sessionOpenError', { error: snapshot.sessionOpenError })}{' '}
+          <button type="button" className={css.linkButton} onClick={() => { controller.dismissSessionOpenError?.() }}>
+            {t('board.dismiss')}
+          </button>
+        </div>
+      )}
+
+      {dragIds.size > 1 && (
+        <div className={css.dragBadge} data-dsh-part="drag-count" role="status">
+          {t('board.dragCount', { count: String(dragIds.size) })}
+        </div>
+      )}
+
       <div className={css.columns}>
         {archiveView ? (
           <section className={css.column} data-status="archived" data-dsh-part="column">
@@ -257,7 +516,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             </header>
             <div className={css.cards}>
               {visible.map(task => (
-                <MemoTaskCard key={task.id} task={task} pending={snapshot.pendingTaskIds.includes(task.id)} timeZone={snapshot.host?.scheduler.timeZone} onOpen={openTask} />
+                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} />
               ))}
               {visible.length === 0 && (
                 <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('archive.empty')}</div>
@@ -265,14 +524,10 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             </div>
           </section>
         ) : (
-          COLUMNS.map(column => {
-            const tasks = visible.filter(task => task.status === column.status)
-            const isManualDropTarget = (MANUAL_STATUSES as readonly string[]).includes(column.status)
-            // Dropping onto the running column starts the task — same Host
-            // action as the detail view's Run button; the Host owns the
-            // running transition and the execution record.
-            const isRunDropTarget = column.status === 'running'
-            const isDropTarget = isManualDropTarget || isRunDropTarget
+          machine.states.map(column => {
+            const tasks = columnTasks(machine, visible, column.status)
+            const isRunDropTarget = isRunColumn(machine, column.status)
+            const isDropTarget = machine.acceptsDrop(column.status) || isRunDropTarget
             return (
               <section
                 key={column.status}
@@ -283,30 +538,16 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                   event.preventDefault()
                   event.dataTransfer.dropEffect = 'move'
                 } : undefined}
-                onDrop={isDropTarget ? (event) => {
-                  event.preventDefault()
-                  const taskId = event.dataTransfer.getData('text/plain')
-                  if (!taskId) return
-                  const dropped = snapshot.tasks.find(t => t.id === taskId)
-                  if (dropped === undefined || dropped.archivedAt !== undefined || dropped.status === 'running') return
-                  if (isRunDropTarget) {
-                    if (snapshot.pendingTaskIds.includes(taskId)) return
-                    void controller.rerunTask(taskId)
-                    return
-                  }
-                  if (canMoveManually(dropped.status, column.status) && dropped.status !== column.status) {
-                    controller.moveTask(taskId, column.status)
-                  }
-                } : undefined}
+                onDrop={isDropTarget ? (event) => { dropOnColumn(column.status, isRunDropTarget, event) } : undefined}
               >
                 <header className={css.columnHeader}>
                   <span className={css.statusDot} data-status={column.status} aria-hidden="true" />
-                  <h3 className={css.columnTitle}>{t(STATUS_KEY[column.status])}</h3>
+                  <h3 className={css.columnTitle}>{column.label ?? t(`board.status.${column.status}` as TaskBoardKey)}</h3>
                   <span className={css.columnCount}>{tasks.length}</span>
                 </header>
                 <div className={css.cards}>
                   {tasks.map(task => (
-                    <MemoTaskCard key={task.id} task={task} pending={snapshot.pendingTaskIds.includes(task.id)} timeZone={snapshot.host?.scheduler.timeZone} onOpen={openTask} />
+                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} />
                   ))}
                   {tasks.length === 0 && (
                     <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('board.empty')}</div>

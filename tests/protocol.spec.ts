@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createTask } from '../src/core/tasks.ts'
-import { parseActionEnvelope } from '../src/protocol.ts'
+import { MAX_BATCH_MOVE, parseActionEnvelope } from '../src/protocol.ts'
 
 describe('task-board action protocol', () => {
   it('accepts the versioned action union and rejects unknown executable fields', () => {
@@ -27,6 +27,25 @@ describe('task-board action protocol', () => {
       requestId: 'content-update-blank',
       action: { kind: 'update', taskId: 'task-a', patch: { title: '' } },
     })?.action.kind).toBe('update')
+  })
+
+  it('accepts the parse source in create input and update patch, and rejects non-strings', () => {
+    expect(parseActionEnvelope({
+      requestId: 'create-parse-source',
+      action: { kind: 'create', id: 'task-parse', input: { title: 'A', description: '', prompt: '', parseText: 'pasted' } },
+    })?.action.kind).toBe('create')
+    expect(parseActionEnvelope({
+      requestId: 'update-parse-source',
+      action: { kind: 'update', taskId: 'task-a', patch: { parseText: 'pasted' } },
+    })?.action.kind).toBe('update')
+    expect(parseActionEnvelope({
+      requestId: 'create-parse-source-bad',
+      action: { kind: 'create', id: 'task-parse', input: { title: 'A', description: '', prompt: '', parseText: 42 } },
+    })).toBeUndefined()
+    expect(parseActionEnvelope({
+      requestId: 'update-parse-source-bad',
+      action: { kind: 'update', taskId: 'task-a', patch: { parseText: 42 } },
+    })).toBeUndefined()
   })
 
   it('accepts model pinning in create input and update patch (#1359)', () => {
@@ -123,5 +142,31 @@ describe('task-board action protocol', () => {
       requestId: 'import-b',
       action: { kind: 'import', sourceId: 'browser-a', tasks: [{ ...task, schedule: { enabled: true, cron: '* * * * *', nextRunAt: Number.NaN } }] },
     })).toBeUndefined()
+  })
+})
+
+describe('task-board group move action (move-many)', () => {
+  it('accepts a batch and dedupes it', () => {
+    const parsed = parseActionEnvelope({
+      requestId: 'batch-a',
+      action: { kind: 'move-many', taskIds: ['a', 'b', 'a'], status: 'todo' },
+    })
+    expect(parsed?.action).toEqual({ kind: 'move-many', taskIds: ['a', 'b'], status: 'todo' })
+  })
+
+  it('rejects a batch with no cards, a blank id, a bad status, or extra keys', () => {
+    const base = { requestId: 'batch-b' }
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: [], status: 'todo' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a', ''], status: 'todo' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: [1], status: 'todo' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a'], status: 'nope' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a'], status: 'todo', extra: 1 } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', status: 'todo' } })).toBeUndefined()
+  })
+
+  it('caps the batch size', () => {
+    const ids = Array.from({ length: MAX_BATCH_MOVE }, (_, index) => `t-${index}`)
+    expect(parseActionEnvelope({ requestId: 'batch-max', action: { kind: 'move-many', taskIds: ids, status: 'todo' } })?.action.kind).toBe('move-many')
+    expect(parseActionEnvelope({ requestId: 'batch-over', action: { kind: 'move-many', taskIds: [...ids, 'one-more'], status: 'todo' } })).toBeUndefined()
   })
 })

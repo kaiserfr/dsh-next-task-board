@@ -50,6 +50,12 @@ export interface SessionsControllerFace {
   }
   /** Select a session as current (navigates the conversation view). */
   open(id: string): void
+  /**
+   * Re-pull the host-authoritative session roster. Used to reach an inactive
+   * session the local roster has not pulled yet; absent in the legacy/test
+   * face, where a failed open is reported instead.
+   */
+  refresh?: () => Promise<void>
 }
 
 function currentOf(sessions: SessionsControllerFace | undefined): string | undefined {
@@ -122,7 +128,13 @@ export interface ControllerSnapshot {
   /** Whether this deployment can parse pasted text into task fields (issue #1540). */
   canParseTask?: boolean
   transportError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission'>
+  /**
+   * A session jump that failed because the runtime does not know the id even
+   * after a roster refresh (the session was deleted, or it is unaddressable).
+   * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
+   */
+  sessionOpenError?: string
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -169,7 +181,8 @@ export class BoardController {
   private readonly pendingTaskIds = new Set<string>()
   private readonly taskQueues = new Map<string, Promise<void>>()
   private transportError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission'> | undefined
+  private sessionOpenError: string | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine'> | undefined
   private remoteSubscribed = false
   private remoteInitialization: Promise<boolean> | undefined
 
@@ -219,6 +232,7 @@ export class BoardController {
       ...(this.workspaceCreator === undefined ? {} : { canCreateWorkspace: true }),
       ...(typeof this.deps.transport?.parseDraft === 'function' ? { canParseTask: true } : {}),
       ...(this.transportError === undefined ? {} : { transportError: this.transportError }),
+      ...(this.sessionOpenError === undefined ? {} : { sessionOpenError: this.sessionOpenError }),
       ...(this.hostState === undefined ? {} : { host: this.hostState }),
     }
   }
@@ -371,6 +385,28 @@ export class BoardController {
     this.persistAndNotify()
   }
 
+  /**
+   * Move a group of cards to one status as a single ledger action (group drag).
+   * The Host validates the whole batch before writing any card, so the move is
+   * all-or-nothing and the cards keep their order among themselves.
+   * @param ids - the dragged cards; duplicates are ignored.
+   * @param status - the target column.
+   * @returns whether the Host accepted the batch (always true on the legacy
+   * in-memory path); the board clears its selection on success only.
+   */
+  async moveTasks(ids: readonly string[], status: TaskStatus): Promise<boolean> {
+    const unique = [...new Set(ids)]
+    if (unique.length === 0) return true
+    if (unique.length === 1) { this.moveTask(unique[0]!, status); return true }
+    if (this.deps.transport !== undefined) {
+      return await this.commitRemote({ kind: 'move-many', taskIds: unique, status })
+    }
+    const moving = new Set(unique)
+    this.tasks = this.tasks.map(task => moving.has(task.id) ? withStatus(task, status, this.now()) : task)
+    this.persistAndNotify()
+    return true
+  }
+
   deleteTask(id: string): void {
     if (this.deps.transport !== undefined) {
       void this.commitRemote({ kind: 'delete', taskId: id }, id)
@@ -457,13 +493,55 @@ export class BoardController {
   }
 
   /**
-   * Jump to an execution's session transcript. Selecting the session changes
-   * `current`, which closes the board (the conversation view takes over).
+   * Jump to an execution's session transcript — a live (running) session and
+   * an inactive (settled) one alike. Selecting the session changes `current`,
+   * which closes the board (the conversation view takes over).
+   *
+   * The runtime's `open` refuses any id the local session roster has not
+   * pulled (`sessions.select: unknown session …`) — the normal state of an
+   * older execution in a fresh tab or right after a host restart. The jump
+   * therefore refreshes the host-authoritative roster once and retries before
+   * it reports a failure, so an inactive session's link is never a dead
+   * control just because the list was stale.
    * @param sessionId - the execution session to open.
+   * @returns true when the session was selected synchronously.
    */
-  openSession(sessionId: string): void {
+  openSession(sessionId: string): boolean {
+    if (this.selectSession(sessionId)) return true
+    void this.refreshAndSelectSession(sessionId)
+    return false
+  }
+
+  /** Clear a failed session-jump notice. */
+  dismissSessionOpenError(): void {
+    if (this.sessionOpenError === undefined) return
+    this.sessionOpenError = undefined
+    this.notify()
+  }
+
+  /** Select and close the board; false when the runtime refuses the id. */
+  private selectSession(sessionId: string): boolean {
+    try {
+      this.deps.sessions.open(sessionId)
+    } catch {
+      return false
+    }
+    this.sessionOpenError = undefined
     this.closeBoard()
-    this.deps.sessions.open(sessionId)
+    return true
+  }
+
+  /** Second chance for an unlisted session: refresh the roster, then retry. */
+  private async refreshAndSelectSession(sessionId: string): Promise<void> {
+    const refresh = this.deps.sessions.refresh
+    if (refresh !== undefined) {
+      // A failed refresh is not fatal on its own: the roster may already hold
+      // the id, so the retry below stays the decider.
+      try { await refresh() } catch { /* fall through to the retry */ }
+    }
+    if (this.selectSession(sessionId)) return
+    this.sessionOpenError = `the runtime does not know ${sessionId} (id not in the session list after a refresh)`
+    this.notify()
   }
 
   // --- execution ---------------------------------------------------------------
@@ -504,6 +582,20 @@ export class BoardController {
     if (task === undefined || task.archivedAt !== undefined) return
     if (this.deps.transport === undefined) return
     await this.commitRemote({ kind: 'rerun', taskId: id }, id, currentOf(this.deps.sessions))
+  }
+
+  /**
+   * Send a card back for correction: the Host moves it to `todo` (validated
+   * against the state machine) and stores the reviewer's note on the card. The
+   * note is not a prompt edit — the next run delivers it as its own turn in the
+   * card's previous conversation. Without a Host transport the rework is
+   * refused (returns false), because only the Host may write the ledger.
+   */
+  async reworkTask(id: string, note: string): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined || task.archivedAt !== undefined) return false
+    if (this.deps.transport === undefined) return false
+    return await this.commitRemote({ kind: 'rework', taskId: id, note }, id, currentOf(this.deps.sessions))
   }
 
   // --- internals ---------------------------------------------------------------
@@ -600,7 +692,9 @@ export class BoardController {
     if (event !== undefined && this.hostState !== undefined && event.revision === this.hostState.revision
       && typeof event.scheduler === 'object' && event.scheduler !== null
       && typeof event.power === 'object' && event.power !== null) {
-      this.hostState = { revision: event.revision, scheduler: event.scheduler, power: event.power }
+      // The event frame carries revision/scheduler/power only; the machine
+      // (configuration, not state) is kept from the last full snapshot.
+      this.hostState = { ...this.hostState, revision: event.revision, scheduler: event.scheduler, power: event.power }
       this.notify()
       return
     }
@@ -630,7 +724,15 @@ export class BoardController {
     const sameGeneration = currentLedgerId === nextLedgerId
     if (sameGeneration && this.hostState !== undefined && snapshot.revision < this.hostState.revision) return false
     this.tasks = [...snapshot.tasks]
-    this.hostState = { revision: snapshot.revision, scheduler: snapshot.scheduler, power: snapshot.power }
+    this.hostState = {
+      ...this.hostState,
+      revision: snapshot.revision,
+      scheduler: snapshot.scheduler,
+      power: snapshot.power,
+      // A Host that predates the state machine sends none: keep the machine
+      // already in force (the shipped one) instead of clearing it.
+      ...(snapshot.stateMachine === undefined ? {} : { stateMachine: snapshot.stateMachine }),
+    }
     this.transportError = undefined
     if (this.selectedTaskId !== undefined && !this.tasks.some(task => task.id === this.selectedTaskId)) {
       this.selectedTaskId = undefined

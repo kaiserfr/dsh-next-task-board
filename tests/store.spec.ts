@@ -209,6 +209,19 @@ describe('parseLedger', () => {
     expect(parseLedger(JSON.stringify([{ ...optedIn, reuseSession: 'yes' }]))).toEqual([])
     expect(isTaskRecord({ ...optedIn, reuseSession: 3 })).toBe(false)
   })
+
+  it('keeps a stored parse source, collapses a blank one, and drops a non-string one', () => {
+    const withSource = createTask({ title: 'parse', description: '', prompt: '', parseText: '  pasted source  ' }, 1, 't-parse')
+    expect(withSource.parseText).toBe('pasted source')
+    expect(parseLedger(JSON.stringify([withSource]))[0].parseText).toBe('pasted source')
+
+    // Blank collapses to absent: "the text is gone" has one representation.
+    expect(parseLedger(JSON.stringify([{ ...withSource, parseText: '   ' }]))[0].parseText).toBeUndefined()
+
+    // A non-string fails the strict shape gate and drops the row.
+    expect(parseLedger(JSON.stringify([{ ...withSource, parseText: 42 }]))).toEqual([])
+    expect(isTaskRecord({ ...withSource, parseText: 42 })).toBe(false)
+  })
 })
 
 describe('isTaskRecord', () => {

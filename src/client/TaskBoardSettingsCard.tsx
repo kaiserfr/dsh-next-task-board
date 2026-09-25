@@ -6,11 +6,35 @@
 
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { useEffect, useState } from 'react'
 import type { TaskBoardPowerSnapshot } from '../protocol.ts'
 import { PluginSettingsCard, BooleanField, ValueField } from './PluginSettingsCard.tsx'
-import { CardForm, booleanField, numberField, type CardActions, type CardShell, type FieldState as CardFieldState } from './settings-form.ts'
+import { CardForm, booleanField, numberField, type CardActions, type CardShell, type FieldSpec, type FieldState as CardFieldState } from './settings-form.ts'
+import { normalizeStateMachine, type StateMachineConfig } from '../core/state-machine.ts'
+
+/**
+ * A JSON field: the draft is the pretty-printed document, and a save is
+ * refused unless it parses AND passes the same validation the Host applies.
+ * That keeps "what the card accepted" and "what the Host enforces" one rule.
+ */
+function jsonField(field: string, validate: (value: unknown) => string[]): FieldSpec {
+  return {
+    field,
+    format: value => value === undefined ? '' : JSON.stringify(value, null, 2),
+    parse: (text) => {
+      const trimmed = text.trim()
+      if (trimmed === '') return { kind: 'clear' }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(trimmed)
+      } catch {
+        return undefined
+      }
+      return validate(parsed).length === 0 ? { kind: 'set', value: parsed } : undefined
+    },
+  }
+}
 
 /** The task-board fields this card edits (the namespace's full schema). */
 export interface TaskBoardSettings {
@@ -20,8 +44,12 @@ export interface TaskBoardSettings {
   announceToAgent?: boolean
   /** Prevent host idle sleep while sessions run or schedules are armed. */
   preventIdleSleep?: boolean
-  /** WIP limit: how many task runs may hold a session at once (default 1). */
+  /** WIP limit per workspace: how many task runs of one workspace may hold a session at once (default 1). */
   maxConcurrentRuns?: number
+  /** Done-column limit: on-board Done cards before the oldest is archived (default 20). */
+  maxDoneTasks?: number
+  /** The board's state machine: columns, allowed transitions, transition actions. */
+  stateMachine?: StateMachineConfig
 }
 
 /** What the task-board card renders. */
@@ -34,6 +62,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
   preventIdleSleep: CardFieldState
   /** WIP limit draft. */
   maxConcurrentRuns: CardFieldState
+  /** Done-column limit draft. */
+  maxDoneTasks: CardFieldState
+  /** State-machine JSON draft. */
+  stateMachine: CardFieldState
 }
 
 /** The registration-side face the card's slot entry injects. */
@@ -50,12 +82,14 @@ export class TaskBoardSettingsCardController {
   private readonly store: SnapshotStore<TaskBoardSettingsCardState>
 
   /** @param scope - the bound settings scope for the `task-board` namespace. */
-  constructor(scope: SettingsScope<TaskBoardSettings>) {
+  constructor(scope: ConfigForm<TaskBoardSettings>) {
     this.form = new CardForm(scope, [
       booleanField('enabled'),
       booleanField('announceToAgent'),
       booleanField('preventIdleSleep'),
       numberField('maxConcurrentRuns', { integer: true, min: 1 }),
+      numberField('maxDoneTasks', { integer: true, min: 1 }),
+      jsonField('stateMachine', value => normalizeStateMachine(value).errors),
     ])
     this.store = this.form.bind(() => this.projection())
   }
@@ -67,6 +101,8 @@ export class TaskBoardSettingsCardController {
       announceToAgent: this.form.field('announceToAgent'),
       preventIdleSleep: this.form.field('preventIdleSleep'),
       maxConcurrentRuns: this.form.field('maxConcurrentRuns'),
+      maxDoneTasks: this.form.field('maxDoneTasks'),
+      stateMachine: this.form.field('stateMachine'),
     }
   }
 
@@ -180,6 +216,25 @@ export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
         {...state.maxConcurrentRuns}
         onEdit={(text) => { props.edit('maxConcurrentRuns', text) }}
         onReset={() => { props.resetField('maxConcurrentRuns') }}
+      />
+      <ValueField
+        id="settings-task-board-max-done-tasks"
+        label={t('settings.maxDoneTasks')}
+        hint={t('settings.maxDoneTasksHint')}
+        numeric
+        {...fieldProps}
+        {...state.maxDoneTasks}
+        onEdit={(text) => { props.edit('maxDoneTasks', text) }}
+        onReset={() => { props.resetField('maxDoneTasks') }}
+      />
+      <ValueField
+        id="settings-task-board-state-machine"
+        label={t('settings.stateMachine')}
+        hint={t('settings.stateMachineHint')}
+        {...fieldProps}
+        {...state.stateMachine}
+        onEdit={(text) => { props.edit('stateMachine', text) }}
+        onReset={() => { props.resetField('stateMachine') }}
       />
       <p>
         {t('settings.powerStatus', {

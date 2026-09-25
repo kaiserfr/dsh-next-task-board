@@ -28,9 +28,9 @@ export declare class TaskBoardHostService {
     private preventIdleSleep;
     /** Runs waiting for a free WIP slot, in arrival order. */
     private launchQueue;
-    /** Launches already started whose session is not attached yet (invisible to the ledger). */
-    private launchesInFlight;
-    /** WIP limit: how many runs may hold a session at once (always >= 1). */
+    /** Per-lane launches already started whose session is not attached yet (invisible to the ledger). */
+    private readonly launchesInFlight;
+    /** WIP limit per workspace/lane: how many runs may hold a session at once (always >= 1). */
     private maxConcurrentRuns;
     private lastPowerJson;
     private readonly now;
@@ -42,17 +42,35 @@ export declare class TaskBoardHostService {
         workspaceRegistry?: TaskBoardWorkspaceRegistry;
         sessionDefaultPermission?: TaskPermission;
         git?: GitWorkflow;
+        /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
+        stateMachine?: unknown;
     });
     start(): void;
     setConfiguration(active: boolean, preventIdleSleep: boolean): void;
     /**
      * Apply the board's WIP limit (settings namespace `task-board`,
-     * `maxConcurrentRuns`). Lowering the limit never aborts a running task: the
-     * surplus slots drain as their executions settle while the queue holds the
-     * remaining launches back.
-     * @param limit - configured maximum; values below 1 or non-finite mean 1.
+     * `maxConcurrentRuns`) per workspace/lane. Lowering the limit never aborts a
+     * running task: the surplus slots drain as their executions settle while the
+     * queue holds the remaining launches back.
+     * @param limit - configured maximum per lane; values below 1 or non-finite mean 1.
      */
     setMaxConcurrentRuns(limit: number): void;
+    /**
+     * Apply the board's Done-column limit (settings namespace `task-board`,
+     * `maxDoneTasks`). The ledger trims an over-limit `done` column right away
+     * and keeps enforcing it on every later move into `done` (oldest cards first,
+     * FIFO).
+     * @param limit - configured maximum; values below 1 or non-finite keep the default.
+     */
+    setMaxDoneTasks(limit: number): void;
+    /**
+     * Apply the board's state machine (settings namespace `task-board`, field
+     * `stateMachine`). The ledger enforces the very machine the browser renders
+     * drop targets from; an invalid config keeps the machine in force.
+     * @param config - raw config; undefined keeps the shipped machine.
+     * @returns the refusals of an invalid config (empty when it was applied).
+     */
+    setStateMachine(config: unknown): string[];
     snapshot(): TaskBoardSnapshot;
     /** SSE frame payload; deliberately skips the tasks deep-clone of {@link snapshot}. */
     eventPayload(): TaskBoardEventPayload;
@@ -62,17 +80,27 @@ export declare class TaskBoardHostService {
     private launch;
     private pollSessions;
     /** Reuse the session list this poll already fetched: one list RPC per tick, not 1 + E. */
+    /**
+     * Settle every open execution whose session has finished. This is the only
+     * automatic path into `ready_for_test`: the runner reports 'succeeded' only
+     * once the session has come to rest (no running turn, nothing queued, no
+     * live job), so the column change is always the session's last action.
+     * Drag & drop cannot race it — the ledger refuses to move a card that is
+     * running or still carries an open execution.
+     */
     private reconcileExecutions;
     private tickSchedule;
     private armedSchedules;
     private scheduleLaunch;
     /**
-     * Start queued runs in arrival order while fewer than `maxConcurrentRuns`
-     * executions hold a session. A run above the limit stays queued: its ledger
-     * execution is already open without a session, so the card reads as running
-     * and cannot be opened twice. Called on enqueue, on every ledger change (a
-     * settle frees a slot), after a launch attaches a session or fails, and when
-     * the limit changes.
+     * Start queued runs while their lane (workspace) holds fewer than
+     * `maxConcurrentRuns` sessions. Lanes are independent: a saturated lane never
+     * blocks another lane's queue entry, which is scanned in arrival order so
+     * runs within one lane still start FIFO. A run above its lane's limit stays
+     * queued: its ledger execution is already open without a session, so the card
+     * reads as running and cannot be opened twice. Called on enqueue, on every
+     * ledger change (a settle frees a slot), after a launch attaches a session or
+     * fails, and when the limit changes.
      */
     private pumpLaunchQueue;
     private schedulePoll;

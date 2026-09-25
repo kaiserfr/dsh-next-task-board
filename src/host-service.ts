@@ -1,6 +1,7 @@
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { nextRunAtMs } from './core/schedule.ts'
 import { reusableSessionId } from './core/session-reuse.ts'
+import { taskLane } from './core/tasks.ts'
 import { HostTaskLedger, type OpenedRun, type OpenExecutionReference } from './host-ledger.ts'
 import { HostExecutionRunner, SessionLaunchError, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
 import { GitWorkflow } from './git-workflow.ts'
@@ -35,9 +36,9 @@ export class TaskBoardHostService {
   private preventIdleSleep = false
   /** Runs waiting for a free WIP slot, in arrival order. */
   private launchQueue: OpenedRun[] = []
-  /** Launches already started whose session is not attached yet (invisible to the ledger). */
-  private launchesInFlight = 0
-  /** WIP limit: how many runs may hold a session at once (always >= 1). */
+  /** Per-lane launches already started whose session is not attached yet (invisible to the ledger). */
+  private readonly launchesInFlight = new Map<string, number>()
+  /** WIP limit per workspace/lane: how many runs may hold a session at once (always >= 1). */
   private maxConcurrentRuns = 1
   private lastPowerJson = ''
   private readonly now: () => number
@@ -50,9 +51,11 @@ export class TaskBoardHostService {
     workspaceRegistry?: TaskBoardWorkspaceRegistry
     sessionDefaultPermission?: TaskPermission
     git?: GitWorkflow
+    /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
+    stateMachine?: unknown
   } = {}) {
     this.git = options.git ?? new GitWorkflow(options.workspaceRegistry)
-    this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git })
+    this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git, stateMachine: options.stateMachine })
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry)
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
@@ -60,7 +63,7 @@ export class TaskBoardHostService {
     this.ledger.subscribe(() => {
       this.syncPowerReasons()
       this.emit()
-      // A settle frees a WIP slot, so the next queued run starts here.
+      // A settle frees its lane's WIP slot, so the next queued run starts here.
       this.pumpLaunchQueue()
     })
     this.power.subscribe(() => {
@@ -105,16 +108,38 @@ export class TaskBoardHostService {
 
   /**
    * Apply the board's WIP limit (settings namespace `task-board`,
-   * `maxConcurrentRuns`). Lowering the limit never aborts a running task: the
-   * surplus slots drain as their executions settle while the queue holds the
-   * remaining launches back.
-   * @param limit - configured maximum; values below 1 or non-finite mean 1.
+   * `maxConcurrentRuns`) per workspace/lane. Lowering the limit never aborts a
+   * running task: the surplus slots drain as their executions settle while the
+   * queue holds the remaining launches back.
+   * @param limit - configured maximum per lane; values below 1 or non-finite mean 1.
    */
   setMaxConcurrentRuns(limit: number): void {
     const next = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1
     if (next === this.maxConcurrentRuns) return
     this.maxConcurrentRuns = next
     this.pumpLaunchQueue()
+  }
+
+  /**
+   * Apply the board's Done-column limit (settings namespace `task-board`,
+   * `maxDoneTasks`). The ledger trims an over-limit `done` column right away
+   * and keeps enforcing it on every later move into `done` (oldest cards first,
+   * FIFO).
+   * @param limit - configured maximum; values below 1 or non-finite keep the default.
+   */
+  setMaxDoneTasks(limit: number): void {
+    this.ledger.setMaxDoneTasks(limit)
+  }
+
+  /**
+   * Apply the board's state machine (settings namespace `task-board`, field
+   * `stateMachine`). The ledger enforces the very machine the browser renders
+   * drop targets from; an invalid config keeps the machine in force.
+   * @param config - raw config; undefined keeps the shipped machine.
+   * @returns the refusals of an invalid config (empty when it was applied).
+   */
+  setStateMachine(config: unknown): string[] {
+    return this.ledger.setStateMachine(config)
   }
 
   snapshot(): TaskBoardSnapshot {
@@ -126,6 +151,9 @@ export class TaskBoardHostService {
       scheduler: state.scheduler,
       power: this.power.snapshot(),
       sessionDefaultPermission: this.ledger.sessionDefaultPermission,
+      // The resolved machine travels with the state, so the browser validates
+      // its drop targets against exactly what the Host enforces.
+      stateMachine: this.ledger.stateMachine.toJSON(),
     }
   }
 
@@ -150,12 +178,15 @@ export class TaskBoardHostService {
       tasks: result.state.tasks,
       scheduler: result.state.scheduler,
       power: this.power.snapshot(),
+      sessionDefaultPermission: this.ledger.sessionDefaultPermission,
+      stateMachine: this.ledger.stateMachine.toJSON(),
     }
   }
 
   dispose(): void {
     this.disposed = true
     this.launchQueue = []
+    this.launchesInFlight.clear()
     for (const timer of this.timers.splice(0)) clearInterval(timer)
     this.power.dispose()
     this.ledger.dispose()
@@ -167,8 +198,24 @@ export class TaskBoardHostService {
       // Work happens on the card's feature branch: check it out in the pinned
       // workspace worktree before the session starts (no-op without git state).
       this.git.useBranch(opened.task)
-      const reuseSessionId = reusableSessionId(opened.task, this.idleSessionIds)
-      const sessionId = await this.runner.launch(opened.task, reuseSessionId === undefined ? {} : { reuseSessionId })
+      // A rework round continues the conversation it corrects, whether or not
+      // the card opted into session reuse. When no idle previous conversation
+      // is available the note still has to reach the agent: the runner appends
+      // it to the full prompt instead, and the warning records that the round
+      // lost its context on purpose rather than by accident.
+      const reworkNote = opened.execution.reworkNote
+      const reuseSessionId = reusableSessionId(
+        opened.task,
+        this.idleSessionIds,
+        reworkNote === undefined ? {} : { rework: true },
+      )
+      if (reworkNote !== undefined && reuseSessionId === undefined) {
+        console.warn(`[dsh-task-board] rework note for task ${opened.task.id} starts a fresh session: no idle previous conversation to continue`)
+      }
+      const sessionId = await this.runner.launch(opened.task, {
+        ...(reuseSessionId === undefined ? {} : { reuseSessionId }),
+        ...(reworkNote === undefined ? {} : { reworkNote }),
+      })
       this.ledger.attachSession(opened.task.id, opened.execution.id, sessionId)
     } catch (error) {
       if (error instanceof SessionLaunchError) {
@@ -207,6 +254,14 @@ export class TaskBoardHostService {
   }
 
   /** Reuse the session list this poll already fetched: one list RPC per tick, not 1 + E. */
+  /**
+   * Settle every open execution whose session has finished. This is the only
+   * automatic path into `ready_for_test`: the runner reports 'succeeded' only
+   * once the session has come to rest (no running turn, nothing queued, no
+   * live job), so the column change is always the session's last action.
+   * Drag & drop cannot race it — the ledger refuses to move a card that is
+   * running or still carries an open execution.
+   */
   private async reconcileExecutions(
     sessions: readonly SessionSummary[],
     executions: readonly OpenExecutionReference[],
@@ -250,12 +305,14 @@ export class TaskBoardHostService {
   }
 
   /**
-   * Start queued runs in arrival order while fewer than `maxConcurrentRuns`
-   * executions hold a session. A run above the limit stays queued: its ledger
-   * execution is already open without a session, so the card reads as running
-   * and cannot be opened twice. Called on enqueue, on every ledger change (a
-   * settle frees a slot), after a launch attaches a session or fails, and when
-   * the limit changes.
+   * Start queued runs while their lane (workspace) holds fewer than
+   * `maxConcurrentRuns` sessions. Lanes are independent: a saturated lane never
+   * blocks another lane's queue entry, which is scanned in arrival order so
+   * runs within one lane still start FIFO. A run above its lane's limit stays
+   * queued: its ledger execution is already open without a session, so the card
+   * reads as running and cannot be opened twice. Called on enqueue, on every
+   * ledger change (a settle frees a slot), after a launch attaches a session or
+   * fails, and when the limit changes.
    */
   private pumpLaunchQueue(): void {
     if (this.disposed) return
@@ -271,17 +328,29 @@ export class TaskBoardHostService {
       ))
     }
     for (;;) {
-      if (this.launchQueue.length === 0) return
-      const holding = open.filter(execution => execution.sessionId !== undefined).length
-      if (holding + this.launchesInFlight >= this.maxConcurrentRuns) return
-      const next = this.launchQueue.shift()
+      // Sessions per lane from the ledger snapshot plus the launches that lane
+      // started but whose session the snapshot cannot show yet.
+      const holding = new Map<string, number>()
+      for (const execution of open) {
+        if (execution.sessionId === undefined) continue
+        holding.set(execution.lane, (holding.get(execution.lane) ?? 0) + 1)
+      }
+      const index = this.launchQueue.findIndex((opened) => {
+        const lane = taskLane(opened.task)
+        return (holding.get(lane) ?? 0) + (this.launchesInFlight.get(lane) ?? 0) < this.maxConcurrentRuns
+      })
+      if (index === -1) return
+      const next = this.launchQueue.splice(index, 1)[0]
       if (next === undefined) return
-      this.launchesInFlight += 1
+      const lane = taskLane(next.task)
+      this.launchesInFlight.set(lane, (this.launchesInFlight.get(lane) ?? 0) + 1)
       let released = false
       const release = (): void => {
         if (released) return
         released = true
-        this.launchesInFlight -= 1
+        const remaining = (this.launchesInFlight.get(lane) ?? 1) - 1
+        if (remaining <= 0) this.launchesInFlight.delete(lane)
+        else this.launchesInFlight.set(lane, remaining)
         this.pumpLaunchQueue()
       }
       void this.launch(next).catch(error => {

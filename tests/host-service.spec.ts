@@ -39,6 +39,30 @@ function snapshot(records: readonly unknown[], cursor: number, hasMore: boolean)
   return { type: 'snapshot' as const, header: {}, cursor, records, hasMore, projections: {} }
 }
 
+/** The live `session/control` baseline: pending inbox items and jobs per session. */
+function controlBaseline(
+  queues: Record<string, readonly unknown[]> = {},
+  jobs: Record<string, readonly { status: string }[]> = {},
+) {
+  return { type: 'baseline' as const, value: { queues, jobs, projections: {} } }
+}
+
+/**
+ * Route the fake stream by method: `follow` probes the history head, `control`
+ * is the live inbox/job baseline the session-end check reads.
+ */
+function sessionStream(handlers: {
+  follow?: () => AsyncIterable<unknown>
+  control?: () => AsyncIterable<unknown>
+}): FollowHandler {
+  return (request: GatewayRequest) => {
+    const build = request.method === 'control' ? handlers.control : handlers.follow
+    return build === undefined
+      ? { async *[Symbol.asyncIterator]() { yield request.method === 'control' ? controlBaseline() : snapshot([], 0, false) } }
+      : build()
+  }
+}
+
 function root(): string {
   const value = mkdtempSync(join(tmpdir(), 'dsh-task-board-service-'))
   roots.push(value)
@@ -181,14 +205,16 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     const { gateway, stream } = makeGateway(request => {
       if (request.method === 'list') return { items: [{ sessionId: 'session-a', running: false }] }
       if (request.method === 'page') return {
-        records: [sessionEvent('turn/end', 10, 1_200, { reason: { kind: 'complete' } })],
+        records: [sessionEvent('turn/end', 10, 1_200, { reason: { kind: 'completed' } })],
         hasMore: false,
       }
       throw new Error('unexpected gateway call')
-    }, () => ({
-      async *[Symbol.asyncIterator]() {
-        yield snapshot([], 10, true)
-      },
+    }, sessionStream({
+      follow: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield snapshot([], 10, true)
+        },
+      }),
     }))
     const service = new TaskBoardHostService(gateway, {
       ledger,
@@ -198,7 +224,9 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
     expect(ledger.state().tasks[0].executions[0].result).toBe('succeeded')
     expect(ledger.state().tasks[0].status).toBe('ready_for_test')
-    expect(stream).toHaveBeenCalledOnce()
+    // One history probe plus the live inbox/job baseline that confirms the
+    // session has nothing left to run.
+    expect(stream.mock.calls.map(call => (call[0] as GatewayRequest).method)).toEqual(['follow', 'control'])
     service.dispose()
   })
 
@@ -214,6 +242,57 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     expect(interval).toHaveBeenCalledTimes(2)
     service.dispose()
     interval.mockRestore()
+  })
+})
+
+describe('TaskBoardHostService rework continuation', () => {
+  /**
+   * The launch wiring for a corrected card: the note has to reach the
+   * conversation it corrects, and the card's fresh-run default (a new session
+   * per execution) must not swallow it.
+   */
+  it('continues the previous conversation and prompts only the note', async () => {
+    const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
+    const ledger = new HostTaskLedger(root(), () => now)
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    // A first run that finished, then a review that did not accept it.
+    const first = ledger.applyRequest('run-first', { kind: 'run', taskId: 'card' }).run
+    ledger.attachSession('card', first!.execution.id, 'session-first')
+    ledger.settle('card', first!.execution.id, 'succeeded', undefined)
+    ledger.applyRequest('rework', { kind: 'rework', taskId: 'card', note: 'the redirect is missing' })
+    expect(ledger.state().tasks[0].reuseSession).toBeUndefined()
+
+    const create = vi.fn(async () => ({ sessionId: 'session-fresh' }))
+    const prompt = vi.fn(async (_request: GatewayRequest) => ({ accepted: true }))
+    const { gateway } = makeGateway(request => {
+      if (request.namespace !== 'session') throw new Error('unexpected namespace')
+      if (request.method === 'list') return { items: [{ sessionId: 'session-first', running: false }] }
+      if (request.method === 'create') return create()
+      if (request.method === 'rename') return { title: 'Card', seq: 1 }
+      if (request.method === 'prompt') return prompt(request)
+      throw new Error('unexpected gateway call: ' + request.method)
+    })
+    const service = new TaskBoardHostService(gateway, {
+      ledger,
+      power: new PowerInhibitor({ platform: 'linux' }),
+      now: () => now,
+    })
+    // The roster has to be known before the launch: an unknown roster never
+    // reuses, and the note would then ride on a fresh prompt instead.
+    await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
+    const opened = ledger.applyRequest('run-second', { kind: 'run', taskId: 'card' }).run
+    await (service as unknown as { launch(run: unknown): Promise<void> }).launch(opened)
+
+    expect(create).not.toHaveBeenCalled()
+    const request = (prompt.mock.calls[0]?.[0] as unknown as { args: { request: { sessionId: string; content: Array<{ text: string }> } } }).args.request
+    expect(request.sessionId).toBe('session-first')
+    // The continued session already holds `work`; the new turn is the note.
+    expect(request.content[0].text).not.toContain('work')
+    expect(request.content[0].text).toContain('the redirect is missing')
+    const latest = ledger.state().tasks[0].executions.at(-1)
+    expect(latest?.sessionId).toBe('session-first')
+    expect(latest?.reworkNote).toBe('the redirect is missing')
+    service.dispose()
   })
 })
 
@@ -279,7 +358,7 @@ describe('TaskBoardHostService poll heartbeat', () => {
     service.dispose()
   })
 
-  it('settles open executions from the one session list each poll already fetched', async () => {
+  it('settles an open execution only once its session is at rest', async () => {
     const ledger = new HostTaskLedger(root())
     const base = createTask({ title: 'A', description: '', prompt: '' }, 1_000, 'task-a')
     const opened = startExecution(base, 1_100, 'execution-a').task
@@ -290,17 +369,19 @@ describe('TaskBoardHostService poll heartbeat', () => {
     ledger.applyRequest('import', { kind: 'import', sourceId: 'browser', tasks: [imported] })
     const list = vi.fn(async () => ({ items: [{ sessionId: 'session-a', running: false }] }))
     const page = vi.fn(async () => ({
-      records: [sessionEvent('turn/end', 10, 1_200, { reason: { kind: 'complete' } })],
+      records: [sessionEvent('turn/end', 10, 1_200, { reason: { kind: 'completed' } })],
       hasMore: false,
     }))
     const { gateway, stream } = makeGateway(request => {
       if (request.method === 'list') return list()
       if (request.method === 'page') return page()
       throw new Error('unexpected gateway call')
-    }, () => ({
-      async *[Symbol.asyncIterator]() {
-        yield snapshot([], 10, true)
-      },
+    }, sessionStream({
+      follow: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield snapshot([], 10, true)
+        },
+      }),
     }))
     const service = new TaskBoardHostService(gateway, {
       ledger,
@@ -308,10 +389,63 @@ describe('TaskBoardHostService poll heartbeat', () => {
     })
     await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
     expect(ledger.state().tasks[0].executions[0].result).toBe('succeeded')
-    expect(list).toHaveBeenCalledOnce()
-    expect(stream).toHaveBeenCalledOnce()
+    // The poll roster plus the fresh roster read that confirms the park.
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(stream.mock.calls.map(call => (call[0] as GatewayRequest).method)).toEqual(['follow', 'control'])
     expect(page).toHaveBeenCalledOnce()
     service.dispose()
+  })
+
+  it('leaves a card in running while its session still runs or still owes work', async () => {
+    const buildLedger = () => {
+      const ledger = new HostTaskLedger(root())
+      const base = createTask({ title: 'A', description: '', prompt: '' }, 1_000, 'task-a')
+      const opened = startExecution(base, 1_100, 'execution-a').task
+      ledger.applyRequest('import', {
+        kind: 'import',
+        sourceId: 'browser',
+        tasks: [{ ...opened, executions: opened.executions.map(execution => ({ ...execution, sessionId: 'session-a' })) }],
+      })
+      return ledger
+    }
+    const page = () => ({
+      records: [sessionEvent('turn/end', 10, 1_200, { reason: { kind: 'completed' } })],
+      hasMore: false,
+    })
+    const poll = async (ledger: HostTaskLedger, items: unknown[], baseline: unknown) => {
+      const { gateway } = makeGateway(request => {
+        if (request.method === 'list') return { items }
+        if (request.method === 'page') return page()
+        throw new Error('unexpected gateway call')
+      }, sessionStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+        control: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield baseline
+          },
+        }),
+      }))
+      const service = new TaskBoardHostService(gateway, { ledger, power: new PowerInhibitor({ platform: 'linux' }) })
+      await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
+      service.dispose()
+      return ledger.state().tasks[0]
+    }
+    // A turn/end is already in the history, but the session is still running.
+    const running = await poll(buildLedger(), [{ sessionId: 'session-a', running: true }], controlBaseline())
+    expect(running.status).toBe('running')
+    expect(running.executions[0].result).toBeUndefined()
+    // The session is idle, yet a queued prompt will start another turn.
+    const queued = await poll(buildLedger(), [{ sessionId: 'session-a', running: false }], controlBaseline({ 'session-a': [{ id: 'm1', placement: 'queued' }] }))
+    expect(queued.status).toBe('running')
+    expect(queued.executions[0].result).toBeUndefined()
+    // A background job will wake the session for another turn.
+    const job = await poll(buildLedger(), [{ sessionId: 'session-a', running: false }], controlBaseline({}, { 'session-a': [{ status: 'running' }] }))
+    expect(job.status).toBe('running')
+    expect(job.executions[0].result).toBeUndefined()
   })
 
   it('keeps hot polling and scheduling off the full-state clone', async () => {
@@ -365,6 +499,24 @@ describe('TaskBoardHostService poll heartbeat', () => {
     expect(snapshotValue.tasks[0].executions).toHaveLength(EXECUTION_HISTORY_LIMIT)
     expect(snapshotValue.tasks[0].executions.at(-1)?.id).toBe('execution-open')
     expect(state).toHaveBeenCalledOnce()
+    service.dispose()
+  })
+
+  it('hands the enforced state machine to the browser in the snapshot', () => {
+    const machine = {
+      initial: 'todo',
+      states: [{ status: 'backlog' }, { status: 'todo' }, { status: 'done' }],
+      transitions: [{ from: 'todo', to: 'done' }],
+    }
+    const ledger = new HostTaskLedger(root(), Date.now, { stateMachine: machine })
+    const service = new TaskBoardHostService({} as TypertGateway, { ledger })
+    expect(service.snapshot().stateMachine).toEqual(machine)
+    // The machine travels with an action result too, so the browser never
+    // validates against a stale machine.
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: '' } })
+    const applied = service.apply('move', { kind: 'move', taskId: 'card', status: 'done' })
+    expect(applied.stateMachine).toEqual(machine)
+    expect(applied.tasks[0].status).toBe('done')
     service.dispose()
   })
 

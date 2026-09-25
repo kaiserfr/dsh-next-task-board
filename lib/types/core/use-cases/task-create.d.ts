@@ -1,4 +1,4 @@
-import { type NewTaskInput, type TaskRecord } from '../tasks.ts';
+import { type NewTaskInput, type TaskRecord, type TaskStatus } from '../tasks.ts';
 /** Result of a create transition: the new task (when accepted) + the next ledger. */
 export interface CreateTaskResult {
     /** The minted task, or undefined when the input was rejected (blank title). */
@@ -13,5 +13,6 @@ export interface CreateTaskResult {
  * @param input - raw user input (title/description/prompt + optional schedule).
  * @param now - clock instant (ms epoch).
  * @param id - minted task id.
+ * @param initialStatus - the configured machine's initial column; absent keeps `backlog`.
  */
-export declare function applyCreateTask(tasks: readonly TaskRecord[], input: NewTaskInput, now: number, id: string): CreateTaskResult;
+export declare function applyCreateTask(tasks: readonly TaskRecord[], input: NewTaskInput, now: number, id: string, initialStatus?: TaskStatus): CreateTaskResult;

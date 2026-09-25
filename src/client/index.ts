@@ -12,15 +12,19 @@ import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ClientRemote, SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm, ConfigForms } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale) and its
 // LocaleNamespaceMap merge table.
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: pulls the settings-surface Context merge (ctx.settingsScope).
+// Type-only: pulls the shared-forms Context merge (ctx.configForms).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: pulls the workspace plugin's Context merge (ctx.uiWorkspace), the
+// navigation face a session jump targets since the multi-instance Client
+// Session model (ISessions carries no selection of its own).
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { BoardController } from '../core/controller.ts'
 import { LocalStorageTaskStore } from '../core/store.ts'
 import { claimTaskboardApply, releaseTaskboardApply } from './apply-guard.ts'
@@ -29,7 +33,9 @@ import { mountSidebarEntry } from './sidebar-entry.ts'
 import { TaskBoardSettingsCard, TaskBoardSettingsCardController, type TaskBoardSettings } from './TaskBoardSettingsCard.tsx'
 import { en, zh, setRuntimeTranslate, type TaskBoardKey } from './locales.ts'
 import { HttpTaskBoardHostTransport } from './host-api.ts'
+import { mainViewSessionId } from './main-session.ts'
 import { installPluginCard } from './plugin-card-seat.ts'
+import { sessionLinkTarget } from './session-link.ts'
 
 /** Locale namespace this plugin owns. */
 const NS = 'task-board'
@@ -63,13 +69,43 @@ export interface SettingsPluginItemOwnerProps {
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /**
-     * Optional rc.6 compatibility binder provided by dsh-web-settings;
-     * absent when that group plugin is not installed, so callers fall back to
-     * the official settings scope.
+     * Optional family settings binder provided by dsh-web-settings; absent
+     * when that group plugin is not installed, so callers fall back to the
+     * shared configuration forms service.
      */
-    webUiSettings?: { bind<S>(spec: SettingsScopeSpec<S>): SettingsScope<S> }
+    webUiSettings?: SettingsFormBinder
   }
 }
+
+/** Domain-owned description of one settings namespace a family card binds. */
+export interface SettingsFormSpec<T> {
+  /** Settings namespace the card edits. */
+  namespace: string
+  /**
+   * Narrow one wire section; undefined keeps the last accepted value. The
+   * shared form already resolves the namespace's own serialized wire schema,
+   * so a decoder exists only to narrow beyond that schema.
+   */
+  decode?: (section: unknown) => T | undefined
+}
+
+/**
+ * The family settings binder published by dsh-web-settings. Its `bind` resolves
+ * a family namespace to the profile entry id that owns it and hands back the
+ * shared configuration form, so it is the only seat that can reach this card's
+ * form on a Host whose row id is not the namespace.
+ */
+export interface SettingsFormBinder {
+  /** Bind one family settings namespace. */
+  bind<T>(spec: SettingsFormSpec<T>): ConfigForm<T>
+}
+
+/**
+ * Profile entry ids this package's patch row can carry: the standalone bundle
+ * patch row (`ui-task-board`), plus the bare namespace as the last resort for
+ * a Host whose descriptor is keyed by the family namespace itself.
+ */
+const TASK_BOARD_ENTRY_IDS: readonly string[] = ['ui-task-board', TASK_BOARD_NS]
 
 
 /**
@@ -80,7 +116,7 @@ declare module '@deepseek-ai/cordis' {
  * on hosts below that cohort, which serve the same roster through the
  * connection RPC face.
  */
-export const inject = ['slots', 'sessions', 'workspaces', 'connection', 'settingsScope', 'locale', 'remote', 'remote.session']
+export const inject = ['slots', 'sessions', 'workspaces', 'connection', 'configForms', 'locale', 'remote', 'remote.session', 'uiWorkspace']
 
 /** One agent-preset row the mode picker consumes (either face's wire shape). */
 interface PresetRosterRow {
@@ -165,9 +201,8 @@ export function apply(ctx: ClientContext): void {
   // Plugin configuration card: one staged form over the `task-board` settings
   // namespace, contributed to whichever plugin-card seat this host declares
   // (issue #1589).
-  const binder = ctx.get('webUiSettings') ?? ctx.settingsScope
-  const settingsScope = binder.bind<TaskBoardSettings>({ namespace: TASK_BOARD_NS })
-  const settingsCard = new TaskBoardSettingsCardController(settingsScope)
+  const settingsForm = bindSettingsForm(ctx)
+  const settingsCard = new TaskBoardSettingsCardController(settingsForm)
   installPluginCard(ctx, {
     namespace: TASK_BOARD_NS,
     id: 'task-board',
@@ -198,13 +233,37 @@ export function apply(ctx: ClientContext): void {
       store,
       transport: new HttpTaskBoardHostTransport(),
       sessions: {
-        list: sessions.list,
-        open: id => sessions.open(id as never),
+        // The controller's face is unchanged (a `current` id plus one navigation
+        // call); only its runtime sources moved. The main-view Session is
+        // derived from the catalog's per-source ownership counts, and
+        // navigation belongs to the workspace UI since the multi-instance
+        // Client Session model.
+        list: {
+          getSnapshot: () => ({ current: mainViewSessionId(sessions.list.getSnapshot().byId) }),
+          subscribe: fn => sessions.list.subscribe(fn),
+        },
+        open: id => ctx.uiWorkspace.openSession(id as never),
+        // The card's session jump reaches an inactive session whose id the
+        // local roster has not pulled yet by refreshing before the retry.
+        refresh: () => sessions.refresh(),
       },
     })
     controller.start()
 
     const disposers: Array<() => void> = []
+
+    // Session deep link: a card's session anchor targets `#session=<id>` (see
+    // session-link.ts), so a new tab, a middle-click, or a copied URL must land
+    // in that session too — including an inactive one the fresh page's roster
+    // has not pulled yet, which controller.openSession covers by refreshing
+    // once before it retries.
+    const openSessionFromHash = (): void => {
+      const sessionId = sessionLinkTarget(window.location.hash)
+      if (sessionId !== undefined) controller.openSession(sessionId)
+    }
+    window.addEventListener('hashchange', openSessionFromHash)
+    disposers.push(() => window.removeEventListener('hashchange', openSessionFromHash))
+    openSessionFromHash()
 
     // Execution-target option feeds: the workspace list drives the workspace
     // picker, and the agent-preset roster drives the mode picker. Both are
@@ -329,13 +388,65 @@ export function apply(ctx: ClientContext): void {
     }
   }
   const syncEnabled = (): void => {
-    const snapshot = settingsScope.getSnapshot()
+    const snapshot = settingsForm.getSnapshot()
     const enabled = snapshot.status === 'ready'
       ? snapshot.value?.enabled ?? true
       : snapshot.status === 'unavailable'
     if (enabled) mountUi()
     else uiDisposer?.()
   }
-  settingsScope.subscribe(syncEnabled)
+  settingsForm.subscribe(syncEnabled)
   syncEnabled()
+}
+
+/**
+ * Bind the settings form this card stages over.
+ *
+ * The family binder (`ctx.get('webUiSettings')`, published by dsh-web-settings)
+ * comes first: it is what traces this package's family namespace onto the
+ * profile entry id the Host serves the form under. A page without that group
+ * falls back to the shared configuration forms service bound directly at one of
+ * this package's own profile entry ids.
+ * @param ctx - client root context.
+ * @returns the form the settings card reads and writes.
+ */
+export function bindSettingsForm(ctx: ClientContext): ConfigForm<TaskBoardSettings> {
+  // The shared form service comes first: under 0.1.7 a settings form IS the
+  // profile entry's own Config, addressed by its entry id, and this package's
+  // row id is its own. The family binder is the compat path for a page whose
+  // forms service is absent; it resolves a family namespace to an entry id
+  // through the dsh-web settings bridge, which only knows the packages in its
+  // own identity table.
+  const forms = ctx.get('configForms')
+  if (forms !== undefined && typeof forms.get === 'function') {
+    return forms.get<TaskBoardSettings>(servedEntryId(forms))
+  }
+  const binder = ctx.get('webUiSettings')
+  if (binder !== undefined && typeof binder.bind === 'function') {
+    return binder.bind<TaskBoardSettings>({ namespace: TASK_BOARD_NS })
+  }
+  throw new Error(`task-board: this page serves neither the shared configuration forms nor a settings binder for "${TASK_BOARD_NS}"`)
+}
+
+/**
+ * The profile entry id this package's own row carries.
+ *
+ * The shared describe mirror is the only local evidence of which row id this
+ * profile actually serves, but it answers asynchronously: at plugin activation
+ * it usually holds nothing yet. An unanswered mirror therefore binds the row id
+ * this bundle's own patch declares rather than the family namespace — the form
+ * is bound once for the session, and the entry id is what the Host addresses a
+ * form by under 0.1.7.
+ * @param forms - the shared configuration forms service.
+ * @returns the entry id to bind.
+ */
+function servedEntryId(forms: ConfigForms): string {
+  let served: readonly string[] | undefined
+  try {
+    served = forms.describe().getSnapshot().view?.namespaces.map(view => view.ns)
+  } catch {
+    served = undefined
+  }
+  if (served === undefined) return TASK_BOARD_ENTRY_IDS[0] ?? TASK_BOARD_NS
+  return TASK_BOARD_ENTRY_IDS.find(id => served.includes(id)) ?? TASK_BOARD_ENTRY_IDS[0] ?? TASK_BOARD_NS
 }

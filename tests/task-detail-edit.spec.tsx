@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 /**
- * Issue #1110: the detail overlay offers editing of task content (title,
- * description, prompt) only while the task has never started executing.
- * Running and settled tasks fail closed — no edit affordance — and the edit
- * modal saves through the controller only after validating the title.
+ * Issue #1110 (reworked): the detail overlay offers editing of task content
+ * (title, description, prompt, and the "Parse with AI" source) exactly while
+ * the card waits in a pre-execution column — `backlog` or `todo` — whatever ran
+ * before. A running task and a card that moved on to
+ * `ready_for_test`/`done`/`failed` fail closed — no edit affordance — and the
+ * edit modal saves through the controller only after validating the title.
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -105,6 +107,14 @@ describe('task content editing before execution (issue #1110)', () => {
       executions: [{ id: 'e-done', sessionId: undefined, startedAt: 1, endedAt: 2, result: 'succeeded', error: undefined }],
     }))
     expect(editButtonOf(container)).toBeUndefined()
+  })
+
+  it('offers the edit button again once the card is back in a waiting column', async () => {
+    const { container } = await renderDetail(task({
+      status: 'todo',
+      executions: [{ id: 'e-fail', sessionId: undefined, startedAt: 1, endedAt: 2, result: 'failed', error: 'boom' }],
+    }))
+    expect(editButtonOf(container)).toBeDefined()
   })
 
   it('saves edited content through the controller and closes', async () => {

@@ -269,6 +269,9 @@ describe('task detail tags and edit-tags flow', () => {
   it('renders badges in detail and exposes editTags button once executed', async () => {
     const executedTask = task({
       id: 'ex1',
+      // A settled card (the run parked it in ready_for_test): its content is the
+      // record of what ran, so only the labels stay editable.
+      status: 'ready_for_test',
       tags: [{ name: 'frontend' }, { name: 'core' }],
       executions: [{ id: 'e1', startedAt: 100, endedAt: 200, result: 'succeeded', sessionId: undefined, error: undefined }],
     })

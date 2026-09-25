@@ -83,4 +83,24 @@ describe('reusableSessionId (#1419)', () => {
     expect(reusableSessionId(chained, new Set(['session-a']))).toBe('session-a')
     expect(reusableSessionId(chained, new Set(['session-old']))).toBeUndefined()
   })
+
+  describe('rework rounds force the continuation', () => {
+    it('continues the correction conversation even without the reuse opt-in', () => {
+      const card = task({ executions: [execution()] })
+      expect(reusableSessionId(card, new Set(['session-a']))).toBeUndefined()
+      expect(reusableSessionId(card, new Set(['session-a']), { rework: true })).toBe('session-a')
+    })
+
+    it('still fails closed when the roster is unknown or the session is not idle', () => {
+      const card = task({ executions: [execution()] })
+      expect(reusableSessionId(card, undefined, { rework: true })).toBeUndefined()
+      expect(reusableSessionId(card, new Set(['session-b']), { rework: true })).toBeUndefined()
+    })
+
+    it('needs a settled session to continue: a card that never ran starts fresh', () => {
+      expect(reusableSessionId(task({ reuseSession: true }), new Set(['session-a']), { rework: true })).toBeUndefined()
+      const open = task({ executions: [execution({ endedAt: undefined, result: undefined })] })
+      expect(reusableSessionId(open, new Set(['session-a']), { rework: true })).toBeUndefined()
+    })
+  })
 })

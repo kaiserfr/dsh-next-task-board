@@ -208,11 +208,13 @@ describe('HostTaskLedger', () => {
         executionId: 'open',
         sessionId: 'session-open',
         startedAt: NOW - 1_000,
+        lane: '',
       }, {
         taskId: 'awaiting-session',
         executionId: 'awaiting-session-open',
         sessionId: undefined,
         startedAt: NOW - 500,
+        lane: '',
       }],
     })
     expect(ledger.armedScheduleCount()).toBe(1)
@@ -501,27 +503,41 @@ describe('HostTaskLedger', () => {
     expect(ledger.state().tasks[0].executions).toEqual([])
   })
 
-  it('edits task content only before the first execution and keeps targets editable after', () => {
+  it('edits task content while the card waits in a pre-execution column and keeps targets editable after', () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: 'd', prompt: 'p' } })
-    const edited = ledger.applyRequest('update', { kind: 'update', taskId: 'task-a', patch: { title: 'B', description: 'd2', prompt: 'p2' } })
-    expect(edited.state.tasks[0]).toMatchObject({ title: 'B', description: 'd2', prompt: 'p2' })
+    const edited = ledger.applyRequest('update', { kind: 'update', taskId: 'task-a', patch: { title: 'B', description: 'd2', prompt: 'p2', parseText: ' pasted source ' } })
+    expect(edited.state.tasks[0]).toMatchObject({ title: 'B', description: 'd2', prompt: 'p2', parseText: 'pasted source' })
 
     expect(() => ledger.applyRequest('update-blank-title', { kind: 'update', taskId: 'task-a', patch: { title: '   ' } })).toThrow('title is required')
 
     const opened = ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' })
     const executionId = opened.state.tasks[0].executions[0].id
-    expect(() => ledger.applyRequest('update-running', { kind: 'update', taskId: 'task-a', patch: { prompt: 'live' } })).toThrow('task has already been executed')
+    expect(() => ledger.applyRequest('update-running', { kind: 'update', taskId: 'task-a', patch: { prompt: 'live' } })).toThrow('task content is locked outside backlog and todo')
 
     ledger.settle('task-a', executionId, 'failed', 'boom')
-    expect(() => ledger.applyRequest('update-done', { kind: 'update', taskId: 'task-a', patch: { title: 'C' } })).toThrow('task has already been executed')
+    expect(() => ledger.applyRequest('update-done', { kind: 'update', taskId: 'task-a', patch: { title: 'C' } })).toThrow('task content is locked outside backlog and todo')
 
-    // Execution targets stay editable on an executed task; content stays fixed.
+    // Execution targets stay editable on a locked card; content stays fixed.
     const targets = ledger.applyRequest('update-targets', { kind: 'update', taskId: 'task-a', patch: { workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only' } })
     expect(targets.state.tasks[0]).toMatchObject({
       title: 'B', description: 'd2', prompt: 'p2',
       workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only',
     })
+  })
+
+  it('lets a card settled back into a waiting column be edited again, parse source included', () => {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-b', input: { title: 'A', description: 'd', prompt: 'p' } })
+    const opened = ledger.applyRequest('run', { kind: 'run', taskId: 'task-b' })
+    ledger.settle('task-b', opened.state.tasks[0].executions[0].id, 'cancelled')
+    expect(ledger.state().tasks[0].status).toBe('todo')
+
+    // The gate follows the status, not the execution history: an earlier,
+    // cancelled attempt no longer locks the card for good.
+    const again = ledger.applyRequest('update-again', { kind: 'update', taskId: 'task-b', patch: { title: 'B', parseText: 'rewritten source' } })
+    expect(again.state.tasks[0]).toMatchObject({ title: 'B', parseText: 'rewritten source' })
+    expect(again.state.tasks[0].executions).toHaveLength(1)
   })
 
   it('rejects a newly armed cron with no reachable occurrence', () => {
@@ -719,5 +735,203 @@ describe('ledger schema v3 migration', () => {
     expect(after.scheduler.ledgerId).toBe(before.scheduler.ledgerId)
     expect(JSON.parse(readFileSync(join(root, 'ledger-v2.json'), 'utf8')).schemaVersion).toBe(3)
     reloaded.dispose()
+  })
+})
+
+/**
+ * The configured state machine, not a hardcoded list, decides which move the
+ * Host accepts, where a new card lands, and that the transition actions fire.
+ */
+describe('HostTaskLedger state machine', () => {
+  const machine = {
+    initial: 'backlog',
+    states: [{ status: 'backlog' }, { status: 'todo' }, { status: 'done' }],
+    transitions: [
+      { from: 'backlog', to: 'todo', actions: ['run'] },
+      { from: 'todo', to: 'done', actions: [{ kind: 'stamp', field: 'doneAt' }] },
+    ],
+  }
+
+  function seeded(extra: ConstructorParameters<typeof HostTaskLedger>[2] = {}): HostTaskLedger {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW, extra)
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: '' } })
+    return ledger
+  }
+
+  it('refuses a move the machine does not list', () => {
+    const ledger = seeded({ stateMachine: machine })
+    expect(() => ledger.applyRequest('backlog-done', { kind: 'move', taskId: 'card', status: 'done' }))
+      .toThrow('invalid state transition: backlog → done')
+    expect(ledger.state().tasks[0].status).toBe('backlog')
+    ledger.dispose()
+  })
+
+  it('opens an execution when the transition carries the run action', () => {
+    const ledger = seeded({ stateMachine: machine })
+    const result = ledger.applyRequest('backlog-todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    expect(result.run?.execution.id).toBe(result.state.tasks[0].executions.at(-1)?.id)
+    expect(result.state.tasks[0].status).toBe('todo')
+    expect(result.state.tasks[0].executions).toHaveLength(1)
+    ledger.dispose()
+  })
+
+  it('applies a machine change and falls back to the machine in force when it is invalid', () => {
+    const ledger = seeded({ stateMachine: machine })
+    expect(ledger.setStateMachine({ states: [] })).toEqual(['stateMachine.states: expected a non-empty array'])
+    // The invalid config changed nothing: the custom machine is still enforced.
+    expect(() => ledger.applyRequest('still-custom', { kind: 'move', taskId: 'card', status: 'backlog' }))
+      .toThrow('invalid state transition')
+    expect(ledger.applyRequest('custom-run', { kind: 'move', taskId: 'card', status: 'todo' }).state.tasks[0].status).toBe('todo')
+    ledger.dispose()
+  })
+})
+
+describe('HostTaskLedger rework (ready_for_test → todo with a note)', () => {
+  /** A card parked in `ready_for_test`, as a finished run leaves it. */
+  function parked(): HostTaskLedger {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'open the page' } })
+    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    return ledger
+  }
+
+  it('parks the card back in todo and stores the trimmed note for the next run', () => {
+    const ledger = parked()
+    const result = ledger.applyRequest('rework', { kind: 'rework', taskId: 'card', note: '  the redirect is missing  ' })
+    expect(result.state.tasks[0].status).toBe('todo')
+    expect(result.state.tasks[0].reworkNote).toBe('the redirect is missing')
+    // A rework never runs: the human decides when the agent works again.
+    expect(result.run).toBeUndefined()
+    expect(result.state.tasks[0].executions).toHaveLength(0)
+    ledger.dispose()
+  })
+
+  it('hands the note to the next run and clears it from the card', () => {
+    const ledger = parked()
+    ledger.applyRequest('rework', { kind: 'rework', taskId: 'card', note: 'fix the redirect' })
+    const started = ledger.applyRequest('run', { kind: 'run', taskId: 'card' })
+    expect(started.run?.execution.reworkNote).toBe('fix the redirect')
+    expect(started.state.tasks[0].reworkNote).toBeUndefined()
+    ledger.dispose()
+  })
+
+  it('refuses a blank note, a missing card, and a card the machine has no return path for', () => {
+    const ledger = parked()
+    expect(() => ledger.applyRequest('blank', { kind: 'rework', taskId: 'card', note: '   ' }))
+      .toThrow('rework needs a non-blank note')
+    expect(() => ledger.applyRequest('missing', { kind: 'rework', taskId: 'nope', note: 'fix it' }))
+      .toThrow('task not found')
+    // The state machine decides whether a return path exists at all: `todo` has
+    // no `todo → todo` transition, so a rework there is refused, not invented.
+    // (Batch moves never carry the `run` action, so the card stays put.)
+    ledger.applyRequest('into-todo', { kind: 'move-many', taskIds: ['card'], status: 'todo' })
+    expect(ledger.state().tasks[0].status).toBe('todo')
+    expect(() => ledger.applyRequest('not-parked', { kind: 'rework', taskId: 'card', note: 'fix it' }))
+      .toThrow('invalid state transition: todo → todo')
+    expect(ledger.state().tasks[0].reworkNote).toBeUndefined()
+    ledger.dispose()
+  })
+
+  it('refuses a rework while an execution is open and on an archived card', () => {
+    const ledger = parked()
+    ledger.applyRequest('run', { kind: 'run', taskId: 'card' })
+    expect(() => ledger.applyRequest('running', { kind: 'rework', taskId: 'card', note: 'fix it' }))
+      .toThrow('running task cannot be moved')
+    ledger.dispose()
+
+    const archived = parked()
+    archived.applyRequest('archive', { kind: 'archive', taskId: 'card' })
+    expect(() => archived.applyRequest('archived', { kind: 'rework', taskId: 'card', note: 'fix it' }))
+      .toThrow('archived task is read-only')
+    archived.dispose()
+  })
+})
+
+describe('HostTaskLedger group move (move-many)', () => {
+  /** A ledger seeded with one backlog card per id, in the given order. */
+  function seeded(ids: readonly string[], extra: ConstructorParameters<typeof HostTaskLedger>[2] = {}): HostTaskLedger {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW, extra)
+    for (const id of ids) {
+      ledger.applyRequest(`create-${id}`, { kind: 'create', id, input: { title: id, description: '', prompt: '' } })
+    }
+    return ledger
+  }
+
+  const statusOf = (ledger: HostTaskLedger): Array<[string, string]> =>
+    ledger.state().tasks.map(task => [task.id, task.status])
+
+  it('moves every card in one write and keeps the cards in their order', () => {
+    const ledger = seeded(['a', 'b', 'c'])
+    const before = ledger.state().revision
+    const result = ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['c', 'a'], status: 'ready_for_test' })
+    // Untouched card stays put; the moved pair keeps its ledger order (a, c).
+    expect(result.state.tasks.map(task => task.id)).toEqual(['a', 'b', 'c'])
+    expect(result.state.tasks.filter(task => task.status === 'ready_for_test').map(task => task.id)).toEqual(['a', 'c'])
+    // One revision bump for the whole batch, not one per card.
+    expect(result.state.revision).toBe(before + 1)
+    ledger.dispose()
+  })
+
+  it('is all-or-nothing: one invalid card leaves every card where it was', () => {
+    const ledger = seeded(['a', 'b'])
+    ledger.applyRequest('start-a', { kind: 'run', taskId: 'a' })
+    const before = statusOf(ledger)
+    expect(() => ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['b', 'a'], status: 'ready_for_test' }))
+      .toThrow('running task cannot be moved')
+    expect(statusOf(ledger)).toEqual(before)
+    ledger.dispose()
+  })
+
+  it('refuses to drag a running card into ready_for_test, so only the session end parks it', () => {
+    const ledger = seeded(['a'])
+    ledger.applyRequest('start-a', { kind: 'run', taskId: 'a' })
+    expect(() => ledger.applyRequest('park-a', { kind: 'move', taskId: 'a', status: 'ready_for_test' }))
+      .toThrow('running task cannot be moved')
+    expect(statusOf(ledger)).toEqual([['a', 'running']])
+    // The execution still owns the card: the Host settle is the only way out.
+    expect(ledger.state().tasks[0].executions[0].endedAt).toBeUndefined()
+    ledger.dispose()
+  })
+
+  it('rejects the whole batch when one card has no such transition', () => {
+    // A machine that only lists backlog → todo: the todo card in the batch has
+    // no transition at all, so the backlog card must not move either.
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW, {
+      stateMachine: {
+        initial: 'backlog',
+        states: [{ status: 'backlog' }, { status: 'todo' }, { status: 'done' }],
+        transitions: [{ from: 'backlog', to: 'todo' }],
+      },
+    })
+    ledger.applyRequest('import', {
+      kind: 'import',
+      sourceId: 'seed',
+      tasks: [{ ...task('x'), status: 'todo' }, task('y')],
+    })
+    expect(() => ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['y', 'x'], status: 'todo' }))
+      .toThrow('invalid state transition: todo → todo')
+    expect(ledger.state().tasks.map(entry => [entry.id, entry.status]))
+      .toEqual([['x', 'todo'], ['y', 'backlog']])
+    ledger.dispose()
+  })
+
+  it('refuses a batch whose transition opens an execution', () => {
+    const ledger = seeded(['a'])
+    expect(() => ledger.applyRequest('batch-run', { kind: 'move-many', taskIds: ['a'], status: 'running' }))
+      .toThrow('batch move cannot start executions')
+    expect(ledger.state().tasks[0].status).toBe('backlog')
+    expect(ledger.state().tasks[0].executions).toHaveLength(0)
+    ledger.dispose()
+  })
+
+  it('rejects an unknown card and an archived card without moving the rest', () => {
+    const ledger = seeded(['a', 'b'])
+    ledger.applyRequest('archive-b', { kind: 'archive', taskId: 'b' })
+    expect(() => ledger.applyRequest('batch-unknown', { kind: 'move-many', taskIds: ['a', 'nope'], status: 'todo' }))
+      .toThrow('task not found: nope')
+    expect(() => ledger.applyRequest('batch-archived', { kind: 'move-many', taskIds: ['a', 'b'], status: 'todo' }))
+      .toThrow('archived task is read-only')
+    expect(statusOf(ledger)).toEqual([['a', 'backlog'], ['b', 'backlog']])
+    ledger.dispose()
   })
 })

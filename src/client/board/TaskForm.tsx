@@ -1,12 +1,15 @@
 /**
  * Shared task-modal pieces: the overlay shell (backdrop, form, title, error,
- * footer) and the title/description/prompt field trio used by both the
- * NewTaskModal and the EditTaskModal. State stays in the owning modal; these
- * are controlled components.
+ * footer), the title/description/prompt field trio used by both the
+ * NewTaskModal and the EditTaskModal, and the "Parse with AI" box both forms
+ * offer (same state machine, different opening text). State stays in the
+ * owning modal; these are controlled components.
  */
-import type { ReactNode } from 'react'
-import { TAG_NAME_MAX_LENGTH, TAG_PROMPT_MAX_LENGTH, TASK_TAG_LIMIT, normalizeTags, type TaskTag } from '../../core/tasks.ts'
-import { t } from '../locales.ts'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { TAG_NAME_MAX_LENGTH, TAG_PROMPT_MAX_LENGTH, TASK_TAG_LIMIT, normalizeTags, type TaskRecord, type TaskTag } from '../../core/tasks.ts'
+import type { BoardController } from '../../core/controller.ts'
+import type { TaskBoardParseDraft } from '../../protocol.ts'
+import { t, type TaskBoardKey } from '../locales.ts'
 import css from '../board.module.css'
 
 /** DOM id shared by the tag-name inputs and their datalist (one board at a time). */
@@ -56,6 +59,143 @@ export function ModalShell({
         </footer>
       </form>
     </div>
+  )
+}
+
+/**
+ * Opening text of an existing task's "Parse with AI" box: the source text the
+ * card was created with, or — when that text is gone (cards from before the
+ * box was stored, or a cleared box) — the card's own title, description, and
+ * prompt as one editable block. The user can then rewrite that block and run
+ * "Parse and fill" again.
+ */
+export function parseSourceText(task: Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'parseText'>): string {
+  const stored = task.parseText?.trim()
+  if (stored !== undefined && stored !== '') return stored
+  return [task.title, task.description, task.prompt]
+    .map(part => part.trim())
+    .filter(part => part !== '')
+    .join('\n\n')
+}
+
+/**
+ * State and actions behind one "Parse with AI" box. The owner supplies the
+ * opening text and decides what a successful draft does (the create form fills
+ * its three fields; the edit form overwrites the task's).
+ */
+export function useAiParse(
+  controller: BoardController,
+  initialText: string,
+  onDraft: (draft: TaskBoardParseDraft) => void,
+) {
+  const [text, setText] = useState(initialText)
+  const [models, setModels] = useState(controller.getSnapshot().executionOptions.models ?? [])
+  const [model, setModel] = useState('')
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | undefined>(undefined)
+  const abort = useRef<AbortController | undefined>(undefined)
+
+  // The model roster arrives from the runtime after mount; follow it so the
+  // picker never freezes on an empty snapshot.
+  useEffect(
+    () => controller.subscribe(() => setModels(controller.getSnapshot().executionOptions.models ?? [])),
+    [controller],
+  )
+
+  // Default to the roster's first entry, which the user can change before parsing.
+  useEffect(() => {
+    if (model === '' && models.length > 0) setModel(models[0]!.id)
+  }, [model, models])
+
+  const run = async (): Promise<void> => {
+    const value = text.trim()
+    if (value === '') {
+      setError(t('new.aiParseEmpty'))
+      return
+    }
+    const request = new AbortController()
+    abort.current = request
+    setPending(true)
+    setError(undefined)
+    try {
+      onDraft(await controller.parseTaskDraft({ text: value, ...(model === '' ? {} : { model }) }, request.signal))
+    } catch (failure) {
+      // A cancelled parse reports nothing: the user asked for it to stop.
+      if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      abort.current = undefined
+      setPending(false)
+    }
+  }
+
+  return {
+    text,
+    setText,
+    models,
+    model,
+    setModel,
+    pending,
+    error,
+    setError,
+    run,
+    cancel: (): void => { abort.current?.abort() },
+  }
+}
+
+/**
+ * The "Parse with AI" box: a source textarea, the route picker, and the
+ * run/cancel button. `hintKey` lets the edit form explain that the text is the
+ * card's stored source rather than a fresh paste.
+ */
+export function AiParseSection({
+  parse,
+  hintKey = 'new.aiParseHint',
+}: {
+  parse: ReturnType<typeof useAiParse>
+  hintKey?: TaskBoardKey
+}) {
+  return (
+    <section className={css.aiParse} data-dsh-part="ai-parse">
+      <span className={css.fieldLabel}>{t('new.aiParse')}</span>
+      <p className={css.fieldHint}>{t(hintKey)}</p>
+      <textarea
+        className={css.input}
+        rows={3}
+        value={parse.text}
+        placeholder={t('new.aiParsePlaceholder')}
+        spellCheck={false}
+        onChange={event => { parse.setText(event.target.value); parse.setError(undefined) }}
+      />
+      <div className={css.aiParseRow}>
+        <select
+          className={css.select}
+          value={parse.model}
+          aria-label={t('new.aiParseModel')}
+          onChange={event => { parse.setModel(event.target.value) }}
+        >
+          {parse.models.map(option => (
+            <option key={option.id} value={option.id}>{option.name ?? option.id}</option>
+          ))}
+        </select>
+        {parse.pending
+          ? (
+            <button type="button" className={css.ghostButton} onClick={() => { parse.cancel() }}>
+              {t('new.aiParseCancel')}
+            </button>
+            )
+          : (
+            <button
+              type="button"
+              className={css.primaryButton}
+              disabled={parse.text.trim() === ''}
+              onClick={() => { void parse.run() }}
+            >
+              {t('new.aiParseRun')}
+            </button>
+            )}
+      </div>
+      {parse.error !== undefined && <p className={css.formError}>{parse.error}</p>}
+    </section>
   )
 }
 

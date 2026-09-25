@@ -28,6 +28,7 @@ const wireArgsKeys: Record<string, Record<string, readonly string[]>> = {
     list: ['_request'],
     page: ['request'],
     follow: ['request'],
+    control: [],
     selectModel: ['request'],
   },
 }
@@ -67,6 +68,38 @@ function sessionEvent(type: string, seq: number, time: number, data: unknown) {
 
 function snapshot(records: readonly unknown[], cursor = Math.max(0, ...records.map(record => (record as { event?: { seq?: number } }).event?.seq ?? 0)), hasMore = false) {
   return { type: 'snapshot' as const, header: {}, cursor, records, hasMore, projections: {} }
+}
+
+/**
+ * The live `session/control` baseline the session-end check reads: the
+ * session's pending inbox items and background jobs. Both empty means the
+ * session has no work left.
+ */
+function controlBaseline(
+  queues: Record<string, readonly unknown[]> = {},
+  jobs: Record<string, readonly { status: string }[]> = {},
+) {
+  return { type: 'baseline' as const, value: { queues, jobs, projections: {} } }
+}
+
+/**
+ * Route the fake stream by method so the history-head probe (`follow`) and the
+ * live control baseline (`control`) can be stubbed separately.
+ */
+function routedStream(handlers: {
+  follow?: () => AsyncIterable<unknown>
+  control?: () => AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>
+}) {
+  return fakeStream(async (request: GatewayRequest) => {
+    if (request.method === 'control') {
+      return handlers.control === undefined
+        ? { async *[Symbol.asyncIterator]() { yield controlBaseline() } }
+        : await handlers.control()
+    }
+    return handlers.follow === undefined
+      ? { async *[Symbol.asyncIterator]() { yield snapshot([], 0, false) } }
+      : handlers.follow()
+  })
 }
 
 function configuredTask(): TaskRecord {
@@ -153,6 +186,58 @@ describe('HostExecutionRunner', () => {
     // create/rename reaches the gateway at all.
     expect(order).toEqual(['preset', 'permission', 'prompt'])
     expect(promptPayloads).toEqual([{ sessionId: 'session-existing', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: 'do work' }] }])
+  })
+
+  it('sends only the correction note when a rework continues the session', async () => {
+    const promptPayloads: unknown[] = []
+    const commands = { execute: vi.fn(async () => ({ kind: 'success' as const })) }
+    const gateway = {
+      stream: fakeStream(async () => ({ async *[Symbol.asyncIterator]() { yield snapshot([], 0, false) } })),
+      invoke: fakeInvoke(async (request: GatewayRequest) => {
+        if (request.namespace === 'agentPresets') return { presets: [{ id: 'preset-a', isDefault: false }] }
+        if (request.method === 'prompt') {
+          promptPayloads.push(request.args.request as Record<string, unknown>)
+          return { accepted: true }
+        }
+        throw new Error('unexpected gateway call')
+      }),
+    }
+    await expect(new HostExecutionRunner(gateway, commands, workspaceRegistry()).launch(configuredTask(), {
+      reuseSessionId: 'session-existing',
+      reworkNote: 'the redirect is missing',
+    })).resolves.toBe('session-existing')
+    const prompt = (promptPayloads[0] as { content: Array<{ text: string }> }).content[0].text
+    // The continued conversation already holds the original instruction: the
+    // new turn is the review remark and nothing else.
+    expect(prompt).not.toContain('do work')
+    expect(prompt).toContain('the redirect is missing')
+  })
+
+  it('keeps the original prompt and appends the note when no session can be continued', async () => {
+    const promptPayloads: unknown[] = []
+    const commands = { execute: vi.fn(async () => ({ kind: 'success' as const })) }
+    const gateway = {
+      stream: fakeStream(async () => ({ async *[Symbol.asyncIterator]() { yield snapshot([], 0, false) } })),
+      invoke: fakeInvoke(async (request: GatewayRequest) => {
+        if (request.namespace === 'agentPresets') return { presets: [{ id: 'preset-a', isDefault: false }] }
+        if (request.method === 'create') return { sessionId: 'session-fresh' }
+        if (request.method === 'rename') return { title: 'Run me', seq: 1 }
+        if (request.method === 'prompt') {
+          promptPayloads.push(request.args.request as Record<string, unknown>)
+          return { accepted: true }
+        }
+        throw new Error('unexpected gateway call')
+      }),
+    }
+    await expect(new HostExecutionRunner(gateway, commands, workspaceRegistry()).launch(configuredTask(), {
+      reworkNote: 'the redirect is missing',
+    })).resolves.toBe('session-fresh')
+    const prompt = (promptPayloads[0] as { content: Array<{ text: string }> }).content[0].text
+    // Without the conversation the note would be meaningless on its own, so the
+    // correction rides on the full prompt rather than being dropped.
+    expect(prompt).toContain('do work')
+    expect(prompt).toContain('the redirect is missing')
+    expect(prompt.indexOf('do work')).toBeLessThan(prompt.indexOf('the redirect is missing'))
   })
 
   it('reports the reused session when the reuse prompt fails (#1419)', async () => {
@@ -311,11 +396,13 @@ describe('HostExecutionRunner', () => {
         }
         throw new Error('unexpected gateway call')
       }),
-      stream: fakeStream(async () => ({
-        async *[Symbol.asyncIterator]() {
-          yield snapshot([], 10, true)
-        },
-      })),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+      }),
     }
     const runner = new HostExecutionRunner(gateway)
     try {
@@ -330,47 +417,219 @@ describe('HostExecutionRunner', () => {
     }
   })
 
-  it('pages backward to the execution turn and ignores later user turns in the same session', async () => {
+  it('pages backward to the execution boundary and lets the newest turn end of the run decide', async () => {
     const page = vi.fn(async (request: GatewayRequest) => {
       const payload = request.args.request as { beforeSeq?: number }
       return payload.beforeSeq === undefined
-        ? { records: [sessionEvent('turn/end', 300, 3_000, { reason: { kind: 'error' } })], hasMore: true }
-        : { records: [sessionEvent('turn/end', 100, 1_100, { reason: { kind: 'complete' } }), sessionEvent('session/start', 90, 900, {})], hasMore: false }
+        ? { records: [sessionEvent('turn/end', 300, 3_000, { reason: { kind: 'completed' } })], hasMore: true }
+        // The run began with an aborted turn; the completed turn that follows
+        // decides it, and the user's later message must not re-anchor it.
+        : { records: [sessionEvent('turn/end', 100, 1_100, { reason: { kind: 'aborted', reason: { kind: 'user' } } }), sessionEvent('session/start', 90, 900, {})], hasMore: false }
     })
     const gateway = {
       invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
         ? { items: [{ sessionId: 'session-a', running: false }] }
         : page(request)),
-      stream: fakeStream(async () => ({
-        async *[Symbol.asyncIterator]() {
-          yield snapshot([sessionEvent('user/message', 400, 4_000, {})], 400, true)
-        },
-      })),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([sessionEvent('user/message', 400, 4_000, {})], 400, true)
+          },
+        }),
+      }),
     }
     await expect(new HostExecutionRunner(gateway).inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'succeeded' })
     expect(page).toHaveBeenCalledTimes(2)
     expect((page.mock.calls[1]?.[0].args.request as { beforeSeq?: number }).beforeSeq).toBe(300)
   })
 
-  it('carries the session list in listRunning and reuses it in inspect without another list RPC', async () => {
+  it('fails the card instead of parking it when the run stopped early', async () => {
+    const stopped = (reason: unknown) => new HostExecutionRunner({
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : { records: [sessionEvent('turn/end', 10, 1_200, { reason })], hasMore: false }),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+      }),
+    })
+    await expect(stopped({ kind: 'aborted', reason: { kind: 'user' } }).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'failed', error: 'agent turn was aborted by the user' })
+    await expect(stopped({ kind: 'interrupted' }).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'failed', error: 'agent turn was interrupted' })
+    await expect(stopped({ kind: 'max-tokens' }).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'failed', error: 'agent turn reached the model token limit' })
+    await expect(stopped({ kind: 'blocked' }).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'failed', error: 'agent turn was blocked' })
+    // An unknown or missing reason is no completion either: never park on it.
+    await expect(stopped({ kind: 'something-new' }).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'failed', error: 'agent turn ended with reason "something-new"' })
+    await expect(stopped(undefined).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'failed', error: 'agent turn ended without a completion reason' })
+  })
+
+  it('keeps waiting while the aborted run is still being continued', async () => {
+    const page = vi.fn(async () => ({
+      records: [
+        sessionEvent('turn/end', 30, 4_000, { reason: { kind: 'aborted', reason: { kind: 'user' } } }),
+        sessionEvent('turn/end', 20, 3_000, { reason: { kind: 'completed' } }),
+      ],
+      hasMore: false,
+    }))
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : page()),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 30, true)
+          },
+        }),
+        // The user is still working in the session: nothing settles yet, not
+        // even the failure the aborted turn would otherwise produce.
+        control: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield controlBaseline({ 'session-a': [{ id: 'm1', placement: 'queued' }] })
+          },
+        }),
+      }),
+    }
+    const runner = new HostExecutionRunner(gateway)
+    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })
+    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })
+  })
+
+  it('carries the session list in listRunning and re-reads the roster right before the park', async () => {
     const items = [{ sessionId: 'session-a', running: false }]
     const list = vi.fn(async () => ({ items }))
-    const page = vi.fn(async () => ({ records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'complete' } })], hasMore: false }))
+    const page = vi.fn(async () => ({ records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'completed' } })], hasMore: false }))
     const gateway = {
       invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list' ? list() : page()),
-      stream: fakeStream(async () => ({
-        async *[Symbol.asyncIterator]() {
-          yield snapshot([], 10, true)
-        },
-      })),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+      }),
     }
     const runner = new HostExecutionRunner(gateway)
     const running = await runner.listRunning()
     expect(running).toEqual({ known: true, count: 0, items })
     if (!running.known) throw new Error('expected known')
     await expect(runner.inspect('session-a', 1_000, running.items)).resolves.toEqual({ outcome: 'succeeded' })
-    expect(list).toHaveBeenCalledOnce()
+    // One roster read for the poll, one fresh read that confirms the session
+    // is idle at the moment the card would be parked.
+    expect(list).toHaveBeenCalledTimes(2)
     expect(page).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a card running while its session still has queued work or a live job', async () => {
+    const parked = { records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'completed' } })], hasMore: false }
+    const makeRunner = (baseline: unknown) => new HostExecutionRunner({
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : parked),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+        control: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield baseline
+          },
+        }),
+      }),
+    })
+    // The run's turn ended, but the session still owes a queued prompt: the
+    // card must not move to ready_for_test yet.
+    await expect(makeRunner(controlBaseline({ 'session-a': [{ id: 'm1', placement: 'queued' }] })).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'pending' })
+    // Same for a background job that will wake the session for another turn.
+    await expect(makeRunner(controlBaseline({}, { 'session-a': [{ status: 'running' }] })).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'pending' })
+    // Only the quiet session parks the run.
+    await expect(makeRunner(controlBaseline()).inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'succeeded' })
+  })
+
+  it('keeps a card running when the session started another turn after the poll roster was fetched', async () => {
+    // First roster read is the poll's snapshot (idle), the second one is the
+    // fresh read at park time and shows the turn that started in between.
+    let reads = 0
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: reads++ > 0 }] }
+        : { records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'completed' } })], hasMore: false }),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+      }),
+    }
+    await expect(new HostExecutionRunner(gateway).inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })
+    expect(reads).toBe(2)
+  })
+
+  it('stays pending when the live control baseline cannot be read', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : { records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'completed' } })], hasMore: false }),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+        control: () => ({
+          async *[Symbol.asyncIterator]() {
+            throw new Error('control offline')
+          },
+        }),
+      }),
+    }
+    try {
+      await expect(new HostExecutionRunner(gateway).inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })
+      expect(warnSpy).toHaveBeenCalledWith('[dsh-task-board] session control stream failed during execution inspection; keeping the outcome pending', expect.any(Error))
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('falls back to the idle roster when the runtime has no session control endpoint', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : { records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'completed' } })], hasMore: false }),
+      stream: fakeStream(async (request: GatewayRequest) => {
+        if (request.method === 'control') {
+          const error = new Error('no such invocation') as Error & { code?: string }
+          error.code = 'invocation-unavailable'
+          throw error
+        }
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }
+      }),
+    }
+    try {
+      await expect(new HostExecutionRunner(gateway).inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'succeeded' })
+      expect(warnSpy).toHaveBeenCalledWith('[dsh-task-board] DSH runtime session control endpoint unavailable; the session-end check falls back to the idle roster')
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('requests the host roster under the descriptor _request wire key and reports it known', async () => {
@@ -503,16 +762,18 @@ describe('HostExecutionRunner', () => {
     let headSeq = 40
     let found = false
     const page = vi.fn(async (_request: GatewayRequest) => ({
-      records: [found ? sessionEvent('turn/end', headSeq, 4_000, { reason: { kind: 'complete' } }) : sessionEvent('assistant/message', headSeq, 4_000, {})],
+      records: [found ? sessionEvent('turn/end', headSeq, 4_000, { reason: { kind: 'completed' } }) : sessionEvent('assistant/message', headSeq, 4_000, {})],
       hasMore: false,
     }))
     const gateway = {
       invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list' ? { items: [{ sessionId: 'session-a', running: false }] } : page(request)),
-      stream: fakeStream(async () => ({
-        async *[Symbol.asyncIterator]() {
-          yield snapshot([sessionEvent('assistant/message', headSeq, 4_000, {})], headSeq, true)
-        },
-      })),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([sessionEvent('assistant/message', headSeq, 4_000, {})], headSeq, true)
+          },
+        }),
+      }),
     }
     const runner = new HostExecutionRunner(gateway)
     await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })

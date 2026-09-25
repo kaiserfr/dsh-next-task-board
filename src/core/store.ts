@@ -10,7 +10,7 @@
  * localStorage backend.
  */
 import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
+import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeReworkNote, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
@@ -60,12 +60,14 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
   if (typeof record.title !== 'string') return false
   if (typeof record.description !== 'string') return false
   if (typeof record.prompt !== 'string') return false
+  if (record.parseText !== undefined && typeof record.parseText !== 'string') return false
   if (typeof record.createdAt !== 'number') return false
   if (typeof record.updatedAt !== 'number') return false
   if (record.workspaceId !== undefined && typeof record.workspaceId !== 'string') return false
   if (record.mode !== undefined && typeof record.mode !== 'string') return false
   if (record.permission !== undefined && typeof record.permission !== 'string') return false
   if (record.reuseSession !== undefined && typeof record.reuseSession !== 'boolean') return false
+  if (record.reworkNote !== undefined && typeof record.reworkNote !== 'string') return false
   if (record.git !== undefined && (typeof record.git !== 'object' || record.git === null)) return false
   if (!Array.isArray(record.executions)) return false
   for (const execution of record.executions) {
@@ -80,6 +82,7 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
     if (entry.initiatedBy !== undefined && typeof entry.initiatedBy !== 'string') return false
     if (entry.frozenBy !== undefined && typeof entry.frozenBy !== 'string') return false
     if (entry.frozenAt !== undefined && typeof entry.frozenAt !== 'number') return false
+    if (entry.reworkNote !== undefined && typeof entry.reworkNote !== 'string') return false
   }
   return true
 }
@@ -201,6 +204,12 @@ function normalizeGit(value: unknown): TaskGit | undefined {
     task.workspaceId = normalizeTargetId(row.workspaceId)
     task.mode = normalizeTargetId(row.mode)
     task.archivedAt = typeof row.archivedAt === 'number' && Number.isFinite(row.archivedAt) ? row.archivedAt : undefined
+    // The Done-column FIFO key: kept for a card in `done`, backfilled from
+    // `updatedAt` for a legacy row, and cleared on every other status so a card
+    // that left Done cannot resurface with a stale queue position.
+    task.doneAt = task.status === 'done'
+      ? (typeof row.doneAt === 'number' && Number.isFinite(row.doneAt) ? row.doneAt : row.updatedAt)
+      : undefined
     task.permission = isTaskPermission(row.permission) ? row.permission as TaskPermission : undefined
     task.reuseSession = row.reuseSession === true ? true : undefined
     task.freeze = normalizeFreeze(row.freeze)
@@ -210,7 +219,19 @@ function normalizeGit(value: unknown): TaskGit | undefined {
     // dropped, and a list that repairs to nothing clears the field instead of
     // dropping the task row.
     task.tags = normalizeTags(row.tags)
+    // The parse source is repaired like the schedule: a blank or non-string
+    // persisted value clears the field instead of dropping the card row.
+    task.parseText = normalizeParseText(row.parseText)
     task.permissionConfirmedAt = typeof row.permissionConfirmedAt === 'number' && Number.isFinite(row.permissionConfirmedAt) ? row.permissionConfirmedAt : undefined
+    // The pending correction note is repaired like the schedule: a blank or
+    // over-long persisted value collapses instead of dropping the card row.
+    task.reworkNote = normalizeReworkNote(row.reworkNote)
+    // Execution rows are shape-checked above; only their note needs repair, and
+    // an already-clean note keeps its identity (no needless copy per load).
+    task.executions = row.executions.map((execution) => {
+      const reworkNote = normalizeReworkNote(execution.reworkNote)
+      return reworkNote === execution.reworkNote ? execution : { ...execution, reworkNote }
+    })
     tasks.push(task)
   }
   return tasks

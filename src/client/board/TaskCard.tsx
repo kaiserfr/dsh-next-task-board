@@ -1,16 +1,25 @@
 /**
- * Task card: the board's column item. Clicking opens the task detail — it
- * never executes anything directly (detail holds the Run button).
+ * Task card: the board's column item. A plain click marks the card (the
+ * board owns the Ctrl/Shift/Space rules), a double click opens the task
+ * detail — it never executes anything directly (detail holds the Run button).
+ * A card whose latest execution carries a session also renders a direct
+ * session link, for a running (active) and a settled (inactive) execution
+ * alike.
+ *
+ * The link is a sibling of the card button, not a child: a button may not hold
+ * interactive content, and a nested anchor would not be keyboard-reachable.
+ * Clicking it jumps straight into the session instead of selecting the card.
  *
  * Memoized: the card re-renders only when its own task record changes, so a
  * status/filter update on one card (or scrolling) never re-renders every
  * card on the board. The per-card onClick is built with a stable task reference
  * by the board, so the memo boundary is effective.
  */
-import { memo } from 'react'
+import { memo, type DragEvent, type KeyboardEvent, type MouseEvent } from 'react'
 import type { TaskRecord } from '../../core/tasks.ts'
-import { executionLabel, tagTone } from '../../core/tasks.ts'
+import { isTaskExecuting, tagTone } from '../../core/tasks.ts'
 import { t } from '../locales.ts'
+import { sessionLinkHref } from '../session-link.ts'
 import css from '../board.module.css'
 
 /** Compact relative/absolute time label. */
@@ -37,75 +46,133 @@ export function formatTime(ms: number, timeZone?: string): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
-function TaskCardInner({ task, pending, timeZone, onClick }: { task: TaskRecord; pending: boolean; timeZone?: string; onClick: () => void }) {
+/**
+ * Whether a card may be dragged at all: archived cards are read-only, a card
+ * the runner owns (`running`, or pending on the Host) must not be moved while
+ * its execution settles. The board reuses this to decide which cards a group
+ * drag may carry, so the payload and the `draggable` attribute never disagree.
+ */
+export function isCardDraggable(task: TaskRecord, pending: boolean): boolean {
+  return task.archivedAt === undefined && task.status !== 'running' && !pending
+}
+
+function TaskCardInner({ task, pending, timeZone, selected, dragging, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession }: {
+  task: TaskRecord
+  pending: boolean
+  timeZone?: string
+  selected: boolean
+  dragging: boolean
+  onClick: (event: MouseEvent<HTMLButtonElement>) => void
+  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
+  onDoubleClick: () => void
+  onDragStart: (event: DragEvent<HTMLButtonElement>) => void
+  onDragEnd: (event: DragEvent<HTMLButtonElement>) => void
+  onOpenSession: (sessionId: string) => void
+}) {
   const latest = task.executions[task.executions.length - 1]
   const runs = task.executions.length
   const archived = task.archivedAt !== undefined
-  const isDraggable = !archived && task.status !== 'running' && !pending
+  // "Running now" (holds a session) is marked hard; an open run without a
+  // session is still queued for a WIP slot and only reads as "waiting".
+  const executing = !archived && isTaskExecuting(task)
+  const queued = !archived && !executing && !pending && latest !== undefined && latest.endedAt === undefined
+  const isDraggable = isCardDraggable(task, pending)
+  // One jump target per card: the session of its most recent execution. A
+  // settled execution keeps the link (transcript revisit), a run that has not
+  // attached a session yet has none to offer.
+  const sessionId = latest?.sessionId
+  const sessionLabel = t('card.openSession')
 
   return (
-    <button
-      type="button"
-      className={css.card}
-      data-status={archived ? 'archived' : task.status}
-      data-dsh-part="card"
-      data-pending={pending || undefined}
-      draggable={isDraggable}
-      onDragStart={isDraggable ? (event) => {
-        event.dataTransfer.setData('text/plain', task.id)
-        event.dataTransfer.effectAllowed = 'move'
-      } : undefined}
-      onClick={onClick}
-      title={task.description !== '' ? task.description : task.title}
-    >
-      <span className={css.cardTitle}>{task.title}</span>
-      {task.tags !== undefined && task.tags.length > 0 && (
-        <span className={css.cardTags}>
-          {task.tags.map(tag => (
+    <div className={css.cardBox} data-dsh-part="card-box">
+      <button
+        type="button"
+        className={css.card}
+        data-status={archived ? 'archived' : task.status}
+        data-dsh-part="card"
+        data-pending={pending || undefined}
+        data-executing={executing || undefined}
+        data-has-session={sessionId !== undefined || undefined}
+        data-selected={selected || undefined}
+        data-dragging={dragging || undefined}
+        aria-pressed={archived ? undefined : selected}
+        draggable={isDraggable}
+        onDragStart={isDraggable ? onDragStart : undefined}
+        onDragEnd={isDraggable ? onDragEnd : undefined}
+        onClick={onClick}
+        onKeyDown={onKeyDown}
+        onDoubleClick={onDoubleClick}
+        title={task.description !== '' ? task.description : task.title}
+      >
+        <span className={css.cardTitle}>{task.title}</span>
+        {task.tags !== undefined && task.tags.length > 0 && (
+          <span className={css.cardTags}>
+            {task.tags.map(tag => (
+              <span
+                key={tag.name}
+                className={css.cardTag}
+                data-tag-tone={tagTone(tag.name)}
+                data-dsh-part="tag-badge"
+                data-tag-hint={tag.promptPrefix === undefined ? undefined : tag.promptPrefix}
+                title={tag.promptPrefix === undefined ? tag.name : tag.promptPrefix}
+              >
+                {tag.name}
+              </span>
+            ))}
+          </span>
+        )}
+        {task.description !== '' && <span className={css.cardExcerpt}>{task.description}</span>}
+        <span className={css.cardMeta}>
+          <span className={css.cardTime}>{t('board.updated')} {formatTime(task.updatedAt)}</span>
+          {task.freeze !== undefined && (
+            <span className={css.cardSchedule} title={task.freeze.goal}>{t('card.frozen')}</span>
+          )}
+          {!archived && task.schedule?.enabled === true && (
             <span
-              key={tag.name}
-              className={css.cardTag}
-              data-tag-tone={tagTone(tag.name)}
-              data-dsh-part="tag-badge"
-              data-tag-hint={tag.promptPrefix === undefined ? undefined : tag.promptPrefix}
-              title={tag.promptPrefix === undefined ? tag.name : tag.promptPrefix}
+              className={css.cardSchedule}
+              title={task.schedule.nextRunAt !== undefined
+                ? `${t('card.scheduled')} · ${formatHostTimestamp(task.schedule.nextRunAt, timeZone)}`
+                : t('card.scheduled')}
             >
-              {tag.name}
+              {t('card.scheduled')}
             </span>
-          ))}
+          )}
+          {latest !== undefined && (
+            <span className={css.cardRun} data-result={archived ? undefined : latest.result}>
+              {runs} {t('board.runs')}
+            </span>
+          )}
+          {!archived && (executing || pending) && <span className={css.cardSpinner} aria-hidden="true" />}
         </span>
+        {!archived && pending && <span className={css.cardRunningLabel}>{t('board.pending')}…</span>}
+        {executing && <span className={css.cardExecutingBadge}>{t('card.running')}</span>}
+        {queued && <span className={css.cardRunningLabel}>{t('card.queued')}</span>}
+      </button>
+      {sessionId !== undefined && (
+        <a
+          className={css.cardSession}
+          data-dsh-part="card-session"
+          href={sessionLinkHref(sessionId)}
+          title={`${sessionLabel} · ${sessionId}`}
+          aria-label={sessionLabel}
+          onClick={(event) => {
+            // The card's own detail click must never also fire, whatever the
+            // modifier. A plain left-click jumps in place; a modified click
+            // keeps the browser's new-tab behavior (the href is the deep link),
+            // which is exactly what the anchor exists for.
+            event.stopPropagation()
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+            event.preventDefault()
+            onOpenSession(sessionId)
+          }}
+          // The second click of a double click must not reach the card either,
+          // or jumping into a session would also pop the detail open.
+          onDoubleClick={(event) => { event.stopPropagation() }}
+        >
+          <span aria-hidden="true">⌁</span>
+        </a>
       )}
-      {task.description !== '' && <span className={css.cardExcerpt}>{task.description}</span>}
-      <span className={css.cardMeta}>
-        <span className={css.cardTime}>{t('board.updated')} {formatTime(task.updatedAt)}</span>
-        {task.freeze !== undefined && (
-          <span className={css.cardSchedule} title={task.freeze.goal}>{t('card.frozen')}</span>
-        )}
-        {!archived && task.schedule?.enabled === true && (
-          <span
-            className={css.cardSchedule}
-            title={task.schedule.nextRunAt !== undefined
-              ? `${t('card.scheduled')} · ${formatHostTimestamp(task.schedule.nextRunAt, timeZone)}`
-              : t('card.scheduled')}
-          >
-            {t('card.scheduled')}
-          </span>
-        )}
-        {latest !== undefined && (
-          <span className={css.cardRun} data-result={archived ? undefined : latest.result}>
-            {runs} {t('board.runs')}
-          </span>
-        )}
-        {latest?.sessionId !== undefined && (
-          <span className={css.cardSession} title={latest.sessionId}>⌁</span>
-        )}
-        {!archived && (task.status === 'running' || pending) && <span className={css.cardSpinner} aria-hidden="true" />}
-      </span>
-      {!archived && pending && <span className={css.cardRunningLabel}>{t('board.pending')}…</span>}
-      {!archived && latest !== undefined && executionLabel(latest) === 'running' && (
-        <span className={css.cardRunningLabel}>{t('detail.result.running')}…</span>
-      )}
-    </button>
+    </div>
   )
 }
 

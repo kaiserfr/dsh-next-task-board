@@ -4,7 +4,7 @@
  * orchestrates those), so it is unit-testable without any runtime face.
  */
 import { isValidCron, nextRunAtMs } from '../schedule.ts'
-import { createTask, withSchedule, type NewTaskInput, type TaskRecord } from '../tasks.ts'
+import { createTask, withSchedule, type NewTaskInput, type TaskRecord, type TaskStatus } from '../tasks.ts'
 
 /** Result of a create transition: the new task (when accepted) + the next ledger. */
 export interface CreateTaskResult {
@@ -21,15 +21,18 @@ export interface CreateTaskResult {
  * @param input - raw user input (title/description/prompt + optional schedule).
  * @param now - clock instant (ms epoch).
  * @param id - minted task id.
+ * @param initialStatus - the configured machine's initial column; absent keeps `backlog`.
  */
 export function applyCreateTask(
   tasks: readonly TaskRecord[],
   input: NewTaskInput,
   now: number,
   id: string,
+  initialStatus?: TaskStatus,
 ): CreateTaskResult {
   if (input.title.trim() === '') return { task: undefined, tasks }
-  let task = createTask(input, now, id)
+  const withInitial = initialStatus === undefined ? input : { ...input, initialStatus }
+  let task = createTask(withInitial, now, id)
   // Arm the requested schedule (new-task dialog): only an enabled rule with
   // a valid cron is applied; blank, invalid, or disabled requests leave the
   // task unscheduled.

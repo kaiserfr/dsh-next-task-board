@@ -1,14 +1,14 @@
 /**
  * Update-task use case: apply an editable-field patch (title/description/
- * prompt plus the execution targets workspaceId/mode/permission) with a
- * fresh updatedAt. Pure ledger transition (no persistence or notify — the
- * controller orchestrates those).
+ * prompt/the parse source plus the execution targets
+ * workspaceId/mode/permission) with a fresh updatedAt. Pure ledger transition
+ * (no persistence or notify — the controller orchestrates those).
  *
  * An explicit `undefined` in the patch clears the field (the task falls
  * back to the runtime default); an unknown permission string is ignored so
  * stale UI can never persist a value the execution service rejects.
  */
-import { freezeOf, isTaskPermission, normalizeTags, normalizeTargetId, type TaskRecord, type TaskPermission, type TaskTag } from '../tasks.ts'
+import { freezeOf, isTaskPermission, normalizeParseText, normalizeTags, normalizeTargetId, type TaskRecord, type TaskPermission, type TaskTag } from '../tasks.ts'
 import type { FreezeSnapshot } from '../freeze-snapshot.ts'
 import type { TaskHandoverInput } from '../handover.ts'
 
@@ -16,7 +16,7 @@ import type { TaskHandoverInput } from '../handover.ts'
  * Editable fields on a task (the update patch surface). `freeze` replaces the
  * continuation-card snapshot (restamping frozenAt); an explicit null clears it.
  */
-export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession'>> & {
+export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'parseText' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession'>> & {
   freeze?: FreezeSnapshot & { redacted?: boolean } | null
   /** Replaces the handover bundle (restamping bundledAt); an explicit null clears it. */
   handover?: TaskHandoverInput | null
@@ -30,24 +30,34 @@ export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' |
 }
 
 /** The fields that edit the task's content (what the user reads and what the
- * next execution sends). Unlike the execution targets they stay editable only
- * while the task has never started executing — after the first run the
- * recorded prompt is the record of what actually ran, so it becomes read-only.
+ * next execution sends). They stay editable while the card is still waiting in
+ * a pre-execution column; once it left those columns the recorded content is
+ * the record of what happened, so it becomes read-only.
  */
 export const TASK_CONTENT_FIELDS = ['title', 'description', 'prompt'] as const
 
-/** Whether an update patch touches any task-content field. */
+/**
+ * Whether an update patch touches the task's own content. The parse source
+ * (`parseText`) counts as content: it is the text the box was filled with and
+ * is edited through the same form, so it obeys the same gate.
+ */
 export function hasContentPatch(patch: TaskUpdatePatch): boolean {
-  return (TASK_CONTENT_FIELDS as readonly string[]).some(field => field in patch)
+  return 'parseText' in patch || (TASK_CONTENT_FIELDS as readonly string[]).some(field => field in patch)
 }
 
 /**
- * Whether a task's content may still be edited: the task must be on-board
- * (not archived) and must never have started executing. Fail-closed: a
- * running, settled, or cancelled-before-launch task keeps its content fixed.
+ * Whether a task's content may still be edited: the task must be on-board (not
+ * archived) and must still sit in one of the pre-execution columns `backlog` or
+ * `todo`. Fail-closed everywhere else: a running task holds the content its
+ * session reads, and once a card moved on to `ready_for_test`/`done`/`failed`
+ * its content is the record of what ran.
+ *
+ * Earlier attempts do NOT lock the card: a task whose run failed (or was
+ * cancelled) and was dragged back to `backlog`/`todo` is preparation again and
+ * gets the edit form back — including the "Parse with AI" source text.
  */
 export function canEditTaskContent(task: TaskRecord): boolean {
-  return task.archivedAt === undefined && task.status !== 'running' && task.executions.length === 0
+  return task.archivedAt === undefined && (task.status === 'backlog' || task.status === 'todo')
 }
 
 /** Keep an unknown permission string from entering the ledger. */
@@ -75,7 +85,7 @@ export function applyUpdateTask(
 ): readonly TaskRecord[] {
   return tasks.map(task => {
     if (task.id !== id) return task
-    const { freeze: freezePatch, handover: handoverPatch, tags: tagsPatch, ...rest } = patch
+    const { freeze: freezePatch, handover: handoverPatch, tags: tagsPatch, parseText: parseTextPatch, ...rest } = patch
     const workspaceId = 'workspaceId' in patch ? normalizeTargetId(patch.workspaceId) : undefined
     const mode = 'mode' in patch ? normalizeTargetId(patch.mode) : undefined
     const permission = 'permission' in patch ? normalizePermission(task.permission, patch.permission) : undefined
@@ -88,6 +98,10 @@ export function applyUpdateTask(
       const value = patch[field]
       next[field] = value === undefined ? task[field] : value.trim()
     }
+    // The parse source follows the same gate, but normalizes like creation:
+    // blank (or an explicit undefined) clears it, so "the text is gone" has
+    // exactly one representation for the edit form's fallback seed to key on.
+    if ('parseText' in patch) next.parseText = normalizeParseText(parseTextPatch)
     // null (or a vanished key value) clears the snapshot; a present object
     // replaces it with a fresh frozenAt stamp.
     next.freeze = freezePatch == null ? undefined : freezeOf(freezePatch, now)

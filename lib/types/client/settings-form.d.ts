@@ -6,7 +6,7 @@
  * each plugin's client bundle; mirrors the official ui-plugin-config
  * card-store pattern.
  */
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client';
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client';
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store';
 /** The write one field's staged text performs when the card is saved. */
 export type FieldWrite = {
@@ -86,7 +86,7 @@ export interface CardActions {
     /** Drop every staged edit. */
     discard: () => void;
 }
-/** One durable write inside the save's atomic scope mutation. */
+/** One durable write inside the save's atomic form mutation. */
 export interface BatchedWrite {
     /** Field this entry writes. */
     field: string;
@@ -130,20 +130,20 @@ export declare class CardForm<T> {
     private readonly specs;
     private readonly staged;
     private readonly listeners;
-    /** The scope subscription installed in the constructor; released by dispose(). */
-    private readonly disposeScope;
+    /** The form subscription installed in the constructor; released by dispose(). */
+    private readonly disposeForm;
     private disposed;
     private saving;
     private failed;
     private failedReason;
-    /** @param scope - the bound settings scope for this card's namespace. */
-    constructor(scope: SettingsScope<T>, specs: FieldSpec[]);
+    /** @param scope - the bound configuration form for this card's namespace. */
+    constructor(scope: ConfigForm<T>, specs: FieldSpec[]);
     /**
-     * Release the scope subscription and every bound store listener. The card
+     * Release the form subscription and every bound store listener. The card
      * must call this on teardown; later calls are no-ops.
      */
     dispose(): void;
-    /** Publish a projection of this form, rebuilt whenever the scope or a draft changes. */
+    /** Publish a projection of this form, rebuilt whenever the form or a draft changes. */
     bind<S>(project: () => S): SnapshotStore<S>;
     /** Read the card-level state: what the Host serves, and what a save would do. */
     shell(): CardShell;
@@ -152,19 +152,19 @@ export declare class CardForm<T> {
     /** The actions the card's slot registration injects. */
     actions(): CardActions;
     /**
-     * Write every staged edit in one atomic scope mutation, then re-seed from
+     * Write every staged edit in one atomic form mutation, then re-seed from
      * what the Host accepted.
      *
      * The whole batch rides one mutate, so cross-field validate hooks
      * (baseURL+model) judge it as a unit: the Host either applies every write
-     * or refuses the batch. The 0.1.2 scope contract never rejects a refused
-     * mutation — the scope recovers with a fresh Host view and resolves — so
-     * resolution alone proves nothing: the outcome is judged by reading the
-     * settled snapshot back, one planned write at a time, and one missed write
-     * fails the whole save. A scope that still rejects on refusal (the dsh-web
-     * bridge scope) reports through the same failure path with its rejection
-     * message. A save that did not land keeps its drafts, so the user can
-     * correct them instead of retyping.
+     * or refuses the batch. The form contract answers a refusal or a skipped
+     * write with `false` (it recovers with a fresh Host view instead of
+     * throwing), so the outcome is judged twice: the answer itself, and then the
+     * settled snapshot read back one planned write at a time. One missed write
+     * fails the whole save. A transport that rejects instead (the dsh-web bridge
+     * controller on a dead connection) reports through the same failure path
+     * with its rejection message. A save that did not land keeps its drafts, so
+     * the user can correct them instead of retyping.
      * @returns settlement after the mutation and the read-back.
      */
     save(): Promise<void>;

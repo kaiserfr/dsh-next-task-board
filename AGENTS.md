@@ -11,6 +11,14 @@ dsh Web GUI 的 Host 权威多列任务看板。任务通过真实 DSH 会话执
 - cron 使用 Host 本地时区和标准日期/星期 OR 语义。Host 首启或长暂停后的过期出现全部跳过；同任务 running 时不排队、不并发，只滚动下一触发点。
 - 重启恢复时，有 session id 的 running execution 继续观察；无 session id 的启动中断标为 cancelled，禁止自动重发。
 
+## 状态机（State Engine）
+
+- 看板的列就是任务状态。`src/core/state-machine.ts` 是唯一权威：`DEFAULT_STATE_MACHINE`（`states` 列 / `transitions` 允许的状态转移 / 每个转移的 `actions`）是内置默认，设置命名空间 `task-board` 的 `stateMachine` 字段（JSON）可整体覆盖；配置无效时整份拒绝（`normalizeStateMachine` 给出原因）并继续沿用当前状态机，不得半套生效。
+- 动作只有四种：`git.openBranch`、`git.mergeBranch`、`run`、`{ kind: "stamp", field }`。默认机器里两个 git 动作只挂在 `backlog → todo` 与 `ready_for_test → done` 上；`run` 挂在进入 `running` 的转移上（`backlog → running` 额外先开分支）。新增动作种类必须同时扩展 `STATE_ACTION_KINDS` 与 Host 执行侧，不允许绕过配置在账本里硬编码转移。
+- Host 是执行权威：`HostTaskLedger` 的 `move` 先用机器校验（未声明的转移一律 `invalid state transition`），再按配置顺序执行动作；`create` 落在 `initial`。浏览器不得自行推断可移动性。
+- 浏览器与 Host 必须用同一份机器：`TaskBoardHostService` 把已解析的机器放进快照（`protocol.ts` 的 `stateMachine`），`client/board/TaskBoard.tsx` 据此渲染列并校验拖放；快照缺失时回退内置机器。
+- 改动状态机定义后必须重跑 `node scripts/render-state-machine.mjs` 更新 `docs/state-machine.md`；`tests/state-machine.spec.ts` 会因两者不一致而失败。
+
 ## 电源保护
 
 - `preventIdleSleep` 默认 `false`。开启后，全部 DSH running session、任一已启用 cron 或未知 session 状态都构成持锁理由；仅在已确认无运行会话且无计划时释放。

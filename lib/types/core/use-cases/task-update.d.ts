@@ -1,8 +1,8 @@
 /**
  * Update-task use case: apply an editable-field patch (title/description/
- * prompt plus the execution targets workspaceId/mode/permission) with a
- * fresh updatedAt. Pure ledger transition (no persistence or notify — the
- * controller orchestrates those).
+ * prompt/the parse source plus the execution targets
+ * workspaceId/mode/permission) with a fresh updatedAt. Pure ledger transition
+ * (no persistence or notify — the controller orchestrates those).
  *
  * An explicit `undefined` in the patch clears the field (the task falls
  * back to the runtime default); an unknown permission string is ignored so
@@ -15,7 +15,7 @@ import type { TaskHandoverInput } from '../handover.ts';
  * Editable fields on a task (the update patch surface). `freeze` replaces the
  * continuation-card snapshot (restamping frozenAt); an explicit null clears it.
  */
-export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession'>> & {
+export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'parseText' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession'>> & {
     freeze?: FreezeSnapshot & {
         redacted?: boolean;
     } | null;
@@ -30,17 +30,27 @@ export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' |
     tags?: TaskTag[] | null;
 };
 /** The fields that edit the task's content (what the user reads and what the
- * next execution sends). Unlike the execution targets they stay editable only
- * while the task has never started executing — after the first run the
- * recorded prompt is the record of what actually ran, so it becomes read-only.
+ * next execution sends). They stay editable while the card is still waiting in
+ * a pre-execution column; once it left those columns the recorded content is
+ * the record of what happened, so it becomes read-only.
  */
 export declare const TASK_CONTENT_FIELDS: readonly ["title", "description", "prompt"];
-/** Whether an update patch touches any task-content field. */
+/**
+ * Whether an update patch touches the task's own content. The parse source
+ * (`parseText`) counts as content: it is the text the box was filled with and
+ * is edited through the same form, so it obeys the same gate.
+ */
 export declare function hasContentPatch(patch: TaskUpdatePatch): boolean;
 /**
- * Whether a task's content may still be edited: the task must be on-board
- * (not archived) and must never have started executing. Fail-closed: a
- * running, settled, or cancelled-before-launch task keeps its content fixed.
+ * Whether a task's content may still be edited: the task must be on-board (not
+ * archived) and must still sit in one of the pre-execution columns `backlog` or
+ * `todo`. Fail-closed everywhere else: a running task holds the content its
+ * session reads, and once a card moved on to `ready_for_test`/`done`/`failed`
+ * its content is the record of what ran.
+ *
+ * Earlier attempts do NOT lock the card: a task whose run failed (or was
+ * cancelled) and was dragged back to `backlog`/`todo` is preparation again and
+ * gets the edit form back — including the "Parse with AI" source text.
  */
 export declare function canEditTaskContent(task: TaskRecord): boolean;
 /**

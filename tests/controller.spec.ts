@@ -20,6 +20,8 @@ const flush = (): Promise<void> => new Promise(resolve => { setTimeout(resolve, 
 class FakeSessions {
   current: string | undefined = undefined
   openCalls: string[] = []
+  /** Optional roster re-pull (the production face has one; tests opt in). */
+  refresh: (() => Promise<void>) | undefined
   private listeners = new Set<() => void>()
   list = {
     getSnapshot: (): { current: string | undefined } => ({ current: this.current }),
@@ -202,6 +204,25 @@ describe('task mutations', () => {
     expect(persisted.title).toBe('y')
     expect(persisted.status).toBe('backlog')
   })
+
+  it('moves a group of cards in one write and ignores duplicate ids', async () => {
+    const { controller, store } = makeController()
+    const first = controller.createTask({ title: 'a', description: '', prompt: '' })!
+    const second = controller.createTask({ title: 'b', description: '', prompt: '' })!
+    await expect(controller.moveTasks([first.id, second.id, first.id], 'todo')).resolves.toBe(true)
+    expect(store.load().map(entry => [entry.id, entry.status])).toEqual([
+      [first.id, 'todo'],
+      [second.id, 'todo'],
+    ])
+  })
+
+  it('treats an empty group move as a no-op', async () => {
+    const { controller, store } = makeController()
+    controller.createTask({ title: 'a', description: '', prompt: '' })
+    const before = store.load().map(entry => [entry.id, entry.status])
+    await expect(controller.moveTasks([], 'todo')).resolves.toBe(true)
+    expect(store.load().map(entry => [entry.id, entry.status])).toEqual(before)
+  })
 })
 
 describe('view state', () => {
@@ -279,6 +300,56 @@ describe('view state', () => {
     const { controller, sessions } = makeController()
     controller.openSession('exec-session')
     expect(sessions.openCalls).toEqual(['exec-session'])
+  })
+
+  it('openSession returns true and leaves no error for a live session', () => {
+    const { controller } = makeController()
+    controller.openBoard()
+    expect(controller.openSession('exec-session')).toBe(true)
+    // The conversation takes over: the board hands the center column back.
+    expect(controller.getSnapshot().boardOpen).toBe(false)
+    expect(controller.getSnapshot().sessionOpenError).toBeUndefined()
+  })
+
+  it('openSession reaches an inactive session by refreshing a stale roster first', async () => {
+    // The runtime refuses an id the local roster has not pulled (the normal
+    // state of an older, settled execution in a fresh tab). The jump must
+    // refresh the host-authoritative roster and retry instead of failing.
+    const sessions = new FakeSessions()
+    let known = false
+    let refreshes = 0
+    const open = sessions.open.bind(sessions)
+    sessions.open = (id: string): void => {
+      if (!known) throw new Error(`sessions.select: unknown session ${id}`)
+      open(id)
+    }
+    sessions.refresh = async (): Promise<void> => { refreshes += 1; known = true }
+    const controller = new BoardController({ store: new InMemoryTaskStore(), sessions, now: () => NOW, uuid })
+    controller.start()
+
+    expect(controller.openSession('inactive-session')).toBe(false)
+    await flush()
+    expect(refreshes).toBe(1)
+    expect(sessions.openCalls).toEqual(['inactive-session'])
+    expect(controller.getSnapshot().sessionOpenError).toBeUndefined()
+  })
+
+  it('openSession reports a session the roster does not know even after a refresh', async () => {
+    const sessions = new FakeSessions()
+    sessions.open = (): void => { throw new Error('sessions.select: unknown session gone') }
+    sessions.refresh = async (): Promise<void> => {}
+    const controller = new BoardController({ store: new InMemoryTaskStore(), sessions, now: () => NOW, uuid })
+    controller.start()
+    controller.openBoard()
+
+    expect(controller.openSession('gone')).toBe(false)
+    await flush()
+    expect(controller.getSnapshot().sessionOpenError).toContain('gone')
+    // A failed jump must not act as a dead-end navigation: the board stays.
+    expect(controller.getSnapshot().boardOpen).toBe(true)
+
+    controller.dismissSessionOpenError()
+    expect(controller.getSnapshot().sessionOpenError).toBeUndefined()
   })
 })
 

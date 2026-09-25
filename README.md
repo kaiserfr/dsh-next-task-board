@@ -4,8 +4,8 @@ English | [中文](README.zh.md)
 
 > **Fork — `kaiserfr/dsh-next-task-board`.** Independent fork of
 > [`zhu1090093659/dsh-web`'s `packages/dsh-task-board`](https://github.com/zhu1090093659/dsh-web/tree/dev/packages/dsh-task-board)
-> (base **0.3.23**, Apache-2.0). It adds a **Host-enforced WIP limit**,
-> **drag-to-start**, and an **agentic-programming workflow** (Ready-for-test
+> (base **0.3.23**, Apache-2.0). It adds a **Host-enforced WIP limit per
+> workspace**, **drag-to-start**, and an **agentic-programming workflow** (Ready-for-test
 > column, Backlog-by-default, automatic git feature branch and merge), and
 > drops upstream's telemetry heartbeat — see
 > [What this fork adds over the upstream task board](#what-this-fork-adds-over-the-upstream-task-board)
@@ -28,20 +28,34 @@ route and system-prompt section).
 
 | Area | Upstream 0.3.23 | This fork |
 | --- | --- | --- |
-| **Execution concurrency** | Every run starts as soon as it is due; nothing bounds how many runs hold a session at once. | **Host-enforced WIP limit** `maxConcurrentRuns` (default **1**): runs above the limit wait in a FIFO queue and start in arrival order as soon as a running execution settles. |
+| **Execution concurrency** | Every run starts as soon as it is due; nothing bounds how many runs hold a session at once. | **Host-enforced WIP limit per workspace** `maxConcurrentRuns` (default **1**): runs of one workspace above the limit wait in a FIFO queue and start in arrival order as soon as a running execution of that workspace settles. Different workspaces are independent lanes and run in parallel. |
+| **Done column** | Grows without bound; archiving is a manual action. | **Host-enforced Done-column limit** `maxDoneTasks` (default **9**): a move into Done that would exceed the limit archives the cards that entered Done earliest (FIFO) until the limit holds again — only as many as needed, never deleted, still reachable in the archive view. Applying the limit (Host start, settings change) trims an already over-limit column right away. |
 | **Starting from the board** | Dragging a card only moves it between `backlog` and `todo`. | **Dragging a card onto "In progress" starts the task** through the same Host action as the detail view's Run button. |
+| **Selecting several cards** | One card per drag; moving a set means dragging the cards one after another. | **Multi-select with group drag**: a click marks a card, Ctrl/Cmd-click adds or removes one, Shift-click marks the range from the anchor card up to the clicked one (board order: columns left to right, cards top to bottom). Dragging a marked card moves the whole marked set as one atomic `move-many` action — either every card moves or none does. A click on free board space or the clear button in the header chip drops the selection, an unmarked card still drags alone, and cards the state machine forbids in the target column stay behind. Since the plain click now marks, the **double click** opens the task detail (Enter on the focused card opens it too, Space marks it with the same modifiers). |
+| **Card → session** | The card only shows a glyph for the latest run's session; reaching the transcript means opening the detail and finding the execution row. | **Each card with a session links straight into it**: a corner anchor jumps to the session transcript for a live (running) and a settled (inactive) execution alike, without opening the detail. The anchor carries a `#session=<id>` deep link, so middle-click / Ctrl-click or a copied URL opens the session too — the session roster is refreshed first when the id is not loaded yet, and a genuinely unknown session is reported instead of failing silently. |
+| **Running card & WIP order** | The `running` column looks like any other column, and its cards keep the ledger's order. | The card that **holds a session right now** is unmistakable (thick warn border, warn-tinted surface, pulsing ring, "Running now" badge), while a card still waiting for a WIP slot keeps the thin column border and reads "Queued". The column is ordered like the queue: the executing card on top, then the waiting runs in arrival order — the card dragged in last sits at the bottom. |
 | **Board workflow** | Five columns; new tasks start in `todo`. | **Agentic-programming defaults**: six columns with **Ready for test** directly before Done; new tasks start in **Backlog**; a successful run parks the card in Ready for test, and Done is reached only by a manual move. |
+| **State engine** | The columns and their allowed moves are hardcoded. | **Configurable state machine** `stateMachine`: columns are task states, `transitions` declare which moves exist, and each transition carries its `actions` (`git.openBranch`, `git.mergeBranch`, `run`, `stamp`). The Host refuses any move the machine does not list and hands the resolved machine to the browser, so drag & drop is validated against exactly those transitions. See [`docs/state-machine.md`](docs/state-machine.md). |
+| **Corrections after a test** | A card that failed its test can only be dragged back by hand, with nowhere to say what has to be fixed. | **Send back with a note**: a card in Ready for test gets a correction field and a *Send back to To Do* button (Host action `rework`). The note is stored on the card, shown there until the next run, and then delivered to the agent as its **own new message inside the card's previous conversation** — never as an edit of the original prompt, which stays the record of what was asked. A rework round therefore continues that conversation even for a card that never opted into session reuse; if the previous session is gone or busy, the note instead rides on a fresh prompt (with a Host warning) so it is never dropped silently. The move itself still goes through the state machine, and a rework never starts a run on its own. |
 | **Git integration** | None. | When the card's pinned workspace is a local git worktree, the board **opens `task/<slug>-<id8>` when the card enters Todo, checks it out for the run, and commits + merges it back into the base branch when the card reaches Done** (no-op without a repository). |
+| **Editing task content** | Content (title, description, prompt) locks after the first run, so a card that failed and was dragged back stays read-only forever. | **Content stays editable while the card waits in Backlog/To do** — whatever ran before; `running` and the settled columns (`ready_for_test`/`done`/`failed`) stay read-only, where *Edit as New Copy* is the way forward. The **"Parse with AI" source text is stored on the card**, so the edit form offers the same text again and *Parse and fill* can be re-run; when that text is gone the box opens on the card's title, description, and prompt. |
 | **Telemetry** | The client sends one anonymous install heartbeat per UTC day to `dsh-market.com`. | **Removed.** No heartbeat is sent at mount; `src/client/telemetry.ts` stays on disk for a possible own endpoint but is not imported. |
 | **Distribution** | Part of the `dsh-web` monorepo, installed from npm or the `web-ui-all` aggregate. | **Standalone repo**: `lib/` is committed, so `dsh plugin --profile web add github:kaiserfr/dsh-next-task-board` installs without a build step and without an `allowBuilds` approval. |
 | **Agent announcement** | Names `dsh-task-board` and the upstream aggregate package. | Names this fork and spells out the WIP queue semantics to the agent. |
 
-### Host-enforced WIP limit
+### Host-enforced WIP limit (per workspace / lane)
 
 - Enforced in `TaskBoardHostService`, not merely in the browser.
+- The limit is counted **per lane**, where a lane is the task's effective
+  workspace (the handover bundle's workspace overrides the pin). Cards without a
+  pinned workspace share one lane, because their real target is only resolved at
+  launch time.
+- Lanes are independent: runs of different workspaces start in parallel, and a
+  saturated lane does not hold back later queue entries of other lanes. Within
+  one lane the queue is still FIFO.
 - A slot is freed when a running execution **settles**, not when its session is
   attached; otherwise the board would only be throttled at start instead of truly
-  serial.
+  serial per workspace.
 - A waiting run is already `running` in the ledger without a session, so its card
   reads as in progress and cannot be started a second time.
 - Lowering the limit never aborts a running task: surplus slots drain as their
@@ -49,6 +63,23 @@ route and system-prompt section).
 - The queue self-heals — an entry whose execution is no longer open (deleted,
   archived, or settled while it waited) is dropped on the next pump.
 - Manual runs and cron runs share the launch queue, so both are limited.
+
+### Done-column limit (FIFO displacement)
+
+- The `done` column holds at most `maxDoneTasks` cards (default **9**). A move
+  into Done that would leave more archives the cards that have been in Done
+  longest — by their Done entry stamp, so the ledger's array position and the
+  card's other fields do not affect the order. The limit applies to the `done`
+  column only; other columns are never touched, and the surviving cards keep
+  their order.
+- Only as many cards are displaced as the limit requires, and they are
+  **archived, not deleted**: status and execution history stay, the card leaves
+  the columns and is reachable through the board's archive view, where it can be
+  restored.
+- The trim also runs whenever the limit is applied — at Host start (the
+  configured `maxDoneTasks`) and on every settings change — so an already
+  over-limit column converges immediately instead of waiting for the next move.
+  Lowering N therefore trims the surplus right away.
 
 ### Drag a card onto "In progress" to start it
 
@@ -58,6 +89,102 @@ route and system-prompt section).
 - Waiting, running, archived, and unknown cards are ignored; `backlog`/`todo`
   remain pure manual status moves.
 
+### Send a card back with a correction note
+
+- A card in **Ready for test** that did not pass review goes back to **To do**
+  with a reason: the detail view offers a *Correction note* field and the
+  *Send back to To Do* button (only there — the field has no meaning in any other
+  column).
+- The note travels as the Host action `rework` (trimmed, capped at 4000
+  characters; a blank note is refused by the wire gate and re-checked by the
+  Host). The move is validated against the state machine like every other move,
+  so a machine without `ready_for_test → todo` refuses the rework instead of
+  inventing a transition. A rework never starts a run: the human still decides
+  when the agent works again (drag onto "In progress", the Run button, cron).
+- The note does **not** rewrite the original prompt. Sessions are append-only and
+  the original prompt is followed by everything the agent did, so the next run
+  sends the note as **its own user message** inside the card's previous
+  conversation: the transcript then reads *the original ask, the work, the review
+  remark*. Without a note, a reuse prompt stays byte-for-byte what it was.
+- To make that possible a rework round continues the previous session even for a
+  card that never opted into `reuseSession`; the conditions of
+  `core/session-reuse.ts` stay the single authority and keep failing closed. If
+  the previous session is gone, still running, or the roster is unknown, no
+  session is continued and the note is appended to a fresh prompt instead (with a
+  Host warning), so a correction is never dropped silently.
+- Lifecycle: the note sits on the card (`reworkNote`, shown in the detail view
+  while it is pending), moves onto the execution record when the next run opens
+  (audit trail), and then leaves the card. Without a Host transport the rework is
+  refused, because only the Host writes the ledger.
+
+### Edit content while the card waits
+
+- Content (title, description, prompt) is editable exactly while the card is not
+  archived and still waits in **`backlog` or `todo`** — regardless of how many
+  runs it already had. A card that failed and was dragged back into a waiting
+  column is preparation again and gets the edit form back; `running` (the session
+  is reading that content right now), `ready_for_test`, `done`, and `failed` are
+  locked and offer *Edit as New Copy* instead. The Host re-checks the same rule on
+  every `update` patch, so a card that started running while the modal was open
+  fails closed.
+- The text of the **"Parse with AI"** box is stored on the card (`parseText`), so
+  reopening the edit form offers the same source text and *Parse and fill* can be
+  run again on an edited copy of it. Like the other content fields it is trimmed,
+  and an empty box means "no stored text" rather than an empty string.
+- When no stored text exists — cards created before the field, or a cleared box —
+  the box opens on the card's **title, description, and prompt joined into one
+  block** (blank parts dropped). The user edits that block and runs *Parse and
+  fill* to rewrite the three fields. That fallback is derived, so it is only
+  saved once the user actually works in the box: editing just the title or prompt
+  leaves the stored source alone, and a card that never used the box does not
+  acquire the fallback as its source.
+- The box only appears where the deployment carries a parse face
+  (`canParseTask`).
+
+### Multi-select and group drag
+
+- Selection works like a file manager: a plain click marks exactly that card and
+  becomes the anchor, Ctrl/Cmd-click adds or removes a single card, and
+  Shift-click marks the range from the anchor to the clicked card in board order
+  (columns left to right, cards top to bottom within a column). A click on free
+  board space or the clear button in the header chip drops the selection.
+- Because the plain click now marks, the **double click** opens the task detail,
+  and **Enter** on the focused card opens it directly. **Space** marks the
+  focused card like a plain click, with the same modifiers (Shift = range,
+  Ctrl/Cmd = toggle); the card consumes the keydown, so neither the button's
+  synthetic click nor a page scroll follows. Opening the detail keeps the
+  selection.
+- Dragging a marked card carries the whole **draggable** selection; dragging an
+  unmarked card still moves that one card only, so single-card drag & drop is
+  unchanged. The drag payload keeps the lead id in `text/plain` for
+  compatibility and adds the full id list under
+  `application/x-dsh-taskboard-cards`.
+- The Host receives one atomic `move-many` action: it validates every card
+  before writing anything, so an invalid entry leaves the whole batch untouched
+  and the revision bumps exactly once. Cards the machine does not allow into the
+  target column stay where they are; if no dragged card may move, nothing
+  happens and the selection stays.
+- Moved cards keep their order among themselves (the Host keeps the ledger
+  order). Dropping the group on the "In progress" column starts each eligible
+  card one after another through the existing `rerun` path, so the runner's
+  single-run invariant still holds.
+- Feedback: marked cards get an accent border and tint, the cards under the
+  cursor dim, and a counter names how many cards the drop will carry. The
+  selection is browser-only view state (like the filter), never part of the
+  ledger, and it is empty after a successful move.
+
+### Running card marking and WIP column order
+
+- "Running now" means the task's latest execution is open **and** has already
+  attached its session — exactly the condition under which the Host holds a WIP
+  slot (`isTaskExecuting`). Only that card gets the heavy warn treatment; an open
+  run without a session is queued, not running, and stays visually quiet.
+- The runner-owned column is ordered like its queue: the executing card(s) on
+  top, then the waiting runs in arrival order, so the card pulled in last lands
+  at the bottom. Every other column keeps the ledger's order.
+- The ordering is presentation only (`compareWipOrder`); the ledger and the Host
+  are untouched. The pulse respects `prefers-reduced-motion`.
+
 ### Agentic-programming workflow and git integration
 
 - Columns: `backlog → todo → running → ready_for_test → done → failed`.
@@ -66,6 +193,15 @@ route and system-prompt section).
 - A successful execution parks the card in **Ready for test** (a failed one in
   Failed); the runner never produces `done`, so accepting the work is always a
   human move.
+- The park is a **session-end statement**: the Host waits until the execution's
+  session has actually stopped — its newest turn ended, the roster reports it
+  idle, nothing sits in its prompt inbox and no background job of it is still in
+  flight — before the card moves. A turn boundary alone never parks a card,
+  because a session continues every queued prompt and every job wake-up as its
+  own turn. Only a turn that ended `completed` counts as success: a run the user
+  aborted, that hit the model token limit, was interrupted or errored ends in
+  Failed with that reason, so an unfinished run can never look ready for testing.
+  While the session is still working, the card stays in **In progress**.
 - When the card's pinned workspace is a git worktree, the Host keeps the work on
   a feature branch and runs the whole flow in the background:
   - Backlog → Todo opens `task/<title-slug>-<id8>`, cut from the current branch
@@ -78,18 +214,22 @@ route and system-prompt section).
     merges the branch back with `--no-ff`. A git failure (e.g. a merge conflict)
     fails the move and keeps the card in Ready for test.
 - Limits: git needs a pinned workspace (without one the board cannot know which
-  repository is meant); the flow shares one worktree, which matches the default
-  WIP limit of 1 — parallel runs (`maxConcurrentRuns > 1`) would race on the
-  checkout.
+  repository is meant); each workspace uses its own worktree, and the per-lane
+  WIP limit means two runs of the same workspace never share a checkout — runs of
+  different workspaces are safe to overlap.
 
 ## Features
 
-- **Task board UI**: a sidebar entry below New Session shows icon and text in the wide sidebar and an icon in the collapsed rail; the board provides six kanban columns, search, task details, archive/restore, execution history, and links to execution transcripts. New tasks land in Backlog and cards drag between Backlog, Todo, Ready for test, and Done for a manual status change; dragging a card onto the running column starts it through the same Host action as the detail view's Run button **(fork addition)**. Archived tasks are read-only except for restore, delete, and transcript viewing, and cannot run manually or on schedule until restored.
-- **Host-enforced WIP limit (fork addition)**: at most `maxConcurrentRuns` task runs (default `1`) hold a session at once; further manual and cron runs wait in a FIFO queue and start as a running execution settles. See [What this fork adds](#what-this-fork-adds-over-the-upstream-task-board).
+- **Task board UI**: a sidebar entry below New Session shows icon and text in the wide sidebar and an icon in the collapsed rail; the board provides six kanban columns, search, task details, archive/restore, execution history, and links to execution transcripts. New tasks land in Backlog and cards drag between Backlog, Todo, Ready for test, and Done for a manual status change; dragging a card onto the running column starts it through the same Host action as the detail view's Run button **(fork addition)**. A card whose latest execution has a session also carries a direct session link in its corner, which jumps into the transcript for an active and an inactive session alike **(fork addition)**. Archived tasks are read-only except for restore, delete, and transcript viewing, and cannot run manually or on schedule until restored.
+- **Host-enforced WIP limit per workspace (fork addition)**: at most `maxConcurrentRuns` task runs (default `1`) of one workspace hold a session at once; further manual and cron runs of that workspace wait in a FIFO queue and start as a running execution settles. Different workspaces run in parallel. See [What this fork adds](#what-this-fork-adds-over-the-upstream-task-board).
+- **Host-enforced Done-column limit (fork addition)**: the `done` column holds at most `maxDoneTasks` cards (default `9`); a move into Done beyond the limit archives the cards that have been in Done longest (FIFO) — only as many as needed, never deleted, and restorable from the archive view. Applying the limit trims an already over-limit column immediately.
+- **Running-card marking and WIP column order (fork addition)**: the card the runner is executing right now — latest execution open *and* session attached — is unmistakable (thick warn border, warn-tinted surface, pulsing ring, "Running now" badge), while a card of the same column still waiting for a WIP slot keeps the thin column border and reads "Queued". The runner-owned column is ordered like the queue: executing card first, then waiting runs in arrival order (last dragged-in card at the bottom); other columns keep the ledger order.
+- **Multi-select and group drag (fork addition)**: a click marks a card, Ctrl/Cmd-click adds or removes one, Shift-click marks the range from the anchor card to the clicked one, and dragging any marked card moves the whole marked set in one atomic `move-many` Host action — either every card moves or none does, and the revision bumps once. Cards the state machine forbids in the target column stay behind; a drop with nothing movable changes nothing and keeps the selection. Dropping the group on the running column starts each eligible card in turn through the ordinary `rerun` path. A click on free board space or the header chip's clear button empties the selection, an unmarked card still drags alone, and the double click (or Enter on the focused card; Space marks from the keyboard) opens the detail as before.
+- **Corrections after a test (fork addition)**: a card in Ready for test that did not pass the review goes back to To do with a written reason. The detail view offers a correction field and the *Send back to To Do* button (Host action `rework`, note trimmed and capped at 4000 characters); the move is validated against the state machine and never starts a run by itself. The note is not an edit of the original prompt: the next run delivers it as **its own user message inside the card's previous conversation**, which a rework round continues even for a card that never opted into session reuse. If that conversation is gone or busy, the note is appended to a fresh prompt instead, with a Host warning — a correction is never dropped silently. The note then lives on the execution record as the round's audit stamp.
 - **Continuation cards (data plane)**: a new task may paste a `<<<FREEZE ... >>>FREEZE` block from a session; it parses into a goal/progress/next snapshot persisted with the task (ledger v3). Cards carry a frozen badge, the detail view shows the full snapshot and freeze time, search covers snapshot text, and archive/restore matches plain tasks. The snapshot reuses the freeze security gate at the protocol layer: sensitive patterns become `[REDACTED]` with a marker, slash-prefixed command lines reject the whole snapshot, and each field is capped at 8 KiB.
 - **Handover bundles and the permission confirmation gate**: a continuation card may attach a handover bundle — the pinned execution triplet (workspace / agent preset / permission) plus doc/script references. The bundle's triplet overrides the plain pin fields at execution, and the references ride the prompt as a handover preamble. A binding whose effective permission is above `sessionDefaultPermission` (default `read-only`) is unconfirmed: manual run refuses, cron skips the card and rolls to the next occurrence, and the confirm button in the task detail resolves the binding; any later permission or bundle change re-arms the gate.
 - **Claim provenance wrap and source audit**: executing a continuation card (a card with a frozen snapshot) mandatorily wraps the task instruction in a source-declaration template — freeze instant, source session, and an unreviewed-content warning — composed after the handover preamble so the picking-up agent stays wary of stored prompt injection in card text. The session issuing a create/update action is stamped into the snapshot (frozenBy, re-stamped when the snapshot is replaced), and the session issuing a run/rerun lands on the execution record (initiatedBy) together with a captured copy of the freeze provenance; both are visible in the task detail. The initiator is client-asserted audit metadata, not a trust boundary.
-- **Task tags (issue #1521)**: a task may carry up to eight labels. A label renders as a colour-toned badge on the card — the tone is hashed from the name, so one label always paints the same way and no colour is stored — the board header gains a multi-select tag filter built from every label in use (including archived tasks), and search also matches label names. A label with an "execution hint" is injected ahead of the execution prompt on every run as a `标签提示` block; a label without one is display and filter only, so an untagged task's prompt is byte-for-byte what it was before the feature. Labels stay editable after the first run: they classify the task and shape the next run, they are not the record of what already ran.
+- **Task tags (issue #1521)**: a task may carry up to eight labels. A label renders as a colour-toned badge on the card — the tone is hashed from the name, so one label always paints the same way and no colour is stored — the board header gains a multi-select tag filter built from every label in use (including archived tasks), and search also matches label names. A label with an "execution hint" is injected ahead of the execution prompt on every run as a `标签提示` block; a label without one is display and filter only, so an untagged task's prompt is byte-for-byte what it was before the feature. Labels stay editable even where the content is locked: they classify the task and shape the next run, they are not the record of what already ran.
 - **Project partition (issue #1536)**: the board header offers a project row built from the deployment's DSH workspaces — "all projects" plus one entry per registered project. Selecting a project narrows the columns to the tasks pinned to it, and tasks with no pinned workspace stay visible under "all projects". Opening the new-task form while a project is open preselects that project as the task's workspace, and "new project…" registers a host directory through the same runtime call the GUI's own add-project uses.
 - **AI parse of pasted text (issue #1540)**: the new-task form takes text copied from anywhere and has a model turn it into the title, description, and run prompt. The model is one of the deployment's configured models (the same list the task's model pin uses, first entry preselected), and the call runs on the Host behind the board's usual loopback and same-origin fence, with a 45 s budget and a cancel affordance. The draft only fills the form: nothing is created until the task is submitted, and a failed parse leaves what you already typed untouched.
 - **Host-authoritative ledger**: tasks, schedules, and execution records live in `$DSH_HOME/task-board/ledger-v2.json`; browser actions become confirmed Host transactions.
@@ -140,7 +280,9 @@ dsh plugin --profile web add link:$(pwd)
 | `enabled` | `true` | Enables the Host service and browser board. |
 | `announceToAgent` | `false` | Opt-in: when true, adds the task-board guidance section to agent system prompts. |
 | `preventIdleSleep` | `false` | Holds one system idle-sleep assertion while any DSH session runs, any schedule is enabled, or session state is unknown. |
-| `maxConcurrentRuns` | `1` | **Fork addition.** WIP limit: how many task runs may hold a session at once. Runs above the limit wait in a FIFO queue and start as soon as a running task settles. Queued cards already read as running (no session yet) and are recorded as `cancelled` when the Host restarts before they start. |
+| `maxConcurrentRuns` | `1` | **Fork addition.** WIP limit per workspace: how many task runs of one workspace may hold a session at once. Runs of that workspace above the limit wait in a FIFO queue and start as soon as one of its tasks settles; other workspaces run in parallel. Queued cards already read as running (no session yet) and are recorded as `cancelled` when the Host restarts before they start. |
+| `maxDoneTasks` | `9` | **Fork addition.** Done-column limit (N): a move into Done that would leave more than N cards there archives the cards that entered Done earliest (FIFO) until the limit holds again — only as many as needed, never deleted, still reachable in the archive view. Applying the limit at Host start or on a settings change trims an already over-limit column right away. Applies to the `done` column only. |
+| `stateMachine` | the shipped machine | **Fork addition.** The board's state engine as one JSON document: the columns (`states`), the allowed state changes (`transitions`) and the actions a transition fires (`actions`: `git.openBranch`, `git.mergeBranch`, `run`, `stamp`). The Host refuses any `move` the machine does not list, and hands the resolved machine to the browser in the snapshot, so drag & drop is validated against exactly the same transitions. An invalid config is refused as a whole and the machine in force stays. See [`docs/state-machine.md`](docs/state-machine.md). |
 | `trustedProxyHosts` | `[]` | Canonical `host[:port]` authorities accepted only through the authenticated loopback reverse-proxy path. |
 | `proxyTokenEnv` | `DSH_TASK_BOARD_PROXY_TOKEN` | Environment variable containing the reverse-proxy token; the token itself is never stored in plugin config. |
 | `sessionDefaultPermission` | `read-only` | The deployment's session-default permission. A card whose effective permission (handover bundle or pin) is above this value requires a human confirmation before it may run; cron refuses unconfirmed cards. |
@@ -185,25 +327,31 @@ Set `DSH_POWER_SMOKE=1` to opt into the native helper smoke test on Windows, mac
 
 1. Mount the package, restart `dsh web`, open the task board, and confirm the Host time zone and power status are visible.
 2. Create and edit a task; refresh or open a second same-origin tab and confirm both show the same Host revision.
-3. Run a task with pinned workspace, preset, and permission; confirm a new session appears and the task settles from its `turn/end` history.
+3. Run a task with pinned workspace, preset, and permission; confirm a new session appears and the card turns **Ready for test** only once that session has ended (its turn finished and nothing is queued or still running in it).
 4. Enable a near-future cron, close all browser pages, and confirm the Host still creates and settles exactly one execution.
 5. Stop the Host past a cron occurrence, restart it, and confirm the missed occurrence is skipped and `nextRunAt` rolls forward from current Host time.
 6. Enable `preventIdleSleep`, run a long session, and let the display turn off; after restoring the display, confirm the session continued and the execution settled.
-7. Trigger three runs at once and confirm the Host starts them one after another in arrival order (default WIP limit 1), and that raising `maxConcurrentRuns` to 2 starts two at once.
+7. Trigger three runs of one workspace at once and confirm the Host starts them one after another in arrival order (default WIP limit 1); pin one of them to a different workspace and confirm it starts in parallel. Raising `maxConcurrentRuns` to 2 starts two runs of the same workspace at once.
 8. Disable the setting and all schedules, stop DSH, and confirm the helper exits; on macOS, `pmset -g assertions` should show no display-sleep assertion from this plugin.
 9. On Linux, use `systemd-inhibit --list` to confirm that only an `idle`/`block` entry exists; the display should still follow desktop settings, while manual sleep and lid close remain under system policy.
+10. Start one task and drag a second one of the same workspace onto "In progress": the executing card carries the thick warn border, the tinted surface and the "Running now" badge on top of the column, the waiting card keeps the thin border and reads "Queued" below it.
+11. Click one card, Ctrl-click a second one, then Shift-click a fourth: the header chip should count the marked cards, the Shift range should cover everything between the anchor and the clicked card, and dragging any marked card onto another column should move them all at once, leaving the selection empty. A click on free board space, the chip's clear button, and a double click on a card (which opens the detail) should all behave as described.
+12. Let a card run to **Ready for test**, open its detail, write a correction note and press *Send back to To Do*: the card lands in To do with the note shown as pending. Mark the card's `reuseSession` as off first and confirm that the next run still continues the previous session and that the session transcript shows the note as a **new user message** (the original prompt is untouched); after the run the pending note is gone from the card and sits on the execution row instead.
 
 ## Known limitations
 
 - Missed occurrences during Host downtime, system sleep, or a long pause are skipped and never queued for catch-up.
-- A task that is already running skips its due occurrence and rolls to the next cron match; two occurrences of the same task never overlap. Runs of *different* tasks do queue at the WIP limit (fork addition).
+- A task that is already running skips its due occurrence and rolls to the next cron match; two occurrences of the same task never overlap. Runs of *different* tasks of the same workspace do queue at the WIP limit (fork addition); runs of other workspaces do not.
 - DST follows the Host local wall clock: a nonexistent spring-forward minute is skipped, and a repeated fall-back minute is not replayed a second time.
 - Power protection prevents only idle system sleep. It deliberately allows display sleep and lock.
+- A correction note can only be delivered into the card's previous conversation if that session is idle and still in the roster. Otherwise the next run starts a fresh session and the note is appended to the prompt there: the agent then gets the correction without the conversation it corrects (the Host logs a warning, and the note is never dropped).
 - Lid close, manual sleep, hibernation, shutdown, low-battery forced sleep, and enterprise power policy are outside the guarantee.
 - The plugin does not schedule wake timers and cannot wake a computer that is already asleep.
 - Linux requires systemd-logind and policy permission for the current user to acquire an idle block lock. Containers, WSL, hosts without a system bus, and non-systemd systems may report `unsupported` or `error`. Whether a desktop also associates a logind idle lock with display idleness is desktop policy; the plugin does not request a screensaver or display inhibitor.
 - Keeping enabled schedules armed may increase battery consumption because protection starts before their future trigger time.
 - A run waiting in the WIP queue (fork addition) has no session yet; if the Host restarts before it starts, the execution settles as `cancelled` and the task must be started again.
+- Multi-select (fork addition) moves cards **into a column**, not to a position: dropping *between* two cards is not supported, and the moved cards land in the target column in their previous order.
+- Multi-select (fork addition) needs Ctrl/Cmd or Shift: on a pure touch device a tap only ever marks one card, so a group drag is not available there.
 - Host execution consumes the same API quota as an ordinary DSH agent session.
 
 ## Telemetry

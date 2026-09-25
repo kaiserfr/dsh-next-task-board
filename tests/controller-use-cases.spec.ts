@@ -101,26 +101,49 @@ describe('use-case: update', () => {
     expect(updated[0].description).toBe('d')
     expect(updated[0].prompt).toBe('p')
   })
+
+  it('stores the parse source trimmed, clears it when blank, and keeps it when absent', () => {
+    const kept = applyUpdateTask(seed(1), 'id-0', { parseText: '  pasted source  ' }, NOW + 1)
+    expect(kept[0].parseText).toBe('pasted source')
+
+    const cleared = applyUpdateTask(kept, 'id-0', { parseText: '   ' }, NOW + 2)
+    expect(cleared[0].parseText).toBeUndefined()
+
+    const untouched = applyUpdateTask(kept, 'id-0', { title: 'T' }, NOW + 3)
+    expect(untouched[0].parseText).toBe('pasted source')
+  })
 })
 
 describe('use-case: update content editability', () => {
-  it('allows content edits only before the first execution', () => {
+  it('allows content edits while the card waits in backlog or todo, whatever ran before', () => {
     const fresh = seed(1)[0]
+    expect(fresh.status).toBe('backlog')
     expect(canEditTaskContent(fresh)).toBe(true)
 
     const running = startExecution(fresh, NOW, 'e-run').task
     expect(running.status).toBe('running')
     expect(canEditTaskContent(running)).toBe(false)
 
+    // An earlier attempt does not lock the card any more: a run that was
+    // cancelled (or failed) and left the card in todo is preparation again.
+    const cancelled = settleExecution(startExecution(fresh, NOW, 'e-cancel').task, 'e-cancel', 'cancelled', NOW + 1, undefined)
+    expect(cancelled.status).toBe('todo')
+    expect(cancelled.executions).toHaveLength(1)
+    expect(canEditTaskContent(cancelled)).toBe(true)
+
+    // Once the card left the pre-execution columns its content is the record
+    // of what ran, so it stays read-only there.
     const parked = settleExecution(running, 'e-run', 'succeeded', NOW + 1, undefined)
     expect(parked.status).toBe('ready_for_test')
     expect(canEditTaskContent(parked)).toBe(false)
 
-    const cancelled = settleExecution(startExecution(fresh, NOW, 'e-cancel').task, 'e-cancel', 'cancelled', NOW + 1, undefined)
-    expect(cancelled.status).toBe('todo')
-    expect(canEditTaskContent(cancelled)).toBe(false)
-
+    expect(canEditTaskContent({ ...fresh, status: 'done' })).toBe(false)
+    expect(canEditTaskContent({ ...fresh, status: 'failed' })).toBe(false)
     expect(canEditTaskContent({ ...fresh, archivedAt: NOW })).toBe(false)
+  })
+
+  it('gates the parse source like the content fields', () => {
+    expect(hasContentPatch({ parseText: 'source' })).toBe(true)
   })
 
   it('flags only task-content fields as content patches', () => {

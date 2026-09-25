@@ -7,10 +7,11 @@
 import { useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron } from '../../core/schedule.ts'
-import { MANUAL_STATUSES, TASK_PERMISSIONS, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
+import { resolveStateMachine, type TaskStatus } from '../../core/state-machine.ts'
+import { TASK_PERMISSIONS, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
 import { canEditTaskContent } from '../../core/use-cases/task-update.ts'
 import { requiresPermissionConfirmation } from '../../core/handover.ts'
-import { t, type TaskBoardKey } from '../locales.ts'
+import { dictionary, t, type TaskBoardKey } from '../locales.ts'
 import { SCHEDULE_PRESETS } from '../schedule-presets.ts'
 import css from '../board.module.css'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
@@ -18,6 +19,16 @@ import { EditTaskModal, EditTagsModal } from './EditTaskModal.tsx'
 import { NewTaskModal } from './NewTaskModal.tsx'
 import { formatHostTimestamp, formatTime } from './TaskCard.tsx'
 import { STATUS_KEY } from './status-key.ts'
+
+/**
+ * Label of a manual-move chip. The machine may name a target the shipped
+ * dictionary has no wording for (a custom column); the column's own label is
+ * then better than a missing-key artifact.
+ */
+function moveLabel(status: TaskStatus): string {
+  const key = `status.move.${status}` as TaskBoardKey
+  return key in dictionary() ? t(key) : t(STATUS_KEY[status])
+}
 
 /** Execution outcome → locale key. */
 const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TaskBoardKey> = {
@@ -55,6 +66,13 @@ function ExecutionRow({ execution, timeZone, onOpen }: { execution: ExecutionRec
       )}
       {execution.error !== undefined && execution.error !== '' && (
         <span className={css.executionError}>{execution.error}</span>
+      )}
+      {execution.reworkNote !== undefined && (
+        // The correction this round was started with. It left the card when the
+        // run opened, so the execution row is where it stays readable.
+        <span className={css.executionTimes} data-dsh-part="execution-rework-note">
+          {t('detail.execution.reworkNote', { note: execution.reworkNote })}
+        </span>
       )}
     </li>
   )
@@ -271,6 +289,8 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
   const [showEdit, setShowEdit] = useState(false)
   const [showEditTags, setShowEditTags] = useState(false)
   const [showDuplicate, setShowDuplicate] = useState(false)
+  /** Correction remark of a rework round; cleared when it was accepted. */
+  const [reworkNote, setReworkNote] = useState('')
 
   // Keep the overlay in sync if the task record changes underneath.
   const [latest, setLatest] = useState(task)
@@ -280,6 +300,7 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
     setShowEdit(false)
     setShowEditTags(false)
     setShowDuplicate(false)
+    setReworkNote('')
   }, [task.id])
   const current = latest
   const snapshot = controller.getSnapshot()
@@ -289,6 +310,13 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
   const transportError = snapshot.transportError
   const timeZone = snapshot.host?.scheduler.timeZone
   const permissionPending = requiresPermissionConfirmation(current, snapshot.host?.sessionDefaultPermission)
+  // Manual move targets come from the machine the Host enforces, so a chip is
+  // never offered for a move the Host would refuse. A target whose transition
+  // carries the `run` action is an execution start (this card's own Run
+  // button), not a status move.
+  const machine = resolveStateMachine(snapshot.host?.stateMachine).machine
+  const moveTargets = machine.targets(current.status)
+    .filter(status => !machine.actionsFor(current.status, status).includes('run'))
 
   return (
     <div className={css.modalBackdrop} onMouseDown={event => { if (event.target === event.currentTarget) controller.closeTask() }}>
@@ -425,7 +453,7 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
             <section className={css.detailSection}>
               <h4>{t('board.status')}</h4>
               <div className={css.moveRow}>
-                {MANUAL_STATUSES.map(status => (
+                {moveTargets.map(status => (
                   <button
                     key={status}
                     type="button"
@@ -433,10 +461,46 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
                     disabled={current.status === status || running || pending}
                     onClick={() => { controller.moveTask(current.id, status) }}
                   >
-                    {t(`status.move.${status}` as TaskBoardKey)}
+                    {moveLabel(status)}
                   </button>
                 ))}
               </div>
+              {current.status === 'ready_for_test' && (
+                <div className={css.field} data-dsh-part="rework">
+                  <span className={css.fieldLabel}>{t('detail.rework.label')}</span>
+                  <p className={css.fieldHint}>{t('detail.rework.hint')}</p>
+                  <textarea
+                    className={css.input}
+                    rows={4}
+                    value={reworkNote}
+                    disabled={pending}
+                    placeholder={t('detail.rework.placeholder')}
+                    onChange={event => { setReworkNote(event.target.value) }}
+                  />
+                  <div className={css.aiParseRow}>
+                    <button
+                      type="button"
+                      className={css.ghostButton}
+                      disabled={pending || reworkNote.trim() === ''}
+                      onClick={() => {
+                        void controller.reworkTask(current.id, reworkNote.trim()).then(accepted => {
+                          if (accepted) setReworkNote('')
+                        })
+                      }}
+                    >
+                      {t('detail.rework.send')}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          {!archived && current.reworkNote !== undefined && (
+            <section className={css.detailSection} data-dsh-part="rework-note">
+              <h4>{t('detail.rework.pending')}</h4>
+              <pre className={css.promptBlock}>{current.reworkNote}</pre>
+              <p className={css.detailMeta}>{t('detail.rework.pendingHint')}</p>
             </section>
           )}
         </div>

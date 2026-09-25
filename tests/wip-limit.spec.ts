@@ -1,6 +1,8 @@
 /**
- * WIP limit: the Host starts queued runs strictly in arrival order and never
- * lets more executions hold a session than `maxConcurrentRuns` (default 1).
+ * WIP limit: the Host starts queued runs strictly in arrival order within a
+ * lane (workspace) and never lets more executions hold a session than
+ * `maxConcurrentRuns` (default 1) in that lane. Lanes are independent: runs of
+ * different workspaces do not block each other.
  *
  * A slot is held from the moment a run attaches its session until that
  * execution settles — attaching alone does not free it, which is what makes
@@ -29,15 +31,16 @@ afterEach(() => {
 
 /**
  * Three runnable tasks and a service whose runner holds every launch open until
- * the test releases it, so concurrency is observable.
+ * the test releases it, so concurrency is observable. `workspaces` pins task
+ * ids to workspace ids, which is what puts them in different WIP lanes.
  */
-function harness(now: number) {
+function harness(now: number, workspaces: Record<string, string> = {}) {
   const ledger = new HostTaskLedger(root(), () => now)
   for (const id of ['a', 'b', 'c']) {
     ledger.applyRequest(`create-${id}`, {
       kind: 'create',
       id,
-      input: { title: id.toUpperCase(), description: '', prompt: `work ${id}` },
+      input: { title: id.toUpperCase(), description: '', prompt: `work ${id}`, ...(workspaces[id] === undefined ? {} : { workspaceId: workspaces[id] }) },
     })
   }
   const service = new TaskBoardHostService({} as unknown as TypertGateway, {
@@ -124,6 +127,72 @@ describe('task-board WIP limit', () => {
 
     releases[2]?.()
     await flush()
+    settleTask('b')
+    settleTask('c')
+    await flush()
+    service.dispose()
+  })
+
+  it('enforces the limit per workspace: other lanes are not blocked', async () => {
+    // a+b share w1 (serial), c alone in w2 (parallel to w1).
+    const { service, started, releases, run, flush, settleTask } = harness(Date.now(), { a: 'w1', b: 'w1', c: 'w2' })
+    run('a')
+    run('b')
+    run('c')
+    await flush()
+    expect(started).toEqual(['a', 'c'])
+
+    releases[0]?.()
+    releases[1]?.()
+    await flush()
+
+    // Settling the w2 run frees only w2: w1's queued run stays blocked by a.
+    settleTask('c')
+    await flush()
+    expect(started).toEqual(['a', 'c'])
+
+    // Settling a frees w1, so its own queue advances; w2 is independent again.
+    settleTask('a')
+    await flush()
+    expect(started).toEqual(['a', 'c', 'b'])
+    releases[2]?.()
+    await flush()
+    service.dispose()
+  })
+
+  it('does not let a saturated lane hold back later lanes in the queue', async () => {
+    // Arrival order a(w1), b(w2), c(w1): b must overtake c because w1 is full.
+    const { service, started, releases, run, flush, settleTask } = harness(Date.now(), { a: 'w1', c: 'w1', b: 'w2' })
+    run('a')
+    run('b')
+    run('c')
+    await flush()
+    expect(started).toEqual(['a', 'b'])
+
+    releases[0]?.()
+    releases[1]?.()
+    await flush()
+    settleTask('a')
+    await flush()
+    expect(started).toEqual(['a', 'b', 'c'])
+    releases[2]?.()
+    await flush()
+    service.dispose()
+  })
+
+  it('applies maxConcurrentRuns independently to every lane', async () => {
+    const { service, started, releases, run, flush, settleTask } = harness(Date.now(), { a: 'w1', b: 'w1', c: 'w2' })
+    service.setMaxConcurrentRuns(2)
+    run('a')
+    run('b')
+    run('c')
+    await flush()
+    // w1 has two slots and takes both of its runs; w2 runs in parallel.
+    expect(started).toEqual(['a', 'b', 'c'])
+
+    for (const release of releases) release()
+    await flush()
+    settleTask('a')
     settleTask('b')
     settleTask('c')
     await flush()

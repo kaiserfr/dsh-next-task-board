@@ -26,8 +26,10 @@ const draft = { title: 'Parsed title', description: 'Parsed description', prompt
 function renderModal(options: { canParseTask?: boolean; parseTaskDraft?: unknown } = {}): {
   container: HTMLElement
   parseTaskDraft: ReturnType<typeof vi.fn>
+  createTaskConfirmed: ReturnType<typeof vi.fn>
 } {
   const parseTaskDraft = (options.parseTaskDraft ?? vi.fn(async () => draft)) as ReturnType<typeof vi.fn>
+  const createTaskConfirmed = vi.fn()
   const snapshot: ControllerSnapshot = {
     tasks: [],
     boardOpen: true,
@@ -44,7 +46,7 @@ function renderModal(options: { canParseTask?: boolean; parseTaskDraft?: unknown
   const controller = {
     getSnapshot: () => snapshot,
     subscribe: () => () => {},
-    createTaskConfirmed: vi.fn(),
+    createTaskConfirmed,
     parseTaskDraft,
   } as unknown as BoardController
   const container = document.createElement('div')
@@ -52,7 +54,7 @@ function renderModal(options: { canParseTask?: boolean; parseTaskDraft?: unknown
   const root = createRoot(container)
   roots.push(root)
   act(() => { root.render(<NewTaskModal controller={controller} onClose={() => undefined} />) })
-  return { container, parseTaskDraft }
+  return { container, parseTaskDraft, createTaskConfirmed }
 }
 
 function field(container: HTMLElement, placeholder: string): HTMLInputElement | HTMLTextAreaElement {
@@ -115,5 +117,24 @@ describe('new-task AI parse section (#1540)', () => {
     typeInto(field(container, t('new.aiParsePlaceholder')), 'some note')
     await act(async () => { parseButton(container).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     expect(field(container, t('new.titlePlaceholder'))).toHaveProperty('value', '手工写的标题')
+  })
+
+  it('stores the box text on the created card so the edit form can offer it again', async () => {
+    const { container, createTaskConfirmed } = renderModal()
+    typeInto(field(container, t('new.aiParsePlaceholder')), 'source for later')
+    await act(async () => {
+      (container.querySelector('button[type="submit"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(createTaskConfirmed).toHaveBeenCalledOnce()
+    expect(createTaskConfirmed.mock.calls[0]![0]).toMatchObject({ parseText: 'source for later' })
+  })
+
+  it('omits the field entirely when the box stayed empty', async () => {
+    const { container, createTaskConfirmed } = renderModal()
+    await act(async () => {
+      (container.querySelector('button[type="submit"]') as HTMLButtonElement).dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    })
+    expect(createTaskConfirmed).toHaveBeenCalledOnce()
+    expect(createTaskConfirmed.mock.calls[0]![0]).not.toHaveProperty('parseText')
   })
 })
