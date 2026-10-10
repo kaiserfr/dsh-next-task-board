@@ -4,7 +4,7 @@
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { describe, expect, it } from 'vitest'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
-import { HostExecutionRunner } from '../src/host-runner.ts'
+import { COMPLETION_MARKER, HostExecutionRunner } from '../src/host-runner.ts'
 
 function card(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
@@ -69,10 +69,15 @@ describe('HostExecutionRunner provenance wrapper (issue #6)', () => {
     expect(text.indexOf('继续干活')).toBeGreaterThan(text.indexOf('来源声明'))
   })
 
-  it('leaves plain tasks without a freeze unwrapped', async () => {
+  it('leaves plain tasks without a freeze unwrapped and teaches the completion report', async () => {
     const prompts: unknown[] = []
     await new HostExecutionRunner(gatewayOf(prompts)).launch(card())
-    expect(promptTextOf(prompts)).toBe('继续干活')
+    const text = promptTextOf(prompts)
+    // The card body stays the instruction, byte-for-byte at the front; the
+    // completion contract is the board's own closing block after it.
+    expect(text.startsWith('继续干活')).toBe(true)
+    expect(text).not.toContain('来源声明')
+    expect(text).toContain(COMPLETION_MARKER)
   })
 
   // 对抗场景 c（存储注入）：卡片正文与来源会话不得伪造来源声明的定界串，

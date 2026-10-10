@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import { DEFAULT_MAX_DONE_TASKS, normalizeReworkNote, retainRecentExecutions, settleExecution, startExecution, taskLane, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, hasOpenRun, isReworkReturn, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -43,7 +43,36 @@ export interface LedgerState {
   scheduler: TaskBoardSchedulerSnapshot
 }
 
+/**
+ * A card whose execution the Host still has to start. The execution is either
+ * the card's run (`execution.kind` undefined — the `run` action, cron) or its
+ * clarification run (`execution.kind === 'clarify'`, the `backlog → todo`
+ * step): the two share the launch queue, but only the implementation run obeys
+ * the lane WIP limit — `todo` is WIP-free; they also differ in the prompt and
+ * in whether settling moves the card.
+ */
 export interface OpenedRun {
+  task: TaskRecord
+  execution: ExecutionRecord
+}
+
+/**
+ * A run the `pause` action suspended: the Host service stops `sessionId` (when
+ * the run had already attached one) so the agent stops working. The card keeps
+ * its column and its open execution; only the session's active turn is ended.
+ */
+export interface PausedRun {
+  taskId: string
+  sessionId: string | undefined
+}
+
+/**
+ * A run the `resume` action released: the Host service continues the run's own
+ * conversation with a "continue" turn (`sessionId`), or — for a run that was
+ * still waiting for a WIP slot and never got one — hands it back to the launch
+ * queue.
+ */
+export interface ResumedRun {
   task: TaskRecord
   execution: ExecutionRecord
 }
@@ -56,6 +85,29 @@ export interface OpenExecutionReference {
   readonly startedAt: number
   /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
   readonly lane: string
+  /** `'clarify'` for the card's clarification round; a real run otherwise. */
+  readonly kind: 'clarify' | undefined
+}
+
+/**
+ * One card the rework watch follows (see {@link HostTaskLedger.reworkWatch}): a
+ * settled card plus the conversation a human turn would arrive in.
+ */
+export interface ReworkWatchEntry {
+  readonly taskId: string
+  readonly sessionId: string
+  /** When the card parked; older turns belong to the run that settled. */
+  readonly since: number
+}
+
+/**
+ * One card the question watch follows (see
+ * {@link HostTaskLedger.awaitingAnswerWatch}): a card plus the conversation a
+ * question of the agent would be waiting in.
+ */
+export interface AnswerWatchEntry {
+  readonly taskId: string
+  readonly sessionId: string
 }
 
 /** Minimal value copy used by the Host scheduler. */
@@ -308,6 +360,14 @@ export class HostTaskLedger {
   /** Done-column limit: on-board `done` cards allowed before FIFO displacement. */
   private maxDoneTasks: number
 
+  /**
+   * The Done-column limit in force. Read-only accessor for the Host snapshot,
+   * which reports the configuration to the browser alongside the state.
+   */
+  get maxDoneTasksLimit(): number {
+    return this.maxDoneTasks
+  }
+
   /** The configurable state machine that validates every move and names its actions. */
   private machine: StateMachine
 
@@ -415,6 +475,10 @@ export class HostTaskLedger {
     const openExecutions: OpenExecutionReference[] = []
     for (const task of this.document.tasks) {
       if (task.archivedAt === undefined && task.schedule?.enabled === true) armedSchedules += 1
+      // A paused run is deliberately invisible here: the monitor must not
+      // inspect (and settle) a run the user suspended, and the freed WIP slot is
+      // what lets the lane's remaining work start.
+      if (task.pausedAt !== undefined) continue
       for (const execution of task.executions) {
         if (execution.endedAt !== undefined) continue
         openExecutions.push({
@@ -423,10 +487,98 @@ export class HostTaskLedger {
           sessionId: execution.sessionId,
           startedAt: execution.startedAt,
           lane: taskLane(task),
+          kind: execution.kind,
         })
       }
     }
     return { armedSchedules, openExecutions }
+  }
+
+  /**
+   * The cards the rework watch follows: every settled card in `ready_for_test`
+   * or `failed`, with the conversation the human would write the correction
+   * into. A cheap projection on purpose — the watch runs on the hot poll path,
+   * which must not clone the whole document.
+   */
+  reworkWatch(): ReworkWatchEntry[] {
+    const entries: ReworkWatchEntry[] = []
+    for (const task of this.document.tasks) {
+      if (task.archivedAt !== undefined) continue
+      if (task.status !== 'ready_for_test' && task.status !== 'failed') continue
+      // The newest settled conversation, scanning from the tail: that is where
+      // the human would write the correction (a clarification round that never
+      // opened an implementation has no settle and cannot match).
+      for (let index = task.executions.length - 1; index >= 0; index -= 1) {
+        const execution = task.executions[index]
+        if (execution.sessionId === undefined || execution.endedAt === undefined) continue
+        entries.push({ taskId: task.id, sessionId: execution.sessionId, since: execution.endedAt })
+        break
+      }
+    }
+    return entries
+  }
+
+  /**
+   * The cards the question watch follows: every card that can currently be
+   * waiting for the human's answer, with the conversation that answer would go
+   * into. Cheap on purpose — the watch runs on the hot poll path, which must not
+   * clone the whole document.
+   *
+   * Two kinds qualify. A card with an open, unsettled run: the agent may ask
+   * inside it (a blocking `ask_user_question`, or a prose question it stopped
+   * on). And a `todo` card that already ran its clarification round: that run
+   * settles without moving the card, so the questions it asked are still
+   * unanswered in the very conversation the card keeps. Paused cards are left
+   * out — their session was stopped deliberately, which is not a wait.
+   */
+  awaitingAnswerWatch(): AnswerWatchEntry[] {
+    const entries: AnswerWatchEntry[] = []
+    for (const task of this.document.tasks) {
+      if (task.archivedAt !== undefined || task.pausedAt !== undefined) continue
+      const latest = task.executions[task.executions.length - 1]
+      const open = latest !== undefined && latest.endedAt === undefined
+      const clarifying = task.status === 'todo' && task.clarificationSessionId !== undefined
+      if (!open && !clarifying) continue
+      // The card's own jump target: the newest execution's conversation, and the
+      // clarification conversation of a card that only ever had that one.
+      const sessionId = latest?.sessionId ?? task.clarificationSessionId
+      if (sessionId === undefined) continue
+      entries.push({ taskId: task.id, sessionId })
+    }
+    return entries
+  }
+
+  /** Whether the card's open run is currently suspended by a pause. */
+  isPaused(taskId: string): boolean {
+    return this.document.tasks.find(task => task.id === taskId)?.pausedAt !== undefined
+  }
+
+  /**
+   * Whether `executionId` of `taskId` is still unsettled. A queued launch asks
+   * this right before it starts: the go-ahead of a card whose clarification run
+   * was still waiting closes that execution, and starting its session anyway
+   * would mint the second conversation the card must never have.
+   */
+  isOpenExecution(taskId: string, executionId: string): boolean {
+    const task = this.document.tasks.find(item => item.id === taskId)
+    return task !== undefined && task.executions.some(execution =>
+      execution.id === executionId && execution.endedAt === undefined)
+  }
+
+  /**
+   * Clear a pause stamp without resuming the run. Used when stopping the paused
+   * session failed (no live agent to stop): the card goes back to the normal
+   * monitor, which settles the run on its own instead of leaving it frozen.
+   */
+  clearPause(taskId: string): void {
+    const now = this.now()
+    let changed = false
+    this.document.tasks = this.document.tasks.map(task => {
+      if (task.id !== taskId || task.pausedAt === undefined) return task
+      changed = true
+      return withPause(task, false, now)
+    })
+    if (changed) this.commit()
   }
 
   /** Count armed, non-archived schedules without cloning task histories. */
@@ -456,10 +608,24 @@ export class HostTaskLedger {
   }
 
   /**
+   * Close the card's open clarification round, if it has one, because the human
+   * pulled the card on to the run column: the implementation takes over that
+   * conversation, and the card must never hold two open executions (or two
+   * conversations). The round is recorded as cancelled — it was neither
+   * completed by the agent nor failed — and a launch not started yet is dropped
+   * by the pump.
+   */
+  private supersedeClarification(task: TaskRecord, now: number): TaskRecord {
+    const round = openExecution(task)
+    if (round?.kind !== 'clarify') return task
+    return settleExecution(task, round.id, 'cancelled', now, 'superseded by the implementation run')
+  }
+
+  /**
    * Ensure the card has a feature branch before it starts. The backlog → todo
-   * pull normally opens it; a cron trigger, a drag straight to "In progress",
-   * or the detail Run button may bypass that, and those runs must not land on
-   * the base branch. No-op without a repository or when a branch already exists.
+   * pull normally opens it; a cron trigger or the detail Run button may bypass
+   * that, and those runs must not land on the base branch. No-op without a
+   * repository or when a branch already exists.
    */
   private withFeatureBranch(task: TaskRecord): TaskRecord {
     if (task.git !== undefined) return task
@@ -468,21 +634,69 @@ export class HostTaskLedger {
   }
 
   /**
-   * The card's `git` after a transition's git hooks ran, in configured order.
-   * `"git": false` on the transition skips them entirely; without a repository
-   * the hooks are no-ops. Shared by the single-card and the batch move so a
-   * group drop fires exactly the hooks a single drop of the same card would.
+   * The card after a transition's git hooks ran, in configured order. Only the
+   * first git action of a transition applies; `"git": false` skips them
+   * entirely; without a repository the hooks are no-ops. Shared by the
+   * single-card and the batch move so a group drop fires exactly the hooks a
+   * single drop of the same card would.
    */
-  private transitionGit(task: TaskRecord, transition: StateTransition, now: number): TaskRecord['git'] {
-    let gitTask = transition.git === false ? task : undefined
+  private transitionGit(task: TaskRecord, transition: StateTransition, now: number): TaskRecord {
+    if (transition.git === false) return task
     for (const action of transition.actions ?? []) {
-      if (action === 'git.openBranch' && gitTask === undefined) gitTask = this.withFeatureBranch(task)
-      else if (action === 'git.mergeBranch' && gitTask === undefined) {
+      if (action === 'git.openBranch') return this.withFeatureBranch(task)
+      if (action === 'git.commitBranch') return this.commitWork(task, now)
+      if (action === 'git.mergeBranch') {
         const merged = this.git?.mergeBranch(task, now)
-        gitTask = merged === undefined ? task : { ...task, git: merged }
+        return merged === undefined ? task : { ...task, git: merged }
       }
     }
-    return (gitTask ?? task).git
+    return task
+  }
+
+  /**
+   * Commit the card's worktree onto its feature branch, stamping `committedAt`.
+   * A git failure never fails the move or the settle — the worktree is the
+   * human's to repair — so the error is appended to the card's newest *settled*
+   * execution `error`, which its execution history shows. A card without one
+   * (never ran, or only a clarification round is open) has nothing to carry it
+   * and only gets a Host warning.
+   */
+  private commitWork(task: TaskRecord, now: number): TaskRecord {
+    try {
+      const committed = this.git?.commitBranch(task, now)
+      return committed === undefined ? task : { ...task, git: committed }
+    } catch (error) {
+      const detail = `commit failed: ${error instanceof Error ? error.message : String(error)}`
+      let index = -1
+      for (let entryIndex = task.executions.length - 1; entryIndex >= 0; entryIndex -= 1) {
+        if (task.executions[entryIndex].endedAt !== undefined) {
+          index = entryIndex
+          break
+        }
+      }
+      if (index === -1) {
+        console.warn(`task board: ${task.id}: ${detail}`)
+        return task
+      }
+      return {
+        ...task,
+        executions: task.executions.map((entry, entryIndex) => entryIndex === index
+          ? { ...entry, error: entry.error === undefined || entry.error === '' ? detail : `${entry.error}; ${detail}` }
+          : entry),
+      }
+    }
+  }
+
+  /**
+   * Commit the work an implementation run left behind as it settles, so the
+   * worktree never keeps uncommitted card work — not even when the run failed
+   * or was cancelled, and not after a restart reconciled an interrupted start.
+   * A clarification run implements nothing and checks no branch out, so it
+   * never mints a commit of whatever the worktree happens to hold.
+   */
+  private commitSettledWork(task: TaskRecord, executionId: string, now: number): TaskRecord {
+    const execution = task.executions.find(entry => entry.id === executionId)
+    return execution === undefined || execution.kind === 'clarify' ? task : this.commitWork(task, now)
   }
 
   dispose(): void {
@@ -502,7 +716,7 @@ export class HostTaskLedger {
     requestId: string,
     action: TaskBoardAction,
     initiator?: string,
-  ): { state: LedgerState; run?: OpenedRun } {
+  ): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[] } {
     const fingerprint = createHash('sha256').update(JSON.stringify(action)).digest('hex')
     const cached = this.requestCache.get(requestId)
     if (cached !== undefined) {
@@ -582,24 +796,44 @@ export class HostTaskLedger {
 
   attachSession(taskId: string, executionId: string, sessionId: string): void {
     const now = this.now()
-    this.document.tasks = this.document.tasks.map(task => task.id !== taskId ? task : {
-      ...task,
-      updatedAt: now,
-      executions: task.executions.map(entry => entry.id === executionId ? { ...entry, sessionId } : entry),
+    this.document.tasks = this.document.tasks.map(task => {
+      if (task.id !== taskId) return task
+      const target = task.executions.find(entry => entry.id === executionId)
+      return {
+        ...task,
+        updatedAt: now,
+        // A clarification's session is the card's conversation: recording it on
+        // the card is what its link, the run that continues it (no second
+        // session) and the reuse rule read.
+        ...(target?.kind === 'clarify' ? { clarificationSessionId: sessionId } : {}),
+        executions: task.executions.map(entry => entry.id === executionId ? { ...entry, sessionId } : entry),
+      }
     })
     this.commit()
   }
 
   settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void {
-    this.document.tasks = this.document.tasks.map(task => task.id === taskId
-      ? settleExecution(task, executionId, outcome, this.now(), error)
-      : task)
+    const now = this.now()
+    this.document.tasks = this.document.tasks.map(task => {
+      // A paused run is not settled: the aborted turn the pause produced must
+      // not park the card in `failed`/`todo`. This also closes the race where an
+      // inspection started just before the pause was written.
+      if (task.id !== taskId || task.pausedAt !== undefined) return task
+      const settled = settleExecution(task, executionId, outcome, now, error)
+      // The work leaves the worktree the moment the run settles — success parks
+      // the card in `ready_for_test` on its committed feature branch, and a
+      // failure or cancellation commits just the same so nothing lingers.
+      return settled === task ? task : this.commitSettledWork(settled, executionId, now)
+    })
     this.commit()
   }
 
-  private apply(action: TaskBoardAction, initiator?: string): { state: LedgerState; run?: OpenedRun } {
+  private apply(action: TaskBoardAction, initiator?: string): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[] } {
     const now = this.now()
     let run: OpenedRun | undefined
+    let clarification: OpenedRun | undefined
+    let paused: PausedRun[] | undefined
+    let resumed: ResumedRun[] | undefined
     switch (action.kind) {
       case 'import': {
         const sources = new Set(this.document.scheduler.importedSources ?? [])
@@ -666,7 +900,7 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-        if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
+        if (task.status === 'running' || hasOpenRun(task)) throw new Error('running task cannot be moved')
         // The state machine decides whether this move exists at all: an
         // unconfigured transition is refused here, not in the browser. The
         // browser validates its drop targets against the same machine.
@@ -674,32 +908,55 @@ export class HostTaskLedger {
         if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → ${action.status}`)
         // Transition actions, in their configured order: the git hooks of the
         // agentic-programming workflow (no-ops without a repository), then the
-        // `run` action that opens an execution. A git hook that throws fails
-        // the whole move, so a card never claims a branch or merge that did
-        // not happen. `"git": false` on the transition skips the hooks.
+        // `run` action that opens an execution. A branch or merge hook that
+        // throws fails the whole move, so a card never claims a branch or a
+        // merge that did not happen — the commit hook is the exception: it
+        // records its failure on the card instead, because uncommitted work must
+        // not keep a card from reaching the review column. `"git": false` on the
+        // transition skips the hooks.
         const actions = transition.actions ?? []
-        const git = this.transitionGit(task, transition, now)
+        const gitted = this.transitionGit(task, transition, now)
+        // The target state over the transition's git hooks: the base the
+        // transition's actions build on, in their configured order.
+        let next: TaskRecord = withStatus(gitted, action.status, now)
+        // Leaving the review column (or a failed run) for `todo` is a rework —
+        // whether the human dragged the card or the Host noticed a correction in
+        // its chat. Only the stamp is written; the correction lives in the card's
+        // conversation, not in a board field.
+        if (isReworkReturn(task.status, action.status)) next = withReworkStamp(next, now)
+        // The clarification step: a transition carrying `clarify` opens the
+        // card's clarification run — the same execution the run column starts
+        // (it goes through the launch queue, but not the lane's WIP limit: the
+        // card starts right away and links its session), only its prompt asks
+        // first and stops. The card keeps `todo`: the human pulls it on to the
+        // run column afterwards, which continues this very session. A card that
+        // already has a clarification conversation re-enters it instead, so a
+        // round trip through the backlog never mints a second session.
+        if (actions.includes('clarify') && !hasOpenExecution(task)) {
+          const opened = startExecution(next, now, crypto.randomUUID(), initiator, 'clarify')
+          next = opened.task
+          clarification = { task: next, execution: opened.execution }
+        }
         // `run` moves the card by opening an execution (drag onto the run
         // column); everything else is a plain status change. The execution's
         // entry column is the transition target, so a configured machine may
-        // park runs wherever its `run` transitions point.
+        // park runs wherever its `run` transitions point. 
         if (actions.includes('run')) {
           if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
             throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
           }
-          const opened = startExecution(
-            { ...withStatus(task, action.status, now), ...(git === undefined ? {} : { git }) },
-            now,
-            crypto.randomUUID(),
-            initiator,
-          )
+          // Starting the work is the go-ahead and supersedes the card's open
+          // clarification round: that execution is closed here, so the card
+          // never carries two open runs. A launch not started yet is dropped by
+          // the pump's self-heal, so the round never mints the second session
+          // either — the implementation continues the conversation the round
+          // opened (or, when it never got one, starts the card's first session).
+          const base: TaskRecord = this.supersedeClarification(next, now)
+          const opened = startExecution(base, now, crypto.randomUUID(), initiator)
           run = { task: { ...opened.task, status: action.status }, execution: opened.execution }
+          next = run.task
         }
-        const moved = this.document.tasks.map(item => item.id === action.taskId
-          ? run === undefined
-            ? { ...withStatus(item, action.status, now), ...(git === undefined ? {} : { git }) }
-            : run.task
-          : item)
+        const moved = this.document.tasks.map(item => item.id === action.taskId ? next : item)
         // The Done-column limit: a move that would leave more than N on-board
         // cards in `done` archives the oldest ones (FIFO) until it holds again.
         // Every other column is untouched and surviving cards keep their order.
@@ -717,7 +974,7 @@ export class HostTaskLedger {
           const task = this.document.tasks.find(item => item.id === id)
           if (task === undefined) throw new Error(`task not found: ${id}`)
           if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-          if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
+          if (task.status === 'running' || hasOpenRun(task)) throw new Error('running task cannot be moved')
           const transition = this.machine.transition(task.status, action.status, 'manual')
           if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → ${action.status}`)
           // A batch never opens executions: the runner owns the single run
@@ -727,8 +984,8 @@ export class HostTaskLedger {
         })
         const moved = new Map<string, TaskRecord>()
         for (const { task, transition } of batch) {
-          const git = this.transitionGit(task, transition, now)
-          moved.set(task.id, { ...withStatus(task, action.status, now), ...(git === undefined ? {} : { git }) })
+          const target = withStatus(this.transitionGit(task, transition, now), action.status, now)
+          moved.set(task.id, isReworkReturn(task.status, action.status) ? withReworkStamp(target, now) : target)
         }
         // `map` over the ledger array keeps every untouched card in place and
         // the moved cards in their existing order among themselves; the
@@ -768,52 +1025,72 @@ export class HostTaskLedger {
         this.document.tasks = [...result.tasks]
         break
       }
-      case 'rework': {
-        // Send a card back for correction with the reviewer's note attached.
-        // The machine still decides whether the move exists at all (in the
-        // built-in machine: `ready_for_test → todo`), so a host that has been
-        // configured without that transition refuses the rework instead of
-        // inventing it. The note itself is data, not an action: it is stored on
-        // the card and consumed by the card's next run.
-        const task = this.document.tasks.find(item => item.id === action.taskId)
-        if (task === undefined) throw new Error('task not found')
-        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-        if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be moved')
-        // The wire gate already normalizes the note; the authority re-checks it
-        // here so no other entry point can open a round with a blank remark.
-        const note = normalizeReworkNote(action.note)
-        if (note === undefined) throw new Error('rework needs a non-blank note')
-        const transition = this.machine.transition(task.status, 'todo', 'manual')
-        if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → todo`)
-        // A rework only parks the card back in `todo`: the human decides when
-        // the agent works again, and the run slot stays owned by the run
-        // transitions (drag onto the run column, the detail Run button, cron).
-        if ((transition.actions ?? []).includes('run')) throw new Error('rework cannot start an execution')
-        const git = this.transitionGit(task, transition, now)
-        this.document.tasks = this.document.tasks.map(item => item.id === task.id
-          ? { ...withStatus(item, 'todo', now), ...(git === undefined ? {} : { git }), reworkNote: note }
-          : item)
+      case 'pause': {
+        // Suspend every named card's open run without moving it: the card keeps
+        // its column and its execution record, it just stops being worked on.
+        // The service stops the attached sessions from the returned list. Cards
+        // without an open run are skipped, so a batch is robust against a card
+        // that settled in the meantime. A clarification run in `todo` is
+        // suspended like any other run.
+        const ids = new Set(action.taskIds)
+        const suspended: PausedRun[] = []
+        this.document.tasks = this.document.tasks.map(task => {
+          if (!ids.has(task.id) || task.archivedAt !== undefined) return task
+          if (task.pausedAt !== undefined) return task
+          const execution = openExecution(task)
+          if (execution === undefined) return task
+          suspended.push({ taskId: task.id, sessionId: execution.sessionId })
+          return withPause(task, true, now)
+        })
+        if (suspended.length > 0) paused = suspended
+        break
+      }
+      case 'resume': {
+        // Release the pause and hand the run back to the service, which writes
+        // the "continue" turn into the run's own conversation (or, for a run
+        // that never got a session, back into the launch queue). The card never
+        // changes column.
+        const ids = new Set(action.taskIds)
+        const released: ResumedRun[] = []
+        this.document.tasks = this.document.tasks.map(task => {
+          if (!ids.has(task.id) || task.pausedAt === undefined) return task
+          const resumedTask = withPause(task, false, now)
+          const execution = openExecution(task)
+          if (execution !== undefined) released.push({ task: resumedTask, execution })
+          return resumedTask
+        })
+        if (released.length > 0) resumed = released
         break
       }
       case 'rerun':
       case 'run': {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
-        if (task === undefined || task.status === 'running' || hasOpenExecution(task)) throw new Error('task is already running or missing')
+        if (task === undefined || task.status === 'running' || hasOpenRun(task)) throw new Error('task is already running or missing')
         if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
           throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
         }
         const base = action.kind === 'rerun' ? withStatus(task, 'todo', now) : task
-        // Safety net for a card started without the backlog → todo pull (drag
-        // straight to "In progress", the detail Run button, or a cron trigger):
-        // still work on a feature branch when the workspace has a repository.
-        run = startExecution(this.withFeatureBranch(base), now, crypto.randomUUID(), initiator)
+        // The Run button is the same go-ahead as the drag onto the run column:
+        // it closes the card's open clarification round, and the run continues
+        // that conversation with the implementation.
+        const released: TaskRecord = this.supersedeClarification(base, now)
+        // Safety net for a card started without the backlog → todo pull (the
+        // detail Run button or a cron trigger): still work on a feature branch
+        // when the workspace has a repository.
+        run = startExecution(this.withFeatureBranch(released), now, crypto.randomUUID(), initiator)
         this.document.tasks = this.document.tasks.map(item => item.id === task.id ? run!.task : item)
         break
       }
     }
     this.commit()
-    return { state: this.state(), ...(run === undefined ? {} : { run }) }
+    return {
+      state: this.state(),
+      ...(run === undefined ? {} : { run }),
+      ...(clarification === undefined ? {} : { clarification }),
+      ...(paused === undefined ? {} : { paused }),
+      ...(resumed === undefined ? {} : { resumed }),
+    }
   }
 
   private repairSchedules(skipPast: boolean, persist = true): void {
@@ -840,11 +1117,21 @@ export class HostTaskLedger {
     const now = this.now()
     let changed = false
     this.document.tasks = this.document.tasks.map(task => {
-      if (task.status !== 'running') return task
       const execution = task.executions.at(-1)
+      // Same for the card's clarification run: it lives in its own column, but
+      // an interrupted start of it is just as unresumable (settling it does not
+      // move the card).
+      if (task.status !== 'running' && execution?.kind !== 'clarify') return task
+      // A paused card was suspended by the user, not interrupted by the crash:
+      // its run is resumed from the board, never cancelled on startup.
+      if (task.pausedAt !== undefined) return task
       if (execution === undefined || execution.endedAt !== undefined || execution.sessionId !== undefined) return task
       changed = true
-      return settleExecution(task, execution.id, 'cancelled', now, 'host restarted before the execution session was recorded')
+      const settled = settleExecution(task, execution.id, 'cancelled', now, 'host restarted before the execution session was recorded')
+      // The restart cancels an interrupted implementation run just like any
+      // other cancellation, so its work is committed rather than left in the
+      // worktree; a clarification round owns nothing to commit.
+      return execution.kind === 'clarify' ? settled : this.commitWork(settled, now)
     })
     if (changed && persist) this.commit()
   }

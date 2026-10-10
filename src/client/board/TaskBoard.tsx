@@ -6,11 +6,13 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
-import { collectKnownTags, compareWipOrder, tagTone, type TaskRecord, type TaskStatus } from '../../core/tasks.ts'
+import { collectKnownTags, compareWipOrder, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason } from '../../core/tasks.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
 import { t } from '../locales.ts'
 import css from '../board.module.css'
 import { NewTaskModal } from './NewTaskModal.tsx'
+import { NEW_TASK_DRAFT_KEY } from './TaskForm.tsx'
+import { ConfirmDialog } from './ConfirmDialog.tsx'
 import { isCardDraggable, TaskCard } from './TaskCard.tsx'
 import { TaskDetail } from './TaskDetail.tsx'
 import type { TaskBoardKey } from '../locales.ts'
@@ -27,6 +29,45 @@ export const BATCH_DRAG_MIME = 'application/x-dsh-taskboard-cards'
 
 /** Stable empty set, so clearing the drag marker keeps the same reference. */
 const NO_IDS: ReadonlySet<string> = new Set<string>()
+
+/** How long the "your card had to queue" notice stays on screen. */
+const QUEUED_NOTICE_MS = 12_000
+
+/**
+ * Render a waiting reason into the board's language: the locale string plus the
+ * workspace title, with the lane id as the fallback. Called once per blocker,
+ * never per card, so the memoized cards keep comparing one stable string.
+ */
+function waitingTooltip(reason: WaitingReason, workspaceTitles: ReadonlyMap<string, string>): string {
+  if (reason.lane === '') return t('card.waitingNoWorkspace', { task: reason.blockerTitle })
+  return t('card.waitingOn', {
+    task: reason.blockerTitle,
+    workspace: workspaceTitles.get(reason.lane) ?? reason.lane,
+  })
+}
+
+/**
+ * The notice for a drop on the run column whose cards cannot start yet, or
+ * undefined when at least one of them starts now. `todo` and the review columns
+ * are WIP-free, so only the cards whose lane is held by another run count; they
+ * keep their place in the lane's FIFO queue and start on their own. Exported
+ * for the test that pins the wording against a blocked lane.
+ */
+export function queuedDropNotice(
+  tasks: readonly TaskRecord[],
+  allTasks: readonly TaskRecord[],
+  maxConcurrentRuns: number,
+  workspaceTitles: ReadonlyMap<string, string>,
+): string | undefined {
+  const blockers = new Set<string>()
+  for (const task of tasks) {
+    const reason = waitingReasonFor(task, allTasks, maxConcurrentRuns)
+    if (reason === undefined) return undefined
+    blockers.add(reason.lane === '' ? reason.blockerTitle : `${reason.blockerTitle} (${workspaceTitles.get(reason.lane) ?? reason.lane})`)
+  }
+  if (blockers.size === 0) return undefined
+  return t('board.queuedNotice', { task: [...blockers].join(', ') })
+}
 
 type BoardMachine = ReturnType<typeof resolveStateMachine>['machine']
 
@@ -100,18 +141,25 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, timeZone, selected, dragging, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
   task: TaskRecord
   pending: boolean
   timeZone?: string
   selected: boolean
   dragging: boolean
+  /** Why the card waits for its lane's WIP slot; undefined when it holds or needs none. */
+  waitingReason?: WaitingReason
+  /** The reason as ready-to-show text (stable per blocker, so memo stays effective). */
+  waitingTooltip?: string
+  /** The conversation waiting for the human's answer; undefined when nothing is open. */
+  awaitingAnswerSessionId?: string
   onSelect: (id: string, event: ReactMouseEvent<HTMLButtonElement>) => void
   onKeySelect: (id: string, event: ReactKeyboardEvent<HTMLButtonElement>) => void
   onOpen: (id: string) => void
   onDragStart: (id: string, event: ReactDragEvent<HTMLButtonElement>) => void
   onDragEnd: () => void
   onOpenSession: (sessionId: string) => void
+  onTogglePause: (task: TaskRecord) => void
 }) {
   const onClick = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => { onSelect(task.id, event) }, [task.id, onSelect])
   const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => { onKeySelect(task.id, event) }, [task.id, onKeySelect])
@@ -124,12 +172,16 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, timeZone, selec
       timeZone={timeZone}
       selected={selected}
       dragging={dragging}
+      waitingReason={waitingReason}
+      waitingTooltip={waitingTooltip}
+      awaitingAnswerSessionId={awaitingAnswerSessionId}
       onClick={onClick}
       onKeyDown={onKeyDown}
       onDoubleClick={onDoubleClick}
       onDragStart={onStart}
       onDragEnd={onDragEnd}
       onOpenSession={onOpenSession}
+      onTogglePause={onTogglePause}
     />
   )
 })
@@ -151,11 +203,18 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const [newProjectPath, setNewProjectPath] = useState('')
   const [newProjectError, setNewProjectError] = useState<string | undefined>(undefined)
   const [newProjectPending, setNewProjectPending] = useState(false)
+  // Transient notice of the last drop on the run column whose card had to wait
+  // for its lane's WIP slot. It names the blocker and clears itself, so it never
+  // needs a dismiss click.
+  const [queuedNotice, setQueuedNotice] = useState<string | undefined>(undefined)
   // Multi-selection (a browser-only view state, like the filter): the cards a
   // group drag carries. `dragIds` marks the set currently under the cursor so
   // the board can render the moved cards and the counter while dragging.
   const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(NO_IDS)
   const [dragIds, setDragIds] = useState<ReadonlySet<string>>(NO_IDS)
+  // Bulk delete asks first (the action is irreversible); bulk archive does not,
+  // exactly like the per-card buttons in the detail view.
+  const [confirmDeleteSelection, setConfirmDeleteSelection] = useState(false)
   // The Shift range starts at the anchor: the card the last plain or Ctrl click
   // landed on. A ref, not state, so marking a card never changes the memoized
   // cards' props — only the cards whose `selected` flag flips re-render.
@@ -169,6 +228,9 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // Every label in use across the ledger (board and archive alike), so the
   // filter never loses an option just because its task was archived.
   const knownTags = collectKnownTags(snapshot.tasks)
+  // A kept new-task draft is marked on the button: the popup comes back exactly
+  // where it was left, and the dot says so before it is opened again.
+  const draftWaiting = (snapshot.formDrafts ?? []).includes(NEW_TASK_DRAFT_KEY)
   const pendingSet = useMemo(() => new Set(snapshot.pendingTaskIds), [snapshot.pendingTaskIds])
   // Archived tasks leave the columns; the archive view shows them instead.
   // Memoized so the memoized cards keep their memo boundary across renders.
@@ -178,10 +240,12 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     && matchesFilter(task, filter)
     && matchesTagFilter(task, tagFilter),
   ), [snapshot.tasks, archiveView, projectId, filter, tagFilter])
-  // The selection as it can actually be dragged: cards still on the board and
-  // not owned by the runner. A card that left the board (archived/deleted) or
-  // started running drops out here without a second source of truth.
-  const selectableIds = useMemo(
+  // The selection as it can actually be acted on: cards still on the board and
+  // not owned by the runner. The group drag carries this set, and the header's
+  // bulk archive/delete apply to it too, so a card that left the board
+  // (archived/deleted), started running, or is hidden by the current filter
+  // drops out here without a second source of truth.
+  const actionableIds = useMemo(
     () => visible.filter(task => selectedIds.has(task.id) && isCardDraggable(task, pendingSet.has(task.id))).map(task => task.id),
     [visible, selectedIds, pendingSet],
   )
@@ -194,6 +258,55 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   )
   const projects = snapshot.executionOptions.workspaces
   const canCreateProject = snapshot.canCreateWorkspace === true
+  // Workspace id → title, for every place the board names a lane (waiting
+  // badge, drop notice). Memoized on the option list the board already renders.
+  const workspaceTitles = useMemo(
+    () => new Map(projects.map(workspace => [workspace.workspaceId, workspace.title])),
+    [projects],
+  )
+  // Why a card is waiting for its lane's WIP slot: it carries an open run that
+  // has not attached a session yet, so another card of the same lane holds the
+  // slot. The Host decides whether a launch starts; this only explains it. The
+  // resolved text is identical for every card of the same blocker, so a card
+  // re-renders only when the blocker actually changes (memoized, above).
+  const waitingReasonById = useMemo(() => {
+    const maxConcurrentRuns = snapshot.host?.maxConcurrentRuns ?? 1
+    const reasons = new Map<string, WaitingReason>()
+    for (const task of visible) {
+      // Only a card the runner owns (open run, no session attached yet) waits in
+      // the Host's queue; a pending card is already talking to the Host, a
+      // paused card released its slot, and an archived card is read-only.
+      if (task.archivedAt !== undefined || task.pausedAt !== undefined || pendingSet.has(task.id)) continue
+      const latest = task.executions[task.executions.length - 1]
+      if (latest === undefined || latest.endedAt !== undefined || latest.kind === 'clarify') continue
+      if (latest.sessionId !== undefined) continue
+      const reason = waitingReasonFor(task, snapshot.tasks, maxConcurrentRuns)
+      if (reason !== undefined) reasons.set(task.id, reason)
+    }
+    return reasons
+  }, [visible, pendingSet, snapshot.host?.maxConcurrentRuns, snapshot.tasks])
+  // The reason as display text. Keyed off the reason map, so it is recomputed
+  // only when a card actually starts or stops waiting — not on every poll.
+  const waitingTooltipById = useMemo(() => {
+    const texts = new Map<string, string>()
+    for (const [id, reason] of waitingReasonById) texts.set(id, waitingTooltip(reason, workspaceTitles))
+    return texts
+  }, [waitingReasonById, workspaceTitles])
+  // The Host's question watch as the board uses it: card id → the conversation
+  // waiting for the human's answer. The Host owns the detection (it reads the
+  // conversations on its poll); the board only points at what it named, and the
+  // identity of the map is what a re-render is gated on.
+  const awaitingAnswerById = useMemo(
+    () => snapshot.host?.awaitingAnswer ?? {},
+    [snapshot.host?.awaitingAnswer],
+  )
+  // The notice clears itself: the card is visible in the column meanwhile, so
+  // the message only has to explain the drop.
+  useEffect(() => {
+    if (queuedNotice === undefined) return
+    const timer = setTimeout(() => { setQueuedNotice(undefined) }, QUEUED_NOTICE_MS)
+    return () => { clearTimeout(timer) }
+  }, [queuedNotice])
   const submitNewProject = async (): Promise<void> => {
     const path = newProjectPath.trim()
     if (path === '') return
@@ -282,6 +395,28 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // Direct card → session jump (active and inactive sessions alike). The
   // controller refreshes a stale roster before it reports a failed jump.
   const openSession = useCallback((sessionId: string): void => { controller.openSession?.(sessionId) }, [controller])
+  // Pause/resume of one card's open run. The card only renders the control
+  // while a run is open, so the state of the record picks the direction.
+  const togglePause = useCallback((task: TaskRecord): void => {
+    void (task.pausedAt !== undefined ? controller.resumeTasks([task.id]) : controller.pauseTasks([task.id]))
+  }, [controller])
+  // The bulk pause is deliberately global (not filter-scoped, unlike the
+  // selection actions): "pause all running work" must not silently skip cards
+  // the current filter or project pick hides. Paused cards come back through
+  // the same button as a resume, so one control covers both directions. Every
+  // open run counts, the clarification run in `todo` included.
+  const runningIds = snapshot.tasks
+    .filter(task => task.archivedAt === undefined && task.pausedAt === undefined && openExecution(task) !== undefined)
+    .map(task => task.id)
+  const pausedIds = snapshot.tasks
+    .filter(task => task.archivedAt === undefined && task.pausedAt !== undefined)
+    .map(task => task.id)
+  const pauseAll = useCallback((): void => {
+    void (runningIds.length > 0 ? controller.pauseTasks(runningIds) : controller.resumeTasks(pausedIds))
+  }, [controller, runningIds, pausedIds])
+  // The button is a pause button while any run is open, and turns into the
+  // play button (resume all) once only paused cards are left.
+  const bulkPauseMode = runningIds.length > 0 || pausedIds.length === 0
   const endDrag = useCallback((): void => { setDragIds(NO_IDS) }, [])
   // Drag start on a card: a selected card carries the whole draggable
   // selection, any other card drags alone — the single-card behavior is
@@ -289,12 +424,12 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const startDrag = useCallback((id: string, event: ReactDragEvent<HTMLButtonElement>): void => {
     const task = snapshot.tasks.find(item => item.id === id)
     if (task === undefined || !isCardDraggable(task, pendingSet.has(id))) return
-    const ids = selectedIds.has(id) && selectableIds.includes(id) ? selectableIds : [id]
+    const ids = selectedIds.has(id) && actionableIds.includes(id) ? actionableIds : [id]
     event.dataTransfer.setData('text/plain', id)
     event.dataTransfer.setData(BATCH_DRAG_MIME, JSON.stringify(ids))
     event.dataTransfer.effectAllowed = 'move'
     setDragIds(new Set(ids))
-  }, [pendingSet, selectableIds, selectedIds, snapshot.tasks])
+  }, [pendingSet, actionableIds, selectedIds, snapshot.tasks])
   // One drop handler for every column. It takes the movable subset of the
   // dragged cards: a card the machine does not allow into this column stays
   // where it is, and a drop with nothing movable changes nothing at all.
@@ -307,12 +442,21 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       .filter((task): task is TaskRecord => task !== undefined)
       .filter(task => isCardDraggable(task, pendingSet.has(task.id)))
     const movable = dragged.filter(task => isRunTarget
+      // A human start is the go-ahead on the clarification gate: the Host
+      // closes the card's open clarification round and continues its session,
+      // so the drop is offered like any other run.
       ? task.status !== columnStatus && machine.actionsFor(task.status, columnStatus).includes('run')
       : machine.canTransition(task.status, columnStatus))
     if (movable.length === 0) return
     // The runner owns the run entry; start each card in drag order so the
     // queue keeps that order (the WIP limit still gates the launches).
     if (isRunTarget) {
+      // The lane's slot belongs to the run that already holds it, so this drop
+      // queues the card(s) instead of starting them: say so, with the blocker's
+      // name, right where the drop happened. The card itself shows the same
+      // reason while it waits.
+      const queueNotice = queuedDropNotice(movable, snapshot.tasks, snapshot.host?.maxConcurrentRuns ?? 1, workspaceTitles)
+      if (queueNotice !== undefined) setQueuedNotice(queueNotice)
       void (async () => {
         for (const task of movable) await controller.rerunTask(task.id)
       })()
@@ -326,7 +470,20 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       return
     }
     void controller.moveTasks(moving, columnStatus).then(moved => { if (moved) clearSelection() })
-  }, [clearSelection, controller, machine, pendingSet, snapshot.tasks])
+  }, [clearSelection, controller, machine, pendingSet, snapshot.host?.maxConcurrentRuns, snapshot.tasks, workspaceTitles])
+  // Bulk archive/delete of the marked cards: both reuse the per-card
+  // controller actions and apply them to the actionable subset the group drag
+  // carries, so a running card (or one the current filter hides) stays behind.
+  // The selection ends once the actions are submitted.
+  const archiveSelection = useCallback((): void => {
+    for (const id of actionableIds) controller.archiveTask(id)
+    clearSelection()
+  }, [actionableIds, clearSelection, controller])
+  const deleteSelection = useCallback((): void => {
+    setConfirmDeleteSelection(false)
+    for (const id of actionableIds) controller.deleteTask(id)
+    clearSelection()
+  }, [actionableIds, clearSelection, controller])
 
   return (
     <div
@@ -412,12 +569,48 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             ? t('board.backToBoard')
             : t('board.archiveView', { count: String(snapshot.tasks.filter(task => task.archivedAt !== undefined).length) })}
         </button>
+        {/* Header controls are not free board space: the board's own
+            click-to-clear would otherwise drop the selection before the bulk
+            action reads it. */}
+        <button
+          type="button"
+          className={css.ghostButton}
+          data-dsh-part="pause-all"
+          disabled={runningIds.length === 0 && pausedIds.length === 0}
+          title={bulkPauseMode ? t('board.pauseAll') : t('board.resumeAll')}
+          onClick={(event) => { event.stopPropagation(); pauseAll() }}
+        >
+          <span aria-hidden="true">{bulkPauseMode ? '⏸' : '▶'}</span>{' '}
+          {bulkPauseMode ? t('board.pauseAll') : t('board.resumeAll')}
+        </button>
+        <button
+          type="button"
+          className={css.ghostButton}
+          data-dsh-part="bulk-archive"
+          disabled={actionableIds.length === 0}
+          onClick={(event) => { event.stopPropagation(); archiveSelection() }}
+        >
+          {t('board.archiveSelected')}
+        </button>
+        <button
+          type="button"
+          className={css.dangerButton}
+          data-dsh-part="bulk-delete"
+          disabled={actionableIds.length === 0}
+          onClick={(event) => { event.stopPropagation(); setConfirmDeleteSelection(true) }}
+        >
+          {t('board.deleteSelected')}
+        </button>
         <button
           type="button"
           className={css.primaryButton}
+          data-draft={draftWaiting ? 'true' : undefined}
+          title={draftWaiting ? t('board.draftWaiting') : undefined}
+          aria-label={draftWaiting ? `${t('board.new')} — ${t('board.draftWaiting')}` : undefined}
           onClick={() => { setShowNew(true) }}
         >
           + {t('board.new')}
+          {draftWaiting && <span className={css.draftDot} aria-hidden="true" />}
         </button>
       </header>
 
@@ -501,6 +694,12 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         </div>
       )}
 
+      {queuedNotice !== undefined && (
+        <div className={css.queuedNotice} data-dsh-part="queued-notice" role="status">
+          {queuedNotice}
+        </div>
+      )}
+
       {dragIds.size > 1 && (
         <div className={css.dragBadge} data-dsh-part="drag-count" role="status">
           {t('board.dragCount', { count: String(dragIds.size) })}
@@ -516,7 +715,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             </header>
             <div className={css.cards}>
               {visible.map(task => (
-                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} />
+                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
               ))}
               {visible.length === 0 && (
                 <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('archive.empty')}</div>
@@ -547,7 +746,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                 </header>
                 <div className={css.cards}>
                   {tasks.map(task => (
-                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} />
+                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
                   ))}
                   {tasks.length === 0 && (
                     <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('board.empty')}</div>
@@ -560,13 +759,23 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       </div>
 
       {selected !== undefined && (
-        <TaskDetail controller={controller} task={selected} />
+        <TaskDetail controller={controller} task={selected} waitingReason={waitingTooltipById.get(selected.id)} />
       )}
       {showNew && (
         <NewTaskModal
           controller={controller}
           {...(projectId === '' ? {} : { defaultWorkspaceId: projectId })}
           onClose={() => { setShowNew(false) }}
+        />
+      )}
+      {confirmDeleteSelection && (
+        <ConfirmDialog
+          title={t('delete.selectedTitle')}
+          message={t('delete.selectedConfirm', { count: String(actionableIds.length) })}
+          confirmLabel={t('delete.ok')}
+          danger
+          onCancel={() => { setConfirmDeleteSelection(false) }}
+          onConfirm={deleteSelection}
         />
       )}
     </div>

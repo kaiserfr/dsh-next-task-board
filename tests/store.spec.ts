@@ -171,6 +171,22 @@ describe('parseLedger', () => {
     const repaired = parseLedger(JSON.stringify([{ ...base, status: 'done', archivedAt: 'yesterday' }]))
     expect(repaired[0].archivedAt).toBeUndefined()
   })
+
+  it('keeps the git workflow state — commit and merge stamps included', () => {
+    const base = {
+      id: 't1', title: 'a', description: '', prompt: 'a',
+      createdAt: NOW, updatedAt: NOW, executions: [], status: 'ready_for_test',
+      git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, mergedAt: 5678 },
+    }
+    const parsed = parseLedger(JSON.stringify([base]))
+    expect(parsed[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, mergedAt: 5678 })
+    // A half-written state (no usable triple) drops the field entirely.
+    const broken = parseLedger(JSON.stringify([{ ...base, git: { branch: '', base: 'main', repoPath: '/repo', committedAt: 1 } }]))
+    expect(broken[0].git).toBeUndefined()
+    // A malformed stamp is dropped, the rest of the state survives.
+    const stamped = parseLedger(JSON.stringify([{ ...base, git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 'later' } }]))
+    expect(stamped[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo' })
+  })
   it('round-trips execution targets and repairs broken ones', () => {
     const pinned = createTask(
       { title: 'pinned', description: '', prompt: '', workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only' },
@@ -221,6 +237,16 @@ describe('parseLedger', () => {
     // A non-string fails the strict shape gate and drops the row.
     expect(parseLedger(JSON.stringify([{ ...withSource, parseText: 42 }]))).toEqual([])
     expect(isTaskRecord({ ...withSource, parseText: 42 })).toBe(false)
+  })
+
+  it('repairs the clarification session instead of dropping the card', () => {
+    const stored = { ...createTask({ title: 'q', description: '', prompt: '' }, 1, 't-q'), clarificationSessionId: 'session-clarify' }
+    expect(parseLedger(JSON.stringify([stored]))[0]).toMatchObject({ clarificationSessionId: 'session-clarify' })
+
+    // A malformed session id clears the field instead of taking the whole card
+    // row down.
+    expect(parseLedger(JSON.stringify([{ ...stored, clarificationSessionId: '' }]))[0].clarificationSessionId).toBeUndefined()
+    expect(parseLedger(JSON.stringify([{ ...stored, clarificationSessionId: 7 }]))[0].clarificationSessionId).toBeUndefined()
   })
 })
 
@@ -297,5 +323,16 @@ describe('schedule persistence', () => {
     expect(parsed[0].schedule).toEqual({ enabled: true, cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: undefined })
     expect(parsed[1].schedule).toBeUndefined() // not five fields
     expect(parsed[2].schedule).toBeUndefined() // values out of range
+  })
+})
+
+describe('parseLedger pause stamp', () => {
+  it('keeps a suspended card paused and repairs a malformed stamp', () => {
+    const paused = { ...createTask({ title: 'p', description: '', prompt: '' }, 1, 't-p'), status: 'running' as const, pausedAt: 5 }
+    expect(parseLedger(JSON.stringify([paused]))[0].pausedAt).toBe(5)
+    // The malformed stamp clears the pause instead of dropping the whole row.
+    const parsed = parseLedger(JSON.stringify([{ ...paused, pausedAt: 'later' }]))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0].pausedAt).toBeUndefined()
   })
 })

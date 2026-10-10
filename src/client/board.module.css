@@ -304,10 +304,12 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   transition: box-shadow 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
 
-/* Reserve the card's right edge for the session link in the bottom corner, so
-   the meta row's chips never run under it (and the 1px-smaller executing
-   variant below re-reserves it). */
-.card[data-has-session] {
+/* Reserve the card's right edge for the session link in the bottom corner and
+   the pause/play control in the top corner, so the meta row's chips and the
+   title never run under them (and the 1px-smaller executing variant below
+   re-reserves it). */
+.card[data-has-session],
+.card[data-has-pause] {
   padding-right: 30px;
 }
 
@@ -336,8 +338,20 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 }
 
 /* The executing variant's padding shorthand resets the corner reservation. */
-.card[data-executing='true'][data-has-session] {
+.card[data-executing='true'][data-has-session],
+.card[data-executing='true'][data-has-pause] {
   padding-right: 29px;
+}
+
+/* The top-left corner belongs to the waiting-question symbol, the only corner
+   still free (session link bottom-right, pause/play top-right). Same
+   reservation rule as the right edge, so the title never runs under it. */
+.card[data-answering] {
+  padding-left: 30px;
+}
+
+.card[data-executing='true'][data-answering] {
+  padding-left: 29px;
 }
 
 @keyframes dshTbRunningPulse {
@@ -474,6 +488,72 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   color: var(--dsw-alias-label-primary);
 }
 
+/* Pause/play control of the card's open run: the same corner glyph treatment as
+   the session link, in the top corner instead, so both fit on one card. Shown
+   as the pause glyph while the run is open and as the play glyph once it is
+   paused. */
+.cardPause {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--dsw-alias-label-secondary);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.cardPause:hover {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The waiting-question symbol: a question mark in a warn ring in the card's
+   top-left corner, shown exactly while the card's conversation waits for the
+   human's answer. It is an anchor like the session link (same sibling rules, so
+   the card stays one click target for the detail) and deliberately louder than
+   that bare glyph — this one is a call to act, not a way to look something up.
+   The corner is reserved through [data-answering] (see above). */
+.cardQuestion {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--dsw-alias-state-warn-primary);
+  border-radius: 50%;
+  background: var(--dsw-alias-state-warn-tertiary);
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  animation: dshTbQuestionPulse 2.4s ease-in-out infinite;
+}
+
+.cardQuestion:hover {
+  background: var(--dsw-alias-state-warn-secondary);
+}
+
+@keyframes dshTbQuestionPulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-warn-primary) 35%, transparent); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cardQuestion { animation: none; }
+}
+
 .cardRunningLabel {
   font-size: 11px;
   color: var(--dsw-alias-state-warn-primary);
@@ -481,7 +561,8 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 
 /* "Running now" tag of the executing card: a light chip on the warn-tinted
    surface, label colour kept on the theme's primary label so the text stays
-   readable on every skin (same reasoning as the tag badges). */
+   readable on every skin (same reasoning as the tag badges). The paused variant
+   reuses the chip with a neutral border: a paused card is not running. */
 .cardExecutingBadge {
   align-self: flex-start;
   padding: 1px 8px;
@@ -492,6 +573,11 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   font-size: 11px;
   font-weight: 600;
   line-height: 16px;
+}
+
+.cardExecutingBadge[data-paused='true'] {
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
 }
 
 .cardSpinner {
@@ -687,6 +773,24 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   border-color: var(--dsw-alias-state-business-primary);
 }
 
+/*
+ * Multiline fields already grow through the browser's own vertical resizer
+ * (`.input { resize: vertical }`). Its default corner grip is a small,
+ * low-contrast speck on the dark input surface, so draw the handle explicitly
+ * with a project colour token — two diagonal strokes in the shape the browser
+ * uses. Firefox ignores this rule and keeps its own textured grip.
+ */
+textarea.input::-webkit-resizer {
+  background: linear-gradient(
+    135deg,
+    transparent 0 66%,
+    var(--dsw-alias-label-tertiary) 66% 76%,
+    transparent 76% 84%,
+    var(--dsw-alias-label-tertiary) 84% 94%,
+    transparent 94%
+  );
+}
+
 .select {
   padding: 7px 10px;
   font-size: 13px;
@@ -707,6 +811,45 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   margin: 0;
   font-size: 12px;
   color: var(--dsw-alias-state-error-primary);
+}
+
+/* "Your card had to queue" notice after a drop on the run column: an
+   explanation, not a failure, so it uses the warn tone rather than the error
+   one and never blocks the board. */
+.queuedNotice {
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--dsw-alias-state-warn-primary);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* "Draft restored" note of a modal that reopened on kept input (see TaskForm). */
+.draftNotice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+}
+
+/* Dot on "+ New task" while the blank form's draft waits to be reopened. */
+.draftDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-warn-primary);
+  vertical-align: middle;
 }
 
 /* --- detail ------------------------------------------------------------------- */
@@ -1151,6 +1294,8 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 .entry:focus-visible,
 .card:focus-visible,
 .cardSession:focus-visible,
+.cardPause:focus-visible,
+.cardQuestion:focus-visible,
 .primaryButton:focus-visible,
 .ghostButton:focus-visible,
 .dangerButton:focus-visible,

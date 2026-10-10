@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron } from '../../core/schedule.ts'
 import { resolveStateMachine, type TaskStatus } from '../../core/state-machine.ts'
-import { TASK_PERMISSIONS, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
+import { TASK_PERMISSIONS, isTaskPaused, openExecution, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
 import { canEditTaskContent } from '../../core/use-cases/task-update.ts'
 import { requiresPermissionConfirmation } from '../../core/handover.ts'
 import { dictionary, t, type TaskBoardKey } from '../locales.ts'
@@ -45,6 +45,11 @@ function ExecutionRow({ execution, timeZone, onOpen }: { execution: ExecutionRec
       <span className={css.executionBadge} data-result={result}>
         {result === undefined ? t('detail.result.running') : t(RESULT_KEY[result])}
       </span>
+      {execution.kind === 'clarify' && (
+        // A clarification is a real execution but not an implementation round;
+        // the history says which of the card's runs it was.
+        <span className={css.executionBadge} data-dsh-part="execution-clarify">{t('detail.clarification')}</span>
+      )}
       <span className={css.executionTimes}>
         {t('detail.executionStarted')} {formatTime(execution.startedAt, timeZone)}
         {execution.endedAt !== undefined && ` · ${t('detail.executionEnded')} ${formatTime(execution.endedAt, timeZone)}`}
@@ -67,11 +72,11 @@ function ExecutionRow({ execution, timeZone, onOpen }: { execution: ExecutionRec
       {execution.error !== undefined && execution.error !== '' && (
         <span className={css.executionError}>{execution.error}</span>
       )}
-      {execution.reworkNote !== undefined && (
-        // The correction this round was started with. It left the card when the
-        // run opened, so the execution row is where it stays readable.
-        <span className={css.executionTimes} data-dsh-part="execution-rework-note">
-          {t('detail.execution.reworkNote', { note: execution.reworkNote })}
+      {execution.rework === true && (
+        // This round worked off a send-back; the human's own correction lives
+        // in the conversation this row links to.
+        <span className={css.executionTimes} data-dsh-part="execution-rework">
+          {t('detail.execution.rework')}
         </span>
       )}
     </li>
@@ -284,13 +289,11 @@ function ScheduleSection({ controller, task, pending }: { controller: BoardContr
 }
 
 /** Task detail overlay. */
-export function TaskDetail({ controller, task }: { controller: BoardController; task: TaskRecord }) {
+export function TaskDetail({ controller, task, waitingReason }: { controller: BoardController; task: TaskRecord; waitingReason?: string }) {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [showEdit, setShowEdit] = useState(false)
   const [showEditTags, setShowEditTags] = useState(false)
   const [showDuplicate, setShowDuplicate] = useState(false)
-  /** Correction remark of a rework round; cleared when it was accepted. */
-  const [reworkNote, setReworkNote] = useState('')
 
   // Keep the overlay in sync if the task record changes underneath.
   const [latest, setLatest] = useState(task)
@@ -300,11 +303,17 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
     setShowEdit(false)
     setShowEditTags(false)
     setShowDuplicate(false)
-    setReworkNote('')
   }, [task.id])
   const current = latest
   const snapshot = controller.getSnapshot()
   const running = current.status === 'running'
+  // Any open execution — the run in `running` and the clarification run the
+  // card holds in `todo` alike — turns the footer's play button into the run's
+  // pause/play control.
+  const openRun = openExecution(current) !== undefined
+  // A paused card stays `running` but its session was stopped; the footer's
+  // execution button is the pause/play control of that run.
+  const paused = isTaskPaused(current)
   const archived = current.archivedAt !== undefined
   const pending = snapshot.pendingTaskIds.includes(current.id)
   const transportError = snapshot.transportError
@@ -326,6 +335,9 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
           <span className={css.statusBadge} data-status={archived ? 'archived' : current.status}>
             {archived ? t('board.archive') : t(STATUS_KEY[current.status])}
           </span>
+          {paused && (
+            <span className={css.statusBadge} data-dsh-part="detail-paused">{t('detail.paused')}</span>
+          )}
           <button
             type="button"
             className={css.iconButton}
@@ -343,6 +355,13 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
               <button type="button" className={css.linkButton} onClick={() => { void controller.retryHostSync() }}>
                 {t('board.retryHost')}
               </button>
+            </div>
+          )}
+          {waitingReason !== undefined && (
+            // The card waits for its lane's WIP slot: name the blocker here too,
+            // where there is room for the whole sentence.
+            <div className={css.queuedNotice} data-dsh-part="detail-waiting" role="status">
+              {waitingReason}
             </div>
           )}
           <section className={css.detailSection}>
@@ -465,42 +484,19 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
                   </button>
                 ))}
               </div>
-              {current.status === 'ready_for_test' && (
-                <div className={css.field} data-dsh-part="rework">
-                  <span className={css.fieldLabel}>{t('detail.rework.label')}</span>
-                  <p className={css.fieldHint}>{t('detail.rework.hint')}</p>
-                  <textarea
-                    className={css.input}
-                    rows={4}
-                    value={reworkNote}
-                    disabled={pending}
-                    placeholder={t('detail.rework.placeholder')}
-                    onChange={event => { setReworkNote(event.target.value) }}
-                  />
-                  <div className={css.aiParseRow}>
-                    <button
-                      type="button"
-                      className={css.ghostButton}
-                      disabled={pending || reworkNote.trim() === ''}
-                      onClick={() => {
-                        void controller.reworkTask(current.id, reworkNote.trim()).then(accepted => {
-                          if (accepted) setReworkNote('')
-                        })
-                      }}
-                    >
-                      {t('detail.rework.send')}
-                    </button>
-                  </div>
-                </div>
-              )}
             </section>
           )}
 
-          {!archived && current.reworkNote !== undefined && (
-            <section className={css.detailSection} data-dsh-part="rework-note">
-              <h4>{t('detail.rework.pending')}</h4>
-              <pre className={css.promptBlock}>{current.reworkNote}</pre>
-              <p className={css.detailMeta}>{t('detail.rework.pendingHint')}</p>
+          {!archived && current.reworkAt !== undefined && (
+            <section className={css.detailSection} data-dsh-part="rework-stamp">
+              <h4>{t('detail.rework')}</h4>
+              <p className={css.detailMeta}>
+                {t('detail.reworkStamp', {
+                  time: formatHostTimestamp(current.reworkAt, timeZone),
+                  count: String(current.reworkCount ?? 1),
+                })}
+              </p>
+              <p className={css.detailMeta}>{t('detail.reworkHint')}</p>
             </section>
           )}
         </div>
@@ -538,17 +534,38 @@ export function TaskDetail({ controller, task }: { controller: BoardController; 
               {canEditTaskContent(current) ? t('detail.duplicate') : t('detail.duplicateAndEdit')}
             </button>
           )}
-          {!archived && (
+          {!archived && (paused || openRun) && (
+            // The execution button doubles as the run's pause/play control:
+            // while the run is open it shows the pause glyph, a paused run shows
+            // the play glyph and continues in its own conversation.
             <button
               type="button"
               className={css.primaryButton}
-              disabled={running || pending}
+              data-dsh-part={paused ? 'detail-resume' : 'detail-pause'}
+              disabled={pending}
+              onClick={() => {
+                void (paused ? controller.resumeTasks([current.id]) : controller.pauseTasks([current.id]))
+              }}
+            >
+              <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>{' '}
+              {paused ? t('detail.continue') : t('detail.pause')}
+            </button>
+          )}
+          {!archived && !paused && !openRun && (
+            <button
+              type="button"
+              className={css.primaryButton}
+              // A human run is the go-ahead: the Host closes the card's open
+              // clarification round and continues its session with the
+              // implementation, so the button is offered like the drop.
+              disabled={pending}
               onClick={() => {
                 void controller.rerunTask(current.id).then(() => {
                   if (controller.getSnapshot().transportError === undefined) controller.closeTask()
                 })
               }}
             >
+              <span aria-hidden="true">▶</span>{' '}
               {current.executions.length === 0 ? t('detail.run') : t('detail.rerun')}
             </button>
           )}

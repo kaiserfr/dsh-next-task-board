@@ -10,7 +10,51 @@ import { type TaskRecord, type TaskTag } from '../../core/tasks.ts';
 import type { BoardController } from '../../core/controller.ts';
 import type { TaskBoardParseDraft } from '../../protocol.ts';
 import { type TaskBoardKey } from '../locales.ts';
-/** Modal overlay: closes on backdrop press, submits through the form. */
+/**
+ * Draft seat keys. One key per modal instance: the blank "new task" form, one
+ * duplicate form per source card, and one content/label form per card — so a
+ * draft kept for one card never reappears while a different card is edited.
+ */
+export declare const NEW_TASK_DRAFT_KEY = "new";
+export declare const duplicateDraftKey: (sourceTaskId: string) => string;
+export declare const editDraftKey: (taskId: string) => string;
+export declare const tagsDraftKey: (taskId: string) => string;
+/**
+ * The draft a modal opens on, read once from the controller's seat. `restored`
+ * drives the "draft restored" note; `discard` forgets the seat (the explicit
+ * discard button, which then also puts the untouched form back on screen).
+ */
+export declare function useStoredFormDraft<T>(controller: BoardController, key: string): {
+    stored: T | undefined;
+    restored: boolean;
+    discard: () => void;
+};
+/**
+ * Persist a modal's form into the controller's seat when the popup goes away —
+ * the way an accidental click next to the popup, Escape, Cancel, or the board
+ * view itself disappearing all keep what was typed. Values are read through a
+ * ref, so the last render's state is what lands in the seat. A form nobody
+ * touched leaves no draft behind, and `spend` retires a form whose task was
+ * created or saved — even when that confirmation arrives after the popup closed.
+ */
+export declare function useFormDraftSeat<T>(controller: BoardController, key: string, seat: {
+    /** The modal's latest field values. */
+    snapshot: () => T;
+    /** Whether the form holds anything worth restoring (a pristine form is not a draft). */
+    dirty: () => boolean;
+}): {
+    /** The form became a task: drop the seat and never restore this form again. */
+    spend: () => void;
+};
+/**
+ * "Draft restored" note of a modal that reopened on the form an earlier visit
+ * left behind, with the one explicit way to throw it away. It sits at the top
+ * of the form so a restored draft is never mistaken for a fresh, empty form.
+ */
+export declare function DraftNotice({ onDiscard }: {
+    onDiscard: () => void;
+}): import("react").JSX.Element;
+/** Modal overlay: closes on backdrop press or Escape, submits through the form. */
 export declare function ModalShell({ ariaLabel, title, error, pending, submitLabel, onSubmit, onClose, children, }: {
     ariaLabel: string;
     title: string;

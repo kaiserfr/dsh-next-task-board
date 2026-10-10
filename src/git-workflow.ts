@@ -7,12 +7,18 @@
  *
  * - `backlog` → `todo` (a human pulls the card in) opens the feature branch,
  * - `running` checks the feature branch out before the agent session starts,
- * - `ready_for_test` → `done` (a human accepts the work) commits what the run
- *   left behind and merges the feature branch back into its base branch.
+ * - reaching `ready_for_test` commits what the run left behind onto the feature
+ *   branch (`git.commitBranch`, and the runner's own settle), so no run's work
+ *   ever waits uncommitted in the worktree,
+ * - `ready_for_test` → `done` (a human accepts the work) commits any leftover
+ *   and merges the feature branch back into its base branch.
  *
- * The board's WIP limit is per workspace (WIP lane), so runs of one workspace
- * never overlap and one shared worktree per workspace is enough; different
- * workspaces have their own worktrees and `useBranch` targets the card's own.
+ * The board's WIP limit is per workspace (WIP lane), so two *implementation*
+ * runs of one workspace never overlap and one shared worktree per workspace is
+ * enough; different workspaces have their own worktrees and `useBranch` targets
+ * the card's own. A clarification run (`todo`) may start next to a working run,
+ * but it checks no branch out at all (see `TaskBoardHostService.launch`), so the
+ * checkout stays with the run that is working.
  */
 import { spawnSync } from 'node:child_process'
 import type { TaskGit, TaskRecord } from './core/tasks.ts'
@@ -78,6 +84,34 @@ export class GitWorkflow {
     return { branch, base, repoPath }
   }
 
+  /**
+   * Commit what the worktree holds onto the card's feature branch, stamping
+   * `committedAt`. Called whenever a card reaches `ready_for_test` — the
+   * configurable `git.commitBranch` action and the runner settling a run there
+   * — so no run's work is ever left uncommitted in the worktree, no matter
+   * whether the run succeeded, failed or was cancelled.
+   *
+   * A card that never had a branch (it skipped `todo`, or a cron/button start)
+   * gets one cut first, so the commit has a branch to land on. An already-clean
+   * worktree is left alone: no empty commit, and `committedAt` keeps the last
+   * instant something was actually committed.
+   * @param task - the card whose work is being parked.
+   * @param now - commit instant to stamp on the returned state.
+   * @returns the git state stamped with `committedAt`, or undefined without a
+   *   repository.
+   */
+  commitBranch(task: TaskRecord, now: number): TaskGit | undefined {
+    const git = task.git ?? this.openBranch(task)
+    if (git === undefined) return undefined
+    // The commit belongs on the card's branch, whatever HEAD happens to be: a
+    // run that skipped the `todo` pull may still sit on the base branch.
+    this.run(git.repoPath, ['checkout', git.branch])
+    if (!this.isDirty(git.repoPath)) return git
+    this.run(git.repoPath, ['add', '-A'])
+    this.run(git.repoPath, ['commit', '-m', `task: ${task.title}`])
+    return { ...git, committedAt: now }
+  }
+
   /** Check out the task's recorded feature branch before it runs. */
   useBranch(task: TaskRecord): void {
     const git = task.git
@@ -86,9 +120,10 @@ export class GitWorkflow {
   }
 
   /**
-   * Commit what the run left behind on the feature branch and merge it back
-   * into the base branch. Called on the `ready_for_test` → `done` move; an
-   * already-merged branch is left alone.
+   * Commit any leftover the run left behind on the feature branch and merge it
+   * back into the base branch. Called on the `ready_for_test` → `done` move; an
+   * already-merged branch is left alone. The commit is a safety net: the park
+   * into `ready_for_test` already committed the work.
    * @param task - the card being accepted.
    * @param now - merge instant to stamp on the returned state.
    * @returns the git state stamped with `mergedAt`, or undefined without one.
@@ -96,6 +131,7 @@ export class GitWorkflow {
   mergeBranch(task: TaskRecord, now: number): TaskGit | undefined {
     const git = task.git
     if (git === undefined || git.mergedAt !== undefined) return undefined
+    this.run(git.repoPath, ['checkout', git.branch])
     if (this.isDirty(git.repoPath)) {
       this.run(git.repoPath, ['add', '-A'])
       this.run(git.repoPath, ['commit', '-m', `task: ${task.title}`])

@@ -44,12 +44,24 @@ export interface ExecutionRecord {
   /** Freeze source session captured from the card snapshot when the run opened. */
   frozenBy?: string
   /**
-   * The correction note this run was started with, copied off the card when the
-   * run opened. It is the round's audit stamp: the run consumes the card's
-   * pending note (see {@link TaskRecord.reworkNote}), so without this copy a
-   * settled rework round could no longer say what it was about.
+   * Whether this run was started to work off a rework: the card had been sent
+   * back from `ready_for_test`/`failed` to `todo` (see
+   * {@link TaskRecord.reworkAt}) and the human has not started a run since. The
+   * correction itself was typed by the human into the card's own conversation,
+   * so this mark only carries the two consequences the board owes that round:
+   * the run continues that conversation instead of minting a new one, and its
+   * opening turn is the rework framing instead of the whole card body.
    */
-  reworkNote?: string
+  rework?: boolean
+  /**
+   * What this execution is: absent means a normal run (the implementation that
+   * walks the card through the run column). `'clarify'` marks the card's
+   * clarification run — a real execution (it holds the card's session, the board
+   * shows Running/Queued and links it) that settles **without moving the card**:
+   * it still sits in `todo` so the human can pull it on to the run column, which
+   * continues the very same session.
+   */
+  kind?: 'clarify'
 }
 
 /**
@@ -101,6 +113,13 @@ export interface TaskGit {
   base: string
   /** Repository worktree the branches belong to. */
   repoPath: string
+  /**
+   * When the card's work was last committed onto the feature branch (ms epoch).
+   * Written when a card reaches `ready_for_test` (the `git.commitBranch` action
+   * and the runner's own settle), so the worktree never keeps uncommitted card
+   * work. A park that found nothing to commit leaves the previous instant.
+   */
+  committedAt?: number
   /** When the feature branch was merged back into `base` (ms epoch). */
   mergedAt?: number
 }
@@ -282,18 +301,18 @@ export interface TaskRecord {
    */
   reuseSession?: boolean
   /**
-   * Pending correction note: a human reviewed the card in `ready_for_test`,
-   * found it not done, and sent it back with this remark. Written by the
-   * `rework` action, displayed on the card, and consumed by that card's next
-   * run (which copies it onto the execution record and clears it here).
+   * Rework stamp: a human reviewed the card in `ready_for_test` (or the run
+   * landed in `failed`) and sent it back to `todo`. The correction is typed
+   * into the card's own conversation — the board keeps no note of its own — so
+   * the stamp is the record that the card went through a rework and when.
    *
-   * The note becomes its own user turn in the previous conversation — never an
-   * edit of `prompt`: a session is append-only, and `prompt` stays the record
-   * of what was originally asked. When the run continues the previous session,
-   * the note is the ONLY text sent, because that session already carries the
-   * original prompt and everything that followed it.
+   * A stamp newer than the card's newest run means that round is still pending:
+   * the next run continues the conversation it was written in and opens with
+   * the rework framing (see {@link pendingRework}).
    */
-  reworkNote?: string
+  reworkAt?: number
+  /** How often the card has been sent back for rework. */
+  reworkCount?: number
   /**
    * Frozen context snapshot for a continuation card; absent on plain tasks.
    * Sanitized before it enters the ledger (redaction, slash-command taint,
@@ -313,6 +332,13 @@ export interface TaskRecord {
    * prepended to the execution prompt; a bare name is display and filter only.
    */
   tags?: TaskTag[]
+  /**
+   * Conversation the card's questions are settled in. Opened by the
+   * clarification run of the `backlog → todo` step; the card links to it, and
+   * the run that starts the work continues this conversation so the collected
+   * answers stay in context. Absent until that session exists.
+   */
+  clarificationSessionId?: string
   /**
    * Human confirmation stamp for an above-default effective permission
    * (ms epoch). Absent while the binding awaits confirmation; any permission
@@ -338,6 +364,15 @@ export interface TaskRecord {
    * falls back to `updatedAt`.
    */
   doneAt?: number
+  /**
+   * When the card's open run was paused (ms epoch). A paused card keeps its
+   * `running` status and its open execution record — it is simply not worked
+   * on: the runner stopped the session and the monitor leaves the run alone
+   * until the card is resumed. Resuming clears the stamp and continues the
+   * run's conversation with a "continue" turn; no status column changes in
+   * either direction.
+   */
+  pausedAt?: number
 }
 
 /**
@@ -473,22 +508,44 @@ export function normalizeParseText(value: unknown): string | undefined {
 }
 
 /**
- * Longest correction note the board accepts (characters). The note is injected
- * verbatim into a prompt and copied into the ledger, so an unbounded string
- * would bloat both; the cap is generous enough for a detailed test report.
+ * Whether this move sends the card back for rework: out of the review column
+ * (`ready_for_test`) or out of a failed run (`failed`) into `todo`. Every such
+ * move is stamped ({@link withReworkStamp}), no matter who fired it — the
+ * human's drag/chip or the Host noticing a correction in the card's chat.
+ * @param from - the column the card leaves.
+ * @param to - the column the card enters.
  */
-export const REWORK_NOTE_MAX_LENGTH = 4_000
+export function isReworkReturn(from: TaskStatus, to: TaskStatus): boolean {
+  return to === 'todo' && (from === 'ready_for_test' || from === 'failed')
+}
 
 /**
- * Normalize one optional correction note: trim, cap at
- * {@link REWORK_NOTE_MAX_LENGTH}, and collapse a blank note to undefined so an
- * empty remark can never open a rework round or reach a session.
+ * Stamp a rework return onto the card: when it last went back and how often it
+ * has. The correction text lives in the card's conversation, never here.
+ * @param task - the card being sent back.
+ * @param now - the instant of the return.
  */
-export function normalizeReworkNote(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined
-  const trimmed = value.trim()
-  if (trimmed === '') return undefined
-  return trimmed.length <= REWORK_NOTE_MAX_LENGTH ? trimmed : trimmed.slice(0, REWORK_NOTE_MAX_LENGTH).trim()
+export function withReworkStamp(task: TaskRecord, now: number): TaskRecord {
+  return { ...task, reworkAt: now, reworkCount: (task.reworkCount ?? 0) + 1 }
+}
+
+/**
+ * Whether the card's latest send-back has not been worked off yet: the rework
+ * happened after the newest run opened (a clarification round does not count,
+ * it opens no implementation). Only then does the next run owe the round its
+ * two consequences — continue the corrected conversation and open with the
+ * rework framing. Starting any run consumes the marker by the clock alone, so
+ * no extra bookkeeping field can drift.
+ * @param task - the card about to run.
+ */
+export function pendingRework(task: TaskRecord): boolean {
+  if (task.reworkAt === undefined) return false
+  let newestRunAt = 0
+  for (const execution of task.executions) {
+    if (execution.kind === 'clarify') continue
+    if (execution.startedAt > newestRunAt) newestRunAt = execution.startedAt
+  }
+  return task.reworkAt > newestRunAt
 }
 
 /**
@@ -592,13 +649,21 @@ export function withSchedule(
 /**
  * Open a fresh execution on a task: move it to 'running' and append a
  * running execution record. Returns the new task and the new execution.
+ *
+ * `kind: 'clarify'` opens the card's *clarification run* instead: the execution
+ * is a real one (the WIP-free todo run — it starts without waiting for a lane
+ * slot, and the board shows the card as Running and links the session), but the
+ * card keeps its column — the clarification must not leave `todo`, because the
+ * human pulls it on to the run column afterwards.
  */
 export function startExecution(
   task: TaskRecord,
   now: number,
   executionId: string,
   initiatedBy?: string,
+  kind?: 'clarify',
 ): { task: TaskRecord; execution: ExecutionRecord } {
+  const clarification = kind === 'clarify'
   const execution: ExecutionRecord = {
     id: executionId,
     sessionId: undefined,
@@ -606,11 +671,13 @@ export function startExecution(
     endedAt: undefined,
     result: undefined,
     error: undefined,
+    ...(clarification ? { kind: 'clarify' as const } : {}),
     ...(initiatedBy === undefined || initiatedBy === '' ? {} : { initiatedBy }),
-    // A rework round's note moves off the card onto the run that consumes it:
-    // the execution carries how the round was started, and the card no longer
-    // needs to resend the same remark on the run after next.
-    ...(task.reworkNote === undefined ? {} : { reworkNote: task.reworkNote }),
+    // The run records how it was started: a run that works off a send-back
+    // continues the corrected conversation and opens with the rework framing.
+    // A clarification is not that round: it must not consume the marker the
+    // implementation run still has to honour.
+    ...(clarification || !pendingRework(task) ? {} : { rework: true }),
     // Capture the card's freeze provenance on the execution record so the
     // audit trail stays queryable even if the snapshot is replaced later.
     ...(task.freeze === undefined ? {} : {
@@ -621,9 +688,11 @@ export function startExecution(
   return {
     task: {
       ...task,
-      status: 'running',
+      ...(clarification ? {} : { status: 'running' as TaskStatus }),
       updatedAt: now,
-      reworkNote: undefined,
+      // A fresh run is never a continuation of a pause: the stamp only ever
+      // describes the run that is open right now.
+      pausedAt: undefined,
       executions: retainRecentExecutions([...task.executions, execution]),
     },
     execution,
@@ -639,6 +708,10 @@ export function startExecution(
  * passed only after the execution's session has ended (see
  * `HostExecutionRunner.inspect`), never on an intermediate turn boundary of a
  * session that is still working.
+ *
+ * A clarification run is the exception: its outcome is recorded, but the card
+ * keeps its column. Settling a chat must never park the card in
+ * `ready_for_test`/`failed`; it waits in `todo` for the human to pull it on.
  */
 export function settleExecution(
   task: TaskRecord,
@@ -654,23 +727,65 @@ export function settleExecution(
   const settled: ExecutionRecord = { ...execution, endedAt: now, result: outcome, error }
   const executions = [...task.executions]
   executions[index] = settled
-  const status: TaskStatus = outcome === 'succeeded'
-    ? 'ready_for_test'
-    : outcome === 'failed' ? 'failed'
-      : task.status === 'running' ? 'todo' : task.status
-  return { ...task, status, updatedAt: now, executions }
+  const status: TaskStatus = execution.kind === 'clarify'
+    ? task.status
+    : outcome === 'succeeded'
+      ? 'ready_for_test'
+      : outcome === 'failed' ? 'failed'
+        : task.status === 'running' ? 'todo' : task.status
+  return { ...task, status, updatedAt: now, pausedAt: undefined, executions }
+}
+
+/** Whether the card's open run is paused (still `running`, but not worked on). */
+export function isTaskPaused(task: TaskRecord): boolean {
+  return task.pausedAt !== undefined
 }
 
 /**
- * Whether a task is being executed right now: its latest run is still open AND
- * has already attached its dsh session. A card that sits in a runner-owned
- * column with an open run but no session yet is only waiting for a free WIP
- * slot (queued) — the board marks "running now" and "waiting" differently, so
- * this predicate is the single answer to which is which.
+ * The card's open (unsettled) run, or undefined when the newest execution has
+ * already settled. At most one run is open at a time: the ledger refuses a new
+ * run while one is open.
+ */
+export function openExecution(task: TaskRecord): ExecutionRecord | undefined {
+  const latest = task.executions[task.executions.length - 1]
+  return latest !== undefined && latest.endedAt === undefined ? latest : undefined
+}
+
+/**
+ * Whether the card carries an open *run* (a real execution, not one of its
+ * clarification runs). A clarification deliberately does not block: the human
+ * keeps the card draggable while the chat is still going, and pulls it on to
+ * the run column without waiting for it to come to rest.
+ */
+export function hasOpenRun(task: TaskRecord): boolean {
+  return task.executions.some(execution => execution.endedAt === undefined && execution.kind !== 'clarify')
+}
+
+/**
+ * Pause or resume the card's open run: stamp {@link TaskRecord.pausedAt} or
+ * clear it. The status column is deliberately not touched — a paused card stays
+ * in "In progress" so it can be resumed later. Pausing an already-paused card
+ * keeps the original stamp (idempotent); resuming a running card is a no-op.
+ */
+export function withPause(task: TaskRecord, paused: boolean, now: number): TaskRecord {
+  if (paused) return { ...task, pausedAt: task.pausedAt ?? now, updatedAt: now }
+  if (task.pausedAt === undefined) return task
+  return { ...task, pausedAt: undefined, updatedAt: now }
+}
+
+/**
+ * Whether a task is being executed right now: its latest run is still open,
+ * has already attached its dsh session, and the card is not paused. A card that
+ * sits in a runner-owned column with an open run but no session yet is only
+ * waiting for a free WIP slot (queued) — the board marks "running now" and
+ * "waiting" differently, so this predicate is the single answer to which is
+ * which. A `todo` clarification run never waits for a slot, so it is only
+ * session-less for the moment its launch takes. A paused card keeps its open run and its column, but it is neither
+ * running now nor waiting for a slot: its session was stopped.
  */
 export function isTaskExecuting(task: TaskRecord): boolean {
   const latest = task.executions[task.executions.length - 1]
-  return latest !== undefined && latest.endedAt === undefined && latest.sessionId !== undefined
+  return latest !== undefined && latest.endedAt === undefined && latest.sessionId !== undefined && task.pausedAt === undefined
 }
 
 /**
@@ -691,6 +806,79 @@ export function runArrivalAt(task: TaskRecord): number {
 export function compareWipOrder(left: TaskRecord, right: TaskRecord): number {
   const rank = (isTaskExecuting(right) ? 1 : 0) - (isTaskExecuting(left) ? 1 : 0)
   return rank !== 0 ? rank : runArrivalAt(left) - runArrivalAt(right)
+}
+
+/**
+ * Why a card is waiting for its lane's WIP slot, or undefined when it is not
+ * waiting at all. A card waits when it carries an open *implementation*
+ * execution that has not attached a session yet, while another card of the same
+ * lane holds the lane's slot — the state the Host's launch queue leaves it in.
+ *
+ * This is presentation data for the board's waiting badge; the Host remains the
+ * authority on whether a launch starts. The strings are task titles: resolving
+ * the workspace's display name is the caller's business.
+ */
+export interface WaitingReason {
+  /** Title of the card that holds the lane's slot. */
+  blockerTitle: string
+  /** The lane in question ('' for cards without a pinned workspace). */
+  lane: string
+}
+
+/**
+ * Whether one card holds the given lane's WIP slot: an open implementation
+ * execution that already attached its session, on a card that is not paused.
+ * That is exactly the state the Host's launch queue counts, so the board's
+ * explanation and the Host's gate agree.
+ */
+function holdsLaneSlot(task: TaskRecord): boolean {
+  if (task.archivedAt !== undefined || task.pausedAt !== undefined) return false
+  const latest = task.executions[task.executions.length - 1]
+  if (latest === undefined || latest.endedAt !== undefined) return false
+  return latest.kind !== 'clarify' && latest.sessionId !== undefined
+}
+
+/**
+ * The cards that hold a lane's WIP slots, in board order: an open
+ * implementation execution that already attached its session, on a card that is
+ * not paused. That is exactly the state the Host's launch queue counts, so the
+ * board's explanation and the Host's gate agree.
+ */
+function laneSlotHolders(lane: string, allTasks: readonly TaskRecord[]): TaskRecord[] {
+  const holders: TaskRecord[] = []
+  for (const other of allTasks) {
+    if (other.archivedAt !== undefined || other.pausedAt !== undefined) continue
+    if (taskLane(other) !== lane || !holdsLaneSlot(other)) continue
+    holders.push(other)
+  }
+  return holders
+}
+
+/**
+ * The waiting reason of one card, or undefined when its lane has room. Mirrors
+ * the Host's slot accounting: a clarification run is WIP-free, a paused card
+ * released its slot, and a settled execution holds nothing. The lane is
+ * saturated when as many cards hold its slot as the limit allows; the card that
+ * blocks is the first holder found.
+ *
+ * Deliberately says nothing about the card's own execution record: a card that
+ * was just dropped has none yet, while a card already in the queue has one — in
+ * both cases the reason is the lane, not the card.
+ *
+ * @param task - the card to explain (its lane is what matters).
+ * @param allTasks - every board card (the holders are looked up here).
+ * @param maxConcurrentRuns - the enforced per-lane limit (>= 1).
+ */
+export function waitingReasonFor(
+  task: TaskRecord,
+  allTasks: readonly TaskRecord[],
+  maxConcurrentRuns: number,
+): WaitingReason | undefined {
+  const lane = taskLane(task)
+  const holders = laneSlotHolders(lane, allTasks).filter(holder => holder.id !== task.id)
+  if (holders.length < Math.max(1, maxConcurrentRuns)) return undefined
+  const blocker = holders[0]
+  return blocker === undefined ? undefined : { blockerTitle: blocker.title, lane }
 }
 
 /** A settled-execution summary string for the detail view. */

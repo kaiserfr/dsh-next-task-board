@@ -1,6 +1,6 @@
 {
   "name": "dsh-next-task-board",
-  "description": "Host-authoritative task board for the DSH Web GUI: independent fork of @linxin666/dsh-client-ui-task-board (base 0.3.23) driven by a configurable state engine (columns = task states, declarative transitions with actions such as git.openBranch/git.mergeBranch, drag & drop validated against them) plus a Host-enforced per-workspace WIP limit (maxConcurrentRuns, FIFO queue per workspace/lane, default 1), a Host-enforced Done-column limit (maxDoneTasks, FIFO archive displacement, default 9) and drag-to-start (drop a card on \"In progress\" runs it), with the upstream install heartbeat removed; real session execution, Host cron scheduling, optional idle-sleep protection.",
+  "description": "Host-authoritative task board for the DSH Web GUI: independent fork of @linxin666/dsh-client-ui-task-board (base 0.3.23) driven by a configurable state engine (columns = task states, declarative transitions with actions such as git.openBranch/git.mergeBranch, drag & drop validated against them) plus a Host-enforced per-workspace WIP limit (maxConcurrentRuns, FIFO queue per workspace/lane, default 1 — clarification runs in the todo column are WIP-free and start immediately), a Host-enforced Done-column limit (maxDoneTasks, FIFO archive displacement, default 9) and drag-to-start (drop a card on \"In progress\" runs it), with the upstream install heartbeat removed; real session execution, Host cron scheduling, optional idle-sleep protection.",
   "version": "0.4.1",
   "type": "module",
   "main": "lib/index.js",

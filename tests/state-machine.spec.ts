@@ -113,10 +113,16 @@ describe('transitions are the drag & drop rule', () => {
     expect(defaultMachine.targets('running', 'runner')).toEqual(['ready_for_test', 'failed', 'todo'])
     expect(defaultMachine.canTransition('running', 'ready_for_test', 'runner')).toBe(true)
     expect(defaultMachine.canTransition('running', 'todo', 'runner')).toBe(true)
-    // A card may be dropped straight onto the run column from either entry
-    // state; the action, not the status move, is what starts it.
+    // The clarification step and the two corrected columns reach the run
+    // column: a card in `todo` may be dropped onto "In progress" (the action,
+    // not the status move, starts it), and a reviewed or failed card may be
+    // pulled straight back onto it — a card in `backlog` may not, that drag has
+    // no transition at all.
     expect(defaultMachine.actionsFor('todo', 'running')).toEqual(['run'])
-    expect(defaultMachine.actionsFor('backlog', 'running')).toEqual(['git.openBranch', 'run'])
+    expect(defaultMachine.actionsFor('ready_for_test', 'running')).toEqual(['run'])
+    expect(defaultMachine.actionsFor('failed', 'running')).toEqual(['run'])
+    expect(defaultMachine.canTransition('backlog', 'running')).toBe(false)
+    expect(defaultMachine.targets('backlog')).not.toContain('running')
   })
 
   it('treats a same-state move as no transition', () => {
@@ -125,8 +131,16 @@ describe('transitions are the drag & drop rule', () => {
 })
 
 describe('actions hang off transitions', () => {
-  it('fires the git hooks on exactly the two workflow transitions', () => {
-    expect(defaultMachine.actionsFor('backlog', 'todo')).toEqual(['git.openBranch'])
+  it('fires the git hooks on exactly the workflow transitions', () => {
+    // `clarify` rides the same transition: pulling a card out of the backlog is
+    // its clarification step, not just a branch cut.
+    expect(defaultMachine.actionsFor('backlog', 'todo')).toEqual(['git.openBranch', 'clarify'])
+    // Every manual way into the review column commits, so no run's work waits
+    // uncommitted while the card is reviewed.
+    expect(defaultMachine.actionsFor('todo', 'ready_for_test')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('backlog', 'ready_for_test')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('done', 'ready_for_test')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('failed', 'ready_for_test')).toEqual(['git.commitBranch'])
     expect(defaultMachine.actionsFor('ready_for_test', 'done')).toEqual(['git.mergeBranch'])
     expect(defaultMachine.actionsFor('todo', 'done')).toEqual([])
   })
@@ -164,6 +178,7 @@ describe('diagram', () => {
     const diagram = renderStateMachineMermaid(defaultMachine)
     for (const status of ALL_STATUSES) expect(diagram).toContain(status)
     expect(diagram).toContain('backlog --> todo: manual: openBranch')
+    expect(diagram).toContain('todo --> ready_for_test: manual: commitBranch')
     expect(diagram).toContain('ready_for_test --> done: manual: mergeBranch')
     expect(diagram).toContain('running --> ready_for_test, failed, todo: runner')
   })

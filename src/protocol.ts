@@ -1,5 +1,5 @@
 import type { TaskUpdatePatch } from './core/use-cases/task-update.ts'
-import { isTaskPermission, isTaskStatus, isTaskTagList, normalizeReworkNote, type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts'
+import { isTaskPermission, isTaskStatus, isTaskTagList, type NewTaskInput, type TaskPermission, type TaskRecord, type TaskStatus } from './core/tasks.ts'
 import type { StateMachineConfig } from './core/state-machine.ts'
 import { parseLedger } from './core/store.ts'
 import { sanitizeFreezeSnapshot, type FreezeSnapshot } from './core/freeze-snapshot.ts'
@@ -48,6 +48,21 @@ export interface TaskBoardSnapshot {
    * shipped machine.
    */
   stateMachine?: StateMachineConfig
+  /**
+   * The enforced WIP limit per workspace/lane (`maxConcurrentRuns`). Only used
+   * to explain a waiting card ("one run per workspace"); the Host stays the
+   * authority on whether a launch starts. Absent on an older Host.
+   */
+  maxConcurrentRuns?: number
+  /** The enforced Done-column limit (`maxDoneTasks`). Absent on an older Host. */
+  maxDoneTasks?: number
+  /**
+   * Task id → the session waiting for the human's answer, for every card whose
+   * conversation holds a question the agent asked and stopped on. The card shows
+   * its question symbol and jumps there. Derived from the conversations on each
+   * poll, so it is no ledger state; absent on an older Host.
+   */
+  awaitingAnswer?: Record<string, string>
 }
 
 /** SSE event frame: revision/scheduler/power only, never the task list. */
@@ -55,6 +70,14 @@ export interface TaskBoardEventPayload {
   revision: number
   scheduler: TaskBoardSchedulerSnapshot
   power: TaskBoardPowerSnapshot
+  /** Enforced limits, so a settings change reaches every open board. */
+  maxConcurrentRuns?: number
+  maxDoneTasks?: number
+  /**
+   * Waiting questions, carried on the frame like the limits because the map is
+   * derived: it never bumps the revision the frame is gated on.
+   */
+  awaitingAnswer?: Record<string, string>
 }
 
 /**
@@ -103,7 +126,8 @@ export type TaskBoardAction =
   | { kind: 'set-schedule'; taskId: string; patch: { enabled?: boolean; cron?: string } }
   | { kind: 'run'; taskId: string }
   | { kind: 'rerun'; taskId: string }
-  | { kind: 'rework'; taskId: string; note: string }
+  | { kind: 'pause'; taskIds: string[] }
+  | { kind: 'resume'; taskIds: string[] }
   | { kind: 'confirm-permission'; taskId: string }
 
 export interface TaskBoardActionEnvelope {
@@ -222,6 +246,8 @@ function importedTask(value: unknown): TaskRecord | undefined {
     ...(task.tags === undefined ? {} : { tags: task.tags }),
     // 安全门（对抗场景 b）：import 不是人工确认动作，确认戳一律剥除——
     // 高于会话默认权限的绑定经 import 进入后必须重新武装 confirm-permission 门。
+    // Ein importiertes Blatt bringt keine hiesige Sitzung mit: die fremde
+    // `clarificationSessionId` wird deshalb ebenfalls entfernt.
   }
 }
 
@@ -370,16 +396,19 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
         action: { kind: 'move-many', taskIds: [...new Set(raw)], status: action.status },
       }
     }
-    case 'rework': {
-      // Send a card back for correction with the reviewer's note. The move
-      // itself is validated against the machine in the ledger; the gate only
-      // proves the note is a usable string, so a blank remark can never open a
-      // rework round (and never reach a session).
-      if (!exactKeys(action, ['kind', 'taskId', 'note'])) return undefined
-      const note = normalizeReworkNote(action.note)
-      return taskId === undefined || note === undefined
-        ? undefined
-        : { requestId: envelope.requestId, action: { kind: 'rework', taskId, note } }
+    case 'pause':
+    case 'resume': {
+      // Pause/resume carry a card list like `move-many` (one card for the card
+      // button, all in-progress cards for the board's bulk button), so the
+      // board pauses everything in a single atomic ledger write.
+      if (!exactKeys(action, ['kind', 'taskIds'])) return undefined
+      const raw = action.taskIds
+      if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_BATCH_MOVE) return undefined
+      if (!raw.every(id => typeof id === 'string' && id !== '')) return undefined
+      return {
+        requestId: envelope.requestId,
+        action: { kind: action.kind, taskIds: [...new Set(raw)] },
+      }
     }
     case 'confirm-permission':
     case 'delete':

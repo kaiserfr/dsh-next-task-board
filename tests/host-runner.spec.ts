@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
+import type { SessionSummary } from '@deepseek-ai/dsh-api-session-controller/types'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
-import { HostExecutionRunner, SessionLaunchError } from '../src/host-runner.ts'
+import { COMPLETION_INSTRUCTION, HostExecutionRunner, SessionLaunchError } from '../src/host-runner.ts'
 
 type GatewayRequest = {
   namespace: string
@@ -111,6 +112,13 @@ function configuredTask(): TaskRecord {
   }
 }
 
+/** One assistant answer as the session history carries it. */
+function assistantMessage(seq: number, time: number, text: string, extra: readonly unknown[] = []) {
+  return sessionEvent('assistant/message', seq, time, {
+    message: { role: 'assistant', content: [{ type: 'text', text }, ...extra] },
+  })
+}
+
 describe('HostExecutionRunner', () => {
   it('validates and applies workspace, preset, and permission before the task prompt', async () => {
     const order: string[] = []
@@ -150,7 +158,7 @@ describe('HostExecutionRunner', () => {
     await expect(new HostExecutionRunner(gateway, commands, workspaceRegistry()).launch(configuredTask())).resolves.toBe('session-a')
     expect(order).toEqual(['preset', 'create', 'rename', 'permission', 'prompt'])
     expect(gateway.invoke.mock.calls[1]?.[0].args).toEqual({ request: { workspaceId: 'workspace-a', agentPreset: 'preset-a' } })
-    expect(promptPayloads).toEqual([{ sessionId: 'session-a', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: 'do work' }] }])
+    expect(promptPayloads).toEqual([{ sessionId: 'session-a', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: `do work\n\n${COMPLETION_INSTRUCTION}` }] }])
   })
 
   it('continues in the reused session without creating or renaming one (#1419)', async () => {
@@ -185,10 +193,10 @@ describe('HostExecutionRunner', () => {
     // The pinned permission is re-asserted on the existing session; no
     // create/rename reaches the gateway at all.
     expect(order).toEqual(['preset', 'permission', 'prompt'])
-    expect(promptPayloads).toEqual([{ sessionId: 'session-existing', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: 'do work' }] }])
+    expect(promptPayloads).toEqual([{ sessionId: 'session-existing', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: `do work\n\n${COMPLETION_INSTRUCTION}` }] }])
   })
 
-  it('sends only the correction note when a rework continues the session', async () => {
+  it('sends only the rework framing when a rework continues the session', async () => {
     const promptPayloads: unknown[] = []
     const commands = { execute: vi.fn(async () => ({ kind: 'success' as const })) }
     const gateway = {
@@ -204,16 +212,16 @@ describe('HostExecutionRunner', () => {
     }
     await expect(new HostExecutionRunner(gateway, commands, workspaceRegistry()).launch(configuredTask(), {
       reuseSessionId: 'session-existing',
-      reworkNote: 'the redirect is missing',
+      rework: true,
     })).resolves.toBe('session-existing')
     const prompt = (promptPayloads[0] as { content: Array<{ text: string }> }).content[0].text
-    // The continued conversation already holds the original instruction: the
-    // new turn is the review remark and nothing else.
+    // The continued conversation already holds the original instruction and the
+    // human's own correction: the new turn only frames the round.
     expect(prompt).not.toContain('do work')
-    expect(prompt).toContain('the redirect is missing')
+    expect(prompt).toContain('返工要求')
   })
 
-  it('keeps the original prompt and appends the note when no session can be continued', async () => {
+  it('keeps the original prompt when no session can be continued', async () => {
     const promptPayloads: unknown[] = []
     const commands = { execute: vi.fn(async () => ({ kind: 'success' as const })) }
     const gateway = {
@@ -230,14 +238,13 @@ describe('HostExecutionRunner', () => {
       }),
     }
     await expect(new HostExecutionRunner(gateway, commands, workspaceRegistry()).launch(configuredTask(), {
-      reworkNote: 'the redirect is missing',
+      rework: true,
     })).resolves.toBe('session-fresh')
     const prompt = (promptPayloads[0] as { content: Array<{ text: string }> }).content[0].text
-    // Without the conversation the note would be meaningless on its own, so the
-    // correction rides on the full prompt rather than being dropped.
+    // A fresh session has no correction in context, so the run has to carry the
+    // card's instruction; the rework framing would mean nothing there.
     expect(prompt).toContain('do work')
-    expect(prompt).toContain('the redirect is missing')
-    expect(prompt.indexOf('do work')).toBeLessThan(prompt.indexOf('the redirect is missing'))
+    expect(prompt).not.toContain('返工要求')
   })
 
   it('reports the reused session when the reuse prompt fails (#1419)', async () => {
@@ -784,5 +791,88 @@ describe('HostExecutionRunner', () => {
     gateway.invoke.mockImplementation(async (request: GatewayRequest) => request.method === 'list' ? { items: [] } : page(request))
     await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'cancelled', error: 'execution session no longer exists' })
     expect(page.mock.calls.length).toBe(callsBefore)
+  })
+
+  // Regression: the agent's own "FERTIG:" report is a note for the human, not
+  // the run's end. The report used to settle the execution on the spot, so a
+  // card reached Ready for test while its session was still working.
+  it("never settles on the agent's FERTIG report while the session still runs", async () => {
+    const page = vi.fn(async (request: GatewayRequest) => {
+      throw new Error('unexpected gateway call: ' + request.method)
+    })
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: true }] }
+        : page(request)),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([
+              assistantMessage(11, 1_500, '**FERTIG:** Karte ist umgesetzt und getestet.'),
+              sessionEvent('turn/end', 12, 1_600, { reason: { kind: 'completed' } }),
+            ], 12, false)
+          },
+        }),
+      }),
+    }
+    await expect(new HostExecutionRunner(gateway).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'pending' })
+    // The running flag settles it, before any history paging or session-end read.
+    expect(page).not.toHaveBeenCalled()
+  })
+
+  it('parks the same run once the session has ended', async () => {
+    // First poll: the roster still reports the session as running, so the card
+    // must not move. The next poll sees the ended session and settles the run —
+    // exactly one poll cycle after the session stopped.
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : { records: [], hasMore: false }),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([
+              assistantMessage(11, 1_500, 'FERTIG: umgesetzt und getestet.'),
+              sessionEvent('turn/end', 12, 1_600, { reason: { kind: 'completed' } }),
+            ], 12, false)
+          },
+        }),
+      }),
+    }
+    await expect(new HostExecutionRunner(gateway).inspect('session-a', 1_000, [
+      { sessionId: 'session-a' as SessionSummary['sessionId'], running: true, agentAvailable: true, updatedAt: 1_500, blank: false },
+    ])).resolves.toEqual({ outcome: 'pending' })
+    await expect(new HostExecutionRunner(gateway).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'succeeded' })
+  })
+
+  it('keeps the card running while the session still reports queued work or a live job', async () => {
+    // A rest for the history head is not a rest for the session: the run only
+    // settles once its inbox and its jobs are quiet too.
+    const makeRunner = (baseline: unknown) => new HostExecutionRunner({
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : { records: [], hasMore: false }),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([
+              assistantMessage(11, 1_500, 'FERTIG: umgesetzt und getestet.'),
+              sessionEvent('turn/end', 12, 1_600, { reason: { kind: 'completed' } }),
+            ], 12, false)
+          },
+        }),
+        control: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield baseline
+          },
+        }),
+      }),
+    })
+    await expect(makeRunner(controlBaseline({ 'session-a': [{ id: 'm1', placement: 'queued' }] })).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'pending' })
+    await expect(makeRunner(controlBaseline({}, { 'session-a': [{ status: 'running' }] })).inspect('session-a', 1_000))
+      .resolves.toEqual({ outcome: 'pending' })
   })
 })

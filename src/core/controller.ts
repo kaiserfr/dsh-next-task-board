@@ -123,6 +123,13 @@ export interface ControllerSnapshot {
   /** Picker option sets (workspace list + agent-preset roster). */
   executionOptions: ExecutionOptionsSnapshot
   pendingTaskIds: readonly string[]
+  /**
+   * Keys of the modal form drafts the controller currently holds (see
+   * {@link BoardController.saveFormDraft}). The board marks "new task" while
+   * the blank form's draft waits, so a kept draft is visible before the popup
+   * is opened again. Absent when nothing waits.
+   */
+  formDrafts?: readonly string[]
   /** Whether the board may offer "register a new project" (issue #1536). */
   canCreateWorkspace?: boolean
   /** Whether this deployment can parse pasted text into task fields (issue #1540). */
@@ -134,7 +141,7 @@ export interface ControllerSnapshot {
    * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
    */
   sessionOpenError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine'>
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -180,9 +187,17 @@ export class BoardController {
   private readonly uuid: () => string
   private readonly pendingTaskIds = new Set<string>()
   private readonly taskQueues = new Map<string, Promise<void>>()
+  /**
+   * Modal form drafts, keyed per modal (the client owns the key vocabulary).
+   * They live here — not in the popup components — so closing a popup by an
+   * accidental click next to it, by Escape, or by Cancel never throws typed
+   * input away: the modal's next mount reads its draft back. In memory only,
+   * so a page reload is a clean start.
+   */
+  private readonly formDrafts = new Map<string, unknown>()
   private transportError: string | undefined
   private sessionOpenError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine'> | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer'> | undefined
   private remoteSubscribed = false
   private remoteInitialization: Promise<boolean> | undefined
 
@@ -229,6 +244,7 @@ export class BoardController {
       selectedTaskId: this.selectedTaskId,
       executionOptions: this.executionOptions,
       pendingTaskIds: [...this.pendingTaskIds],
+      ...(this.formDrafts.size === 0 ? {} : { formDrafts: this.formDraftKeys() }),
       ...(this.workspaceCreator === undefined ? {} : { canCreateWorkspace: true }),
       ...(typeof this.deps.transport?.parseDraft === 'function' ? { canParseTask: true } : {}),
       ...(this.transportError === undefined ? {} : { transportError: this.transportError }),
@@ -294,6 +310,34 @@ export class BoardController {
   closeTask(): void {
     if (this.selectedTaskId === undefined) return
     this.selectedTaskId = undefined
+    this.notify()
+  }
+
+  // --- modal form drafts -------------------------------------------------------
+
+  /**
+   * The draft one modal left behind, or undefined when nothing waits under that
+   * key. The caller owns the key vocabulary (one key per modal instance), so a
+   * draft for one card never reappears while a different card is being edited.
+   */
+  getFormDraft<T>(key: string): T | undefined {
+    return this.formDrafts.get(key) as T | undefined
+  }
+
+  /** Keys of the drafts currently held (the board's "new task" mark reads this). */
+  formDraftKeys(): readonly string[] {
+    return [...this.formDrafts.keys()]
+  }
+
+  /** Keep one modal's field values after its popup closed. */
+  saveFormDraft(key: string, value: unknown): void {
+    this.formDrafts.set(key, value)
+    this.notify()
+  }
+
+  /** Drop one modal's draft: an explicit discard, or a form nobody touched. */
+  discardFormDraft(key: string): void {
+    if (!this.formDrafts.delete(key)) return
     this.notify()
   }
 
@@ -585,17 +629,28 @@ export class BoardController {
   }
 
   /**
-   * Send a card back for correction: the Host moves it to `todo` (validated
-   * against the state machine) and stores the reviewer's note on the card. The
-   * note is not a prompt edit — the next run delivers it as its own turn in the
-   * card's previous conversation. Without a Host transport the rework is
-   * refused (returns false), because only the Host may write the ledger.
+   * Pause the in-progress runs of `ids` in one Host action: each card keeps its
+   * column and its execution record, the Host stops the run's session. The
+   * board's bulk button sends every in-progress card at once, so one click
+   * suspends the whole column in a single ledger write.
+   * @returns whether the Host accepted the action.
    */
-  async reworkTask(id: string, note: string): Promise<boolean> {
-    const task = this.tasks.find(candidate => candidate.id === id)
-    if (task === undefined || task.archivedAt !== undefined) return false
-    if (this.deps.transport === undefined) return false
-    return await this.commitRemote({ kind: 'rework', taskId: id, note }, id, currentOf(this.deps.sessions))
+  async pauseTasks(ids: readonly string[]): Promise<boolean> {
+    const unique = [...new Set(ids)]
+    if (unique.length === 0 || this.deps.transport === undefined) return false
+    return await this.commitRemote({ kind: 'pause', taskIds: unique })
+  }
+
+  /**
+   * Resume paused runs: the Host clears the pause and writes the "continue"
+   * turn into each run's own conversation (a run that never got a session goes
+   * back into the launch queue).
+   * @returns whether the Host accepted the action.
+   */
+  async resumeTasks(ids: readonly string[]): Promise<boolean> {
+    const unique = [...new Set(ids)]
+    if (unique.length === 0 || this.deps.transport === undefined) return false
+    return await this.commitRemote({ kind: 'resume', taskIds: unique })
   }
 
   // --- internals ---------------------------------------------------------------
@@ -692,9 +747,19 @@ export class BoardController {
     if (event !== undefined && this.hostState !== undefined && event.revision === this.hostState.revision
       && typeof event.scheduler === 'object' && event.scheduler !== null
       && typeof event.power === 'object' && event.power !== null) {
-      // The event frame carries revision/scheduler/power only; the machine
-      // (configuration, not state) is kept from the last full snapshot.
-      this.hostState = { ...this.hostState, revision: event.revision, scheduler: event.scheduler, power: event.power }
+      // The event frame carries revision/scheduler/power plus the enforced
+      // limits and the waiting questions; the machine (configuration, not state)
+      // is kept from the last full snapshot. Limits and questions travel on the
+      // frame because neither bumps the ledger revision.
+      this.hostState = {
+        ...this.hostState,
+        revision: event.revision,
+        scheduler: event.scheduler,
+        power: event.power,
+        ...(event.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: event.maxConcurrentRuns }),
+        ...(event.maxDoneTasks === undefined ? {} : { maxDoneTasks: event.maxDoneTasks }),
+        ...(event.awaitingAnswer === undefined ? {} : { awaitingAnswer: event.awaitingAnswer }),
+      }
       this.notify()
       return
     }
@@ -732,6 +797,13 @@ export class BoardController {
       // A Host that predates the state machine sends none: keep the machine
       // already in force (the shipped one) instead of clearing it.
       ...(snapshot.stateMachine === undefined ? {} : { stateMachine: snapshot.stateMachine }),
+      // Same for the enforced limits: an older Host sends none, and the board
+      // keeps explaining waiting cards with what it already has.
+      ...(snapshot.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: snapshot.maxConcurrentRuns }),
+      ...(snapshot.maxDoneTasks === undefined ? {} : { maxDoneTasks: snapshot.maxDoneTasks }),
+      // Waiting questions: an older Host sends none, and the board keeps what it
+      // has; the current Host always sends the map, so an empty one clears it.
+      ...(snapshot.awaitingAnswer === undefined ? {} : { awaitingAnswer: snapshot.awaitingAnswer }),
     }
     this.transportError = undefined
     if (this.selectedTaskId !== undefined && !this.tasks.some(task => task.id === this.selectedTaskId)) {

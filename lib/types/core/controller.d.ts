@@ -104,6 +104,13 @@ export interface ControllerSnapshot {
     /** Picker option sets (workspace list + agent-preset roster). */
     executionOptions: ExecutionOptionsSnapshot;
     pendingTaskIds: readonly string[];
+    /**
+     * Keys of the modal form drafts the controller currently holds (see
+     * {@link BoardController.saveFormDraft}). The board marks "new task" while
+     * the blank form's draft waits, so a kept draft is visible before the popup
+     * is opened again. Absent when nothing waits.
+     */
+    formDrafts?: readonly string[];
     /** Whether the board may offer "register a new project" (issue #1536). */
     canCreateWorkspace?: boolean;
     /** Whether this deployment can parse pasted text into task fields (issue #1540). */
@@ -115,7 +122,7 @@ export interface ControllerSnapshot {
      * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
      */
     sessionOpenError?: string;
-    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine'>;
+    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer'>;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
@@ -137,6 +144,14 @@ export declare class BoardController {
     private readonly uuid;
     private readonly pendingTaskIds;
     private readonly taskQueues;
+    /**
+     * Modal form drafts, keyed per modal (the client owns the key vocabulary).
+     * They live here — not in the popup components — so closing a popup by an
+     * accidental click next to it, by Escape, or by Cancel never throws typed
+     * input away: the modal's next mount reads its draft back. In memory only,
+     * so a page reload is a clean start.
+     */
+    private readonly formDrafts;
     private transportError;
     private sessionOpenError;
     private hostState;
@@ -165,6 +180,18 @@ export declare class BoardController {
     toggleArchiveView(): void;
     openTask(id: string): void;
     closeTask(): void;
+    /**
+     * The draft one modal left behind, or undefined when nothing waits under that
+     * key. The caller owns the key vocabulary (one key per modal instance), so a
+     * draft for one card never reappears while a different card is being edited.
+     */
+    getFormDraft<T>(key: string): T | undefined;
+    /** Keys of the drafts currently held (the board's "new task" mark reads this). */
+    formDraftKeys(): readonly string[];
+    /** Keep one modal's field values after its popup closed. */
+    saveFormDraft(key: string, value: unknown): void;
+    /** Drop one modal's draft: an explicit discard, or a form nobody touched. */
+    discardFormDraft(key: string): void;
     createTask(input: NewTaskInput): TaskRecord | undefined;
     /** Create through the Host and expose the task only after confirmation. */
     createTaskConfirmed(input: NewTaskInput): Promise<TaskRecord | undefined>;
@@ -277,13 +304,20 @@ export declare class BoardController {
     /** Re-run a settled task through the Host (the Host replans and executes). */
     rerunTask(id: string): Promise<void>;
     /**
-     * Send a card back for correction: the Host moves it to `todo` (validated
-     * against the state machine) and stores the reviewer's note on the card. The
-     * note is not a prompt edit — the next run delivers it as its own turn in the
-     * card's previous conversation. Without a Host transport the rework is
-     * refused (returns false), because only the Host may write the ledger.
+     * Pause the in-progress runs of `ids` in one Host action: each card keeps its
+     * column and its execution record, the Host stops the run's session. The
+     * board's bulk button sends every in-progress card at once, so one click
+     * suspends the whole column in a single ledger write.
+     * @returns whether the Host accepted the action.
      */
-    reworkTask(id: string, note: string): Promise<boolean>;
+    pauseTasks(ids: readonly string[]): Promise<boolean>;
+    /**
+     * Resume paused runs: the Host clears the pause and writes the "continue"
+     * turn into each run's own conversation (a run that never got a session goes
+     * back into the launch queue).
+     * @returns whether the Host accepted the action.
+     */
+    resumeTasks(ids: readonly string[]): Promise<boolean>;
     /**
      * Session-list notifications fire for all kinds of incidental churn
      * (background navigation, the Host runner creating and selecting a fresh

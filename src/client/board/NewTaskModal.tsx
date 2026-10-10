@@ -9,7 +9,7 @@ import { parseFreezeRequest } from '../../core/freeze-snapshot.ts'
 import { collectKnownTags, TASK_PERMISSIONS, type TaskPermission, type TaskRecord, type TaskTag } from '../../core/tasks.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import { SCHEDULE_PRESETS } from '../schedule-presets.ts'
-import { ModalShell, TaskContentFields, TaskTagFields, AiParseSection, useAiParse, cleanTags } from './TaskForm.tsx'
+import { ModalShell, TaskContentFields, TaskTagFields, AiParseSection, useAiParse, cleanTags, DraftNotice, NEW_TASK_DRAFT_KEY, duplicateDraftKey, useFormDraftSeat, useStoredFormDraft } from './TaskForm.tsx'
 import css from '../board.module.css'
 
 export interface NewTaskModalProps {
@@ -26,27 +26,71 @@ export interface NewTaskModalProps {
   onDuplicateSuccess?: (sourceTaskId: string) => Promise<void>
 }
 
+/**
+ * Everything the new-task form carries. The draft seat stores exactly this, so
+ * a popup closed next to the popup reopens where it was left — the "Parse with
+ * AI" source text included.
+ */
+interface NewTaskForm {
+  title: string
+  description: string
+  prompt: string
+  workspaceId: string
+  mode: string
+  permission: string
+  model: string
+  reuseSession: boolean
+  scheduleEnabled: boolean
+  scheduleCron: string
+  freezeText: string
+  handoverText: string
+  tags: TaskTag[]
+  archiveOriginal: boolean
+  parseText: string
+}
+
 /** New-task form overlay. */
 export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspaceId, onDuplicateSuccess }: NewTaskModalProps) {
   const isDuplicate = initialTask !== undefined
-  const [title, setTitle] = useState(initialTask?.title ?? '')
-  const [description, setDescription] = useState(initialTask?.description ?? '')
-  const [prompt, setPrompt] = useState(initialTask?.prompt ?? '')
-  const [workspaceId, setWorkspaceId] = useState(initialTask?.workspaceId ?? defaultWorkspaceId ?? '')
-  const [mode, setMode] = useState(initialTask?.mode ?? '')
-  const [permission, setPermission] = useState(initialTask?.permission ?? '')
-  const [model, setModel] = useState(initialTask?.model ?? '')
-  const [reuseSession, setReuseSession] = useState(initialTask?.reuseSession ?? false)
-  const [scheduleEnabled, setScheduleEnabled] = useState(initialTask?.schedule?.enabled ?? false)
-  const [scheduleCron, setScheduleCron] = useState(initialTask?.schedule?.cron ?? '')
+  // A duplicate popup keeps its own draft per source card: what was typed while
+  // duplicating card A must not appear when duplicating card B.
+  const draftKey = isDuplicate ? duplicateDraftKey(initialTask.id) : NEW_TASK_DRAFT_KEY
+  const { stored, restored, discard: forgetDraft } = useStoredFormDraft<NewTaskForm>(controller, draftKey)
+  // The untouched form: what "discard draft" falls back to, and the yardstick
+  // that keeps a form nobody worked in from becoming a draft.
+  const [pristine] = useState<NewTaskForm>(() => ({
+    title: initialTask?.title ?? '',
+    description: initialTask?.description ?? '',
+    prompt: initialTask?.prompt ?? '',
+    workspaceId: initialTask?.workspaceId ?? defaultWorkspaceId ?? '',
+    mode: initialTask?.mode ?? '',
+    permission: initialTask?.permission ?? '',
+    model: initialTask?.model ?? '',
+    reuseSession: initialTask?.reuseSession ?? false,
+    scheduleEnabled: initialTask?.schedule?.enabled ?? false,
+    scheduleCron: initialTask?.schedule?.cron ?? '',
+    freezeText: '',
+    handoverText: initialTask?.handover?.references !== undefined ? initialTask.handover.references.join('\n') : '',
+    tags: initialTask?.tags ?? [],
+    archiveOriginal: true,
+    parseText: initialTask?.parseText ?? '',
+  }))
+  const [title, setTitle] = useState(stored?.title ?? pristine.title)
+  const [description, setDescription] = useState(stored?.description ?? pristine.description)
+  const [prompt, setPrompt] = useState(stored?.prompt ?? pristine.prompt)
+  const [workspaceId, setWorkspaceId] = useState(stored?.workspaceId ?? pristine.workspaceId)
+  const [mode, setMode] = useState(stored?.mode ?? pristine.mode)
+  const [permission, setPermission] = useState(stored?.permission ?? pristine.permission)
+  const [model, setModel] = useState(stored?.model ?? pristine.model)
+  const [reuseSession, setReuseSession] = useState(stored?.reuseSession ?? pristine.reuseSession)
+  const [scheduleEnabled, setScheduleEnabled] = useState(stored?.scheduleEnabled ?? pristine.scheduleEnabled)
+  const [scheduleCron, setScheduleCron] = useState(stored?.scheduleCron ?? pristine.scheduleCron)
   const [scheduleError, setScheduleError] = useState<string | undefined>(undefined)
-  const [freezeText, setFreezeText] = useState('')
+  const [freezeText, setFreezeText] = useState(stored?.freezeText ?? pristine.freezeText)
   const [freezeError, setFreezeError] = useState<string | undefined>(undefined)
-  const [handoverText, setHandoverText] = useState(
-    initialTask?.handover?.references !== undefined ? initialTask.handover.references.join('\n') : '',
-  )
-  const [tags, setTags] = useState<TaskTag[]>(initialTask?.tags ?? [])
-  const [archiveOriginal, setArchiveOriginal] = useState(true)
+  const [handoverText, setHandoverText] = useState(stored?.handoverText ?? pristine.handoverText)
+  const [tags, setTags] = useState<TaskTag[]>(stored?.tags ?? pristine.tags)
+  const [archiveOriginal, setArchiveOriginal] = useState(stored?.archiveOriginal ?? pristine.archiveOriginal)
   const [error, setError] = useState<string | undefined>(undefined)
   const [pending, setPending] = useState(false)
   const [options, setOptions] = useState(controller.getSnapshot().executionOptions)
@@ -55,12 +99,66 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
   const [canParse] = useState(controller.getSnapshot().canParseTask === true)
   // The source text lives on the created task, so editing the card later offers
   // the same text again ("parse and fill again") instead of losing it; a
-  // duplicate starts from the source's text.
-  const parse = useAiParse(controller, initialTask?.parseText ?? '', draft => {
+  // duplicate starts from the source's text. A kept draft has the last word.
+  const parse = useAiParse(controller, stored?.parseText ?? pristine.parseText, draft => {
     setTitle(draft.title)
     setDescription(draft.description)
     setPrompt(draft.prompt)
   })
+
+  /** The whole form as one value: the draft seat's payload. */
+  const form = (): NewTaskForm => ({
+    title,
+    description,
+    prompt,
+    workspaceId,
+    mode,
+    permission,
+    model,
+    reuseSession,
+    scheduleEnabled,
+    scheduleCron,
+    freezeText,
+    handoverText,
+    tags,
+    archiveOriginal,
+    parseText: parse.text,
+  })
+
+  /** Put one whole form on screen (opening on a draft, or discarding it). */
+  const applyForm = (value: NewTaskForm): void => {
+    setTitle(value.title)
+    setDescription(value.description)
+    setPrompt(value.prompt)
+    setWorkspaceId(value.workspaceId)
+    setMode(value.mode)
+    setPermission(value.permission)
+    setModel(value.model)
+    setReuseSession(value.reuseSession)
+    setScheduleEnabled(value.scheduleEnabled)
+    setScheduleCron(value.scheduleCron)
+    setFreezeText(value.freezeText)
+    setHandoverText(value.handoverText)
+    setTags(value.tags)
+    setArchiveOriginal(value.archiveOriginal)
+    parse.setText(value.parseText)
+  }
+
+  // Closing the popup — backdrop, Escape, Cancel, or the board going away —
+  // keeps the form in the controller's seat instead of dropping it.
+  const { spend } = useFormDraftSeat(controller, draftKey, {
+    snapshot: form,
+    dirty: () => JSON.stringify(form()) !== JSON.stringify(pristine),
+  })
+
+  /** "Discard draft": forget the seat and start from the untouched form again. */
+  const discardDraft = (): void => {
+    forgetDraft()
+    applyForm(pristine)
+    setScheduleError(undefined)
+    setFreezeError(undefined)
+    setError(undefined)
+  }
 
   // The workspace list and preset roster arrive from the runtime after mount;
   // follow them so the pickers never freeze on an empty snapshot.
@@ -131,6 +229,9 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
         await controller.archiveTask(initialTask.id)
       }
     }
+    // The form became a card: its draft is spent and must not come back, even
+    // when this confirmation arrives after the popup was already closed.
+    spend()
     onClose()
   }
 
@@ -151,6 +252,8 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
       onSubmit={() => { void submit() }}
       onClose={onClose}
     >
+      {restored && <DraftNotice onDiscard={discardDraft} />}
+
       {canParse && <AiParseSection parse={parse} />}
 
       <TaskContentFields

@@ -16,7 +16,7 @@ export interface TaskBoardSettings {
     announceToAgent?: boolean;
     /** Prevent host idle sleep while sessions run or schedules are armed. */
     preventIdleSleep?: boolean;
-    /** WIP limit per workspace: how many task runs of one workspace may hold a session at once (default 1). */
+    /** WIP limit per workspace: how many implementation runs of one workspace may hold a session at once (default 1); a `todo` clarification run holds no slot. */
     maxConcurrentRuns?: number;
     /** Done-column limit: on-board Done cards before the oldest is archived (default 20). */
     maxDoneTasks?: number;

@@ -10,7 +10,7 @@
  * localStorage backend.
  */
 import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeReworkNote, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
+import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
@@ -67,7 +67,6 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
   if (record.mode !== undefined && typeof record.mode !== 'string') return false
   if (record.permission !== undefined && typeof record.permission !== 'string') return false
   if (record.reuseSession !== undefined && typeof record.reuseSession !== 'boolean') return false
-  if (record.reworkNote !== undefined && typeof record.reworkNote !== 'string') return false
   if (record.git !== undefined && (typeof record.git !== 'object' || record.git === null)) return false
   if (!Array.isArray(record.executions)) return false
   for (const execution of record.executions) {
@@ -82,7 +81,6 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
     if (entry.initiatedBy !== undefined && typeof entry.initiatedBy !== 'string') return false
     if (entry.frozenBy !== undefined && typeof entry.frozenBy !== 'string') return false
     if (entry.frozenAt !== undefined && typeof entry.frozenAt !== 'number') return false
-    if (entry.reworkNote !== undefined && typeof entry.reworkNote !== 'string') return false
   }
   return true
 }
@@ -168,8 +166,15 @@ function normalizeGit(value: unknown): TaskGit | undefined {
   const base = typeof row.base === 'string' ? row.base.trim() : ''
   const repoPath = typeof row.repoPath === 'string' ? row.repoPath.trim() : ''
   if (branch === '' || base === '' || repoPath === '') return undefined
+  const committedAt = typeof row.committedAt === 'number' && Number.isFinite(row.committedAt) ? row.committedAt : undefined
   const mergedAt = typeof row.mergedAt === 'number' && Number.isFinite(row.mergedAt) ? row.mergedAt : undefined
-  return { branch, base, repoPath, ...(mergedAt === undefined ? {} : { mergedAt }) }
+  return {
+    branch,
+    base,
+    repoPath,
+    ...(committedAt === undefined ? {} : { committedAt }),
+    ...(mergedAt === undefined ? {} : { mergedAt }),
+  }
 }
 
 /** Parse + validate a persisted ledger document; invalid rows are dropped. */export function parseLedger(raw: string | null): TaskRecord[] {
@@ -219,18 +224,33 @@ function normalizeGit(value: unknown): TaskGit | undefined {
     // dropped, and a list that repairs to nothing clears the field instead of
     // dropping the task row.
     task.tags = normalizeTags(row.tags)
+    task.clarificationSessionId = typeof row.clarificationSessionId === 'string' && row.clarificationSessionId !== ''
+      ? row.clarificationSessionId
+      : undefined
     // The parse source is repaired like the schedule: a blank or non-string
     // persisted value clears the field instead of dropping the card row.
     task.parseText = normalizeParseText(row.parseText)
     task.permissionConfirmedAt = typeof row.permissionConfirmedAt === 'number' && Number.isFinite(row.permissionConfirmedAt) ? row.permissionConfirmedAt : undefined
-    // The pending correction note is repaired like the schedule: a blank or
-    // over-long persisted value collapses instead of dropping the card row.
-    task.reworkNote = normalizeReworkNote(row.reworkNote)
-    // Execution rows are shape-checked above; only their note needs repair, and
-    // an already-clean note keeps its identity (no needless copy per load).
+    // The pause stamp is repaired like the other runtime stamps: a malformed
+    // persisted value clears the pause instead of dropping the card row.
+    task.pausedAt = typeof row.pausedAt === 'number' && Number.isFinite(row.pausedAt) ? row.pausedAt : undefined
+    // The rework stamp is repaired like the other runtime stamps; a count
+    // without a stamp is a torn pair and clears with it.
+    task.reworkAt = typeof row.reworkAt === 'number' && Number.isFinite(row.reworkAt) ? row.reworkAt : undefined
+    task.reworkCount = task.reworkAt === undefined
+      ? undefined
+      : (typeof row.reworkCount === 'number' && Number.isFinite(row.reworkCount) && row.reworkCount > 0
+          ? Math.floor(row.reworkCount)
+          : undefined)
+    // Execution rows are shape-checked above; only their rework mark and their
+    // kind need repair, and an already-clean row keeps its identity (no
+    // needless copy per load). An unknown kind drops to a plain run: the mark
+    // only ever suppresses the card move, never the execution itself.
     task.executions = row.executions.map((execution) => {
-      const reworkNote = normalizeReworkNote(execution.reworkNote)
-      return reworkNote === execution.reworkNote ? execution : { ...execution, reworkNote }
+      const rework = execution.rework === true ? true : undefined
+      const kind = execution.kind === 'clarify' ? 'clarify' as const : undefined
+      if (rework === execution.rework && kind === execution.kind) return execution
+      return { ...execution, rework, kind }
     })
     tasks.push(task)
   }

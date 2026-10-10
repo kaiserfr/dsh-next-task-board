@@ -9,6 +9,14 @@ export declare const NEW_PROJECT_VALUE = "__dsh_new_project__";
  */
 export declare const BATCH_DRAG_MIME = "application/x-dsh-taskboard-cards";
 /**
+ * The notice for a drop on the run column whose cards cannot start yet, or
+ * undefined when at least one of them starts now. `todo` and the review columns
+ * are WIP-free, so only the cards whose lane is held by another run count; they
+ * keep their place in the lane's FIFO queue and start on their own. Exported
+ * for the test that pins the wording against a blocked lane.
+ */
+export declare function queuedDropNotice(tasks: readonly TaskRecord[], allTasks: readonly TaskRecord[], maxConcurrentRuns: number, workspaceTitles: ReadonlyMap<string, string>): string | undefined;
+/**
  * The dragged card ids: the batch payload when present and well-formed, else
  * the lead id from `text/plain` (single-card drags and older writers).
  */

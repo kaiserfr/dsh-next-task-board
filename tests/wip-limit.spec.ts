@@ -6,7 +6,8 @@
  *
  * A slot is held from the moment a run attaches its session until that
  * execution settles — attaching alone does not free it, which is what makes
- * the board serial instead of merely throttled at launch time.
+ * the board serial instead of merely throttled at launch time. Clarification
+ * runs (`todo`) are exempt: they never wait for, or hold, a lane slot.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -55,6 +56,23 @@ function harness(now: number, workspaces: Record<string, string> = {}) {
     await new Promise<void>(resolve => releases.push(resolve))
     return `session-${task.id}`
   })
+  // The roster the service reads on every poll. `running: false` means the turn
+  // is over right now — deliberately not the same as "the run is finished".
+  const roster: Array<{ sessionId: string; running: boolean }> = []
+  vi.spyOn(service.runner, 'listRunning').mockImplementation(async () => ({
+    known: true,
+    count: roster.filter(item => item.running).length,
+    items: roster as never,
+  }))
+  // The monitor itself is not under test here: keep inspection and cancellation
+  // off the (empty) gateway so the cases only exercise the slot accounting.
+  vi.spyOn(service.runner, 'inspect').mockImplementation(async () => ({ outcome: 'pending' }))
+  vi.spyOn(service.runner, 'cancel').mockImplementation(async () => {})
+  /** One service poll: this is what refreshes the roster the queue used to trust. */
+  const poll = async (): Promise<void> => {
+    await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
+    await flush()
+  }
   const run = (id: string): void => {
     service.apply(`run-${id}`, { kind: 'run', taskId: id })
   }
@@ -67,7 +85,7 @@ function harness(now: number, workspaces: Record<string, string> = {}) {
     if (execution === undefined) throw new Error(`task ${id} has no execution to settle`)
     ledger.settle(id, execution.id, 'succeeded')
   }
-  return { service, ledger, started, releases, run, flush, settleTask }
+  return { service, ledger, started, releases, roster, run, flush, poll, settleTask }
 }
 
 describe('task-board WIP limit', () => {
@@ -104,6 +122,45 @@ describe('task-board WIP limit', () => {
     settleTask('c')
     await flush()
     expect(ledger.runtimeView().openExecutions).toEqual([])
+    service.dispose()
+  })
+
+  it('starts a card pulled into todo without a WIP slot, but still gates its run', async () => {
+    const { service, ledger, started, releases, run, flush, settleTask } = harness(Date.now())
+    // `a` holds the lane's only slot (default limit 1) and keeps working.
+    run('a')
+    await flush()
+    releases[0]?.()
+    await flush()
+    expect(started).toEqual(['a'])
+
+    // `todo` is WIP-free: the clarification run starts next to the working run
+    // instead of reading Queued.
+    service.apply('b-to-todo', { kind: 'move', taskId: 'b', status: 'todo' })
+    await flush()
+    expect(started).toEqual(['a', 'b'])
+    releases[1]?.()
+    await flush()
+    const clarified = ledger.state().tasks.find(task => task.id === 'b')!
+    expect(clarified.status).toBe('todo')
+    expect(clarified.executions[0]?.kind).toBe('clarify')
+    expect(clarified.executions[0]?.sessionId).toBe('session-b')
+
+    // The clarification run held no slot: settling it leaves `a` untouched, and
+    // the card's *implementation* run (the go-ahead) queues behind `a` like any
+    // other run of the lane.
+    settleTask('b')
+    await flush()
+    service.apply('b-to-running', { kind: 'move', taskId: 'b', status: 'running' })
+    await flush()
+    expect(started).toEqual(['a', 'b'])
+
+    // Only `a` settling frees the lane's slot for the implementation.
+    settleTask('a')
+    await flush()
+    expect(started).toEqual(['a', 'b', 'b'])
+    for (const release of releases) release()
+    await flush()
     service.dispose()
   })
 
@@ -195,6 +252,61 @@ describe('task-board WIP limit', () => {
     settleTask('a')
     settleTask('b')
     settleTask('c')
+    await flush()
+    service.dispose()
+  })
+
+  it('keeps the lane occupied while the occupant run is open, even when its session is idle', async () => {
+    const { service, ledger, started, releases, roster, run, flush, poll, settleTask } = harness(Date.now())
+    run('a')
+    await flush()
+    // `a` holds the lane's slot: its session exists, the turn is over (the agent
+    // asked a question mid-task), which the roster reports as idle.
+    releases[0]?.()
+    await flush()
+    roster.push({ sessionId: 'session-a', running: false })
+    await poll()
+    expect(started).toEqual(['a'])
+
+    // The idle roster must not free the slot: the lane's next run stays queued,
+    // or the two would work in the same worktree at the same time.
+    run('b')
+    await flush()
+    expect(started).toEqual(['a'])
+    expect(ledger.runtimeView().openExecutions.map(execution => execution.sessionId))
+      .toEqual(['session-a', undefined])
+
+    // Only the settle — the run being over for real — frees the lane.
+    settleTask('a')
+    await flush()
+    expect(started).toEqual(['a', 'b'])
+    releases[1]?.()
+    await flush()
+    settleTask('b')
+    await flush()
+    service.dispose()
+  })
+
+  it('frees the lane as soon as the occupant is paused, not only when it settles', async () => {
+    const { service, started, releases, roster, run, flush, poll } = harness(Date.now())
+    run('a')
+    await flush()
+    releases[0]?.()
+    await flush()
+    roster.push({ sessionId: 'session-a', running: true })
+    await poll()
+    expect(started).toEqual(['a'])
+
+    run('b')
+    await flush()
+    expect(started).toEqual(['a'])
+
+    // Pausing stops the occupant's session and hands its slot to the queue: the
+    // card keeps its column and its open execution, but is no longer working.
+    service.apply('pause-all', { kind: 'pause', taskIds: ['a'] })
+    await flush()
+    expect(started).toEqual(['a', 'b'])
+    releases[1]?.()
     await flush()
     service.dispose()
   })

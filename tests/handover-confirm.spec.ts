@@ -14,7 +14,7 @@ import { applyUpdateTask } from '../src/core/use-cases/task-update.ts'
 import { createTask } from '../src/core/tasks.ts'
 import { parseLedger } from '../src/core/store.ts'
 import { parseActionEnvelope } from '../src/protocol.ts'
-import { HostExecutionRunner } from '../src/host-runner.ts'
+import { COMPLETION_INSTRUCTION, HostExecutionRunner } from '../src/host-runner.ts'
 import { HostTaskLedger } from '../src/host-ledger.ts'
 import { TaskBoardHostService } from '../src/host-service.ts'
 import { PowerInhibitor } from '../src/power-inhibitor.ts'
@@ -196,7 +196,8 @@ describe('handover bundle: runner override and prompt preamble', () => {
     const runner = new HostExecutionRunner(gateway)
     await runner.launch(createTask({ title: '普通卡', description: '', prompt: '正文', workspaceId: 'ws-legacy', mode: 'preset-legacy' }, NOW, 'id-2'))
     expect(calls.create).toMatchObject({ workspaceId: 'ws-legacy', agentPreset: 'preset-legacy' })
-    expect((calls.prompt as { content: Array<{ text: string }> }).content[0].text).toBe('正文')
+    // The card body is the prompt; only the completion contract follows it.
+    expect((calls.prompt as { content: Array<{ text: string }> }).content[0].text).toBe(`正文\n\n${COMPLETION_INSTRUCTION}`)
   })
 })
 

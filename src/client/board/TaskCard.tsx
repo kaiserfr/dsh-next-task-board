@@ -16,8 +16,8 @@
  * by the board, so the memo boundary is effective.
  */
 import { memo, type DragEvent, type KeyboardEvent, type MouseEvent } from 'react'
-import type { TaskRecord } from '../../core/tasks.ts'
-import { isTaskExecuting, tagTone } from '../../core/tasks.ts'
+import type { TaskRecord, WaitingReason } from '../../core/tasks.ts'
+import { isTaskExecuting, isTaskPaused, tagTone } from '../../core/tasks.ts'
 import { t } from '../locales.ts'
 import { sessionLinkHref } from '../session-link.ts'
 import css from '../board.module.css'
@@ -56,32 +56,61 @@ export function isCardDraggable(task: TaskRecord, pending: boolean): boolean {
   return task.archivedAt === undefined && task.status !== 'running' && !pending
 }
 
-function TaskCardInner({ task, pending, timeZone, selected, dragging, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession }: {
+function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
   task: TaskRecord
   pending: boolean
   timeZone?: string
   selected: boolean
   dragging: boolean
+  /**
+   * Why the card waits for its lane's WIP slot (undefined when it waits for
+   * nothing). The reason itself is not rendered; the tooltip carries the text.
+   */
+  waitingReason?: WaitingReason
+  /** The waiting reason as text, with the workspace and blocker named. */
+  waitingTooltip?: string
+  /**
+   * The conversation the Host found waiting for the human's answer (the agent
+   * asked and stopped). The card then shows its question symbol, which jumps
+   * straight into that session; undefined while nothing is open.
+   */
+  awaitingAnswerSessionId?: string
   onClick: (event: MouseEvent<HTMLButtonElement>) => void
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
   onDoubleClick: () => void
   onDragStart: (event: DragEvent<HTMLButtonElement>) => void
   onDragEnd: (event: DragEvent<HTMLButtonElement>) => void
   onOpenSession: (sessionId: string) => void
+  onTogglePause: (task: TaskRecord) => void
 }) {
   const latest = task.executions[task.executions.length - 1]
   const runs = task.executions.length
   const archived = task.archivedAt !== undefined
   // "Running now" (holds a session) is marked hard; an open run without a
-  // session is still queued for a WIP slot and only reads as "waiting".
+  // session is still queued for a WIP slot and only reads as "waiting". A
+  // paused card keeps its open run but is neither: its session was stopped.
+  const paused = !archived && isTaskPaused(task)
   const executing = !archived && isTaskExecuting(task)
-  const queued = !archived && !executing && !pending && latest !== undefined && latest.endedAt === undefined
+  const queued = !archived && !executing && !paused && !pending && latest !== undefined && latest.endedAt === undefined
   const isDraggable = isCardDraggable(task, pending)
-  // One jump target per card: the session of its most recent execution. A
-  // settled execution keeps the link (transcript revisit), a run that has not
-  // attached a session yet has none to offer.
-  const sessionId = latest?.sessionId
-  const sessionLabel = t('card.openSession')
+  // The pause button covers every open run of the card: the executing one (its
+  // session is stopped) and the queued one (it never starts). A paused card
+  // offers the same button as a play button to resume the run. The card's
+  // clarification run in `todo` is a run like any other, so it is pausable too.
+  const openRun = latest !== undefined && latest.endedAt === undefined
+  const showPauseControl = !archived && !pending && (paused || openRun)
+  // One jump target per card: the newest execution's conversation — and a card
+  // that only ever had a clarification conversation keeps offering that one. A
+  // run that has not attached a session yet has none to offer.
+  const clarificationSessionId = task.clarificationSessionId
+  const sessionId = latest?.sessionId ?? clarificationSessionId
+  const clarificationLink = sessionId !== undefined && sessionId === clarificationSessionId && sessionId !== latest?.sessionId
+  const sessionLabel = clarificationLink ? t('card.clarifySession') : t('card.openSession')
+  // The Host's question watch: this card's conversation holds a question the
+  // agent asked and stopped on. Its own jump target is the conversation the Host
+  // named (never a guessed one), so the symbol always lands where the answer
+  // belongs.
+  const answering = !archived && awaitingAnswerSessionId !== undefined
 
   return (
     <div className={css.cardBox} data-dsh-part="card-box">
@@ -92,9 +121,13 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, onClick, o
         data-dsh-part="card"
         data-pending={pending || undefined}
         data-executing={executing || undefined}
+        data-paused={paused || undefined}
         data-has-session={sessionId !== undefined || undefined}
+        data-has-pause={showPauseControl || undefined}
+        data-answering={answering || undefined}
         data-selected={selected || undefined}
         data-dragging={dragging || undefined}
+        data-waiting={waitingReason === undefined ? undefined : true}
         aria-pressed={archived ? undefined : selected}
         draggable={isDraggable}
         onDragStart={isDraggable ? onDragStart : undefined}
@@ -102,7 +135,7 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, onClick, o
         onClick={onClick}
         onKeyDown={onKeyDown}
         onDoubleClick={onDoubleClick}
-        title={task.description !== '' ? task.description : task.title}
+        title={waitingTooltip ?? (task.description !== '' ? task.description : task.title)}
       >
         <span className={css.cardTitle}>{task.title}</span>
         {task.tags !== undefined && task.tags.length > 0 && (
@@ -146,12 +179,66 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, onClick, o
         </span>
         {!archived && pending && <span className={css.cardRunningLabel}>{t('board.pending')}…</span>}
         {executing && <span className={css.cardExecutingBadge}>{t('card.running')}</span>}
-        {queued && <span className={css.cardRunningLabel}>{t('card.queued')}</span>}
+        {paused && (
+          <span className={css.cardExecutingBadge} data-paused="true" data-dsh-part="card-paused">
+            {t('card.paused')}
+          </span>
+        )}
+        {queued && (
+          // A queued card either waits for its lane's WIP slot (the Host's
+          // launch queue) or — for an older Host, or a card nothing holds — is
+          // simply not started yet; the waiting variant names the blocker.
+          <span
+            className={css.cardRunningLabel}
+            data-dsh-part={waitingReason === undefined ? 'card-queued' : 'card-waiting'}
+            title={waitingTooltip ?? t('card.queued')}
+          >
+            {waitingReason === undefined ? t('card.queued') : t('card.waiting')}
+          </span>
+        )}
       </button>
+      {showPauseControl && (
+        // Pause/resume sibling of the card button (a button may not nest in a
+        // button): the pause glyph while the run is open, the play glyph to
+        // start a paused run again.
+        <button
+          type="button"
+          className={css.cardPause}
+          data-dsh-part={paused ? 'card-resume' : 'card-pause'}
+          title={paused ? t('card.resume') : t('card.pause')}
+          aria-label={paused ? t('card.resume') : t('card.pause')}
+          onClick={(event) => { event.stopPropagation(); onTogglePause(task) }}
+          onDoubleClick={(event) => { event.stopPropagation() }}
+        >
+          <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>
+        </button>
+      )}
+      {!archived && awaitingAnswerSessionId !== undefined && (
+        // The card's conversation waits for the human: a question-mark anchor in
+        // the free top-left corner jumps into that very session, where the
+        // question card or the chat that asked sits. Same sibling/click rules as
+        // the session link below — the card's own click must never also fire.
+        <a
+          className={css.cardQuestion}
+          data-dsh-part="card-awaiting-answer"
+          href={sessionLinkHref(awaitingAnswerSessionId)}
+          title={`${t('card.awaitingAnswer')} · ${awaitingAnswerSessionId}`}
+          aria-label={t('card.awaitingAnswer')}
+          onClick={(event) => {
+            event.stopPropagation()
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+            event.preventDefault()
+            onOpenSession(awaitingAnswerSessionId)
+          }}
+          onDoubleClick={(event) => { event.stopPropagation() }}
+        >
+          <span aria-hidden="true">?</span>
+        </a>
+      )}
       {sessionId !== undefined && (
         <a
           className={css.cardSession}
-          data-dsh-part="card-session"
+          data-dsh-part={clarificationLink ? 'card-clarify-session' : 'card-session'}
           href={sessionLinkHref(sessionId)}
           title={`${sessionLabel} · ${sessionId}`}
           aria-label={sessionLabel}

@@ -29,6 +29,24 @@ describe('task-board action protocol', () => {
     })?.action.kind).toBe('update')
   })
 
+  it('rejects the retired question fields and the retired clarify action', () => {
+    // The open questions are the agent's, asked in the card's chat: there is no
+    // field on the wire for a human-maintained list, and no action that would
+    // open a round on demand.
+    expect(parseActionEnvelope({
+      requestId: 'create-open-questions',
+      action: { kind: 'create', id: 'task-q', input: { title: 'A', description: '', prompt: '', openQuestions: ['which db?'] } },
+    })).toBeUndefined()
+    expect(parseActionEnvelope({
+      requestId: 'update-resolved',
+      action: { kind: 'update', taskId: 'task-a', patch: { questionsResolved: true } },
+    })).toBeUndefined()
+    expect(parseActionEnvelope({
+      requestId: 'clarify',
+      action: { kind: 'clarify', taskId: 'task-a' },
+    })).toBeUndefined()
+  })
+
   it('accepts the parse source in create input and update patch, and rejects non-strings', () => {
     expect(parseActionEnvelope({
       requestId: 'create-parse-source',
@@ -168,5 +186,26 @@ describe('task-board group move action (move-many)', () => {
     const ids = Array.from({ length: MAX_BATCH_MOVE }, (_, index) => `t-${index}`)
     expect(parseActionEnvelope({ requestId: 'batch-max', action: { kind: 'move-many', taskIds: ids, status: 'todo' } })?.action.kind).toBe('move-many')
     expect(parseActionEnvelope({ requestId: 'batch-over', action: { kind: 'move-many', taskIds: [...ids, 'one-more'], status: 'todo' } })).toBeUndefined()
+  })
+})
+
+describe('task-board pause/resume actions', () => {
+  it('accepts a card list and dedupes it', () => {
+    expect(parseActionEnvelope({ requestId: 'pause-a', action: { kind: 'pause', taskIds: ['a', 'b', 'a'] } })?.action)
+      .toEqual({ kind: 'pause', taskIds: ['a', 'b'] })
+    expect(parseActionEnvelope({ requestId: 'resume-a', action: { kind: 'resume', taskIds: ['a'] } })?.action)
+      .toEqual({ kind: 'resume', taskIds: ['a'] })
+  })
+
+  it('rejects an empty, blank, oversized or extra-keyed card list', () => {
+    const ids = Array.from({ length: MAX_BATCH_MOVE }, (_, index) => `t-${index}`)
+    for (const kind of ['pause', 'resume'] as const) {
+      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: [] } })).toBeUndefined()
+      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: ['a', ''] } })).toBeUndefined()
+      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: [1] } })).toBeUndefined()
+      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: [...ids, 'one-more'] } })).toBeUndefined()
+      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: ['a'], status: 'todo' } })).toBeUndefined()
+      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: ids } })?.action.kind).toBe(kind)
+    }
   })
 })

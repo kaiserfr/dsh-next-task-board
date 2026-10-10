@@ -238,6 +238,24 @@ describe('HostTaskLedger', () => {
     expect(execution.error).toContain('restarted')
   })
 
+  it('cancels an interrupted clarification start without moving the card', () => {
+    const root = tempRoot()
+    const ledger = new HostTaskLedger(root, () => NOW)
+    ledger.applyRequest('create', {
+      kind: 'create', id: 'task-q', input: { title: 'Q', description: '', prompt: '' },
+    })
+    ledger.applyRequest('to-todo', { kind: 'move', taskId: 'task-q', status: 'todo' })
+    ledger.dispose()
+    // The Host died between opening the clarification run and recording its
+    // session: the dead start is cancelled and the card stays in `todo`.
+    const restarted = new HostTaskLedger(root, () => NOW + 1000)
+    const task = restarted.state().tasks[0]
+    expect(task.executions[0].result).toBe('cancelled')
+    expect(task.status).toBe('todo')
+    expect(restarted.runtimeView().openExecutions).toEqual([])
+    restarted.dispose()
+  })
+
   it('persists request fingerprints and scheduler metadata across Host restarts', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
@@ -786,7 +804,7 @@ describe('HostTaskLedger state machine', () => {
   })
 })
 
-describe('HostTaskLedger rework (ready_for_test → todo with a note)', () => {
+describe('HostTaskLedger rework (ready_for_test/failed → todo is stamped)', () => {
   /** A card parked in `ready_for_test`, as a finished run leaves it. */
   function parked(): HostTaskLedger {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
@@ -795,53 +813,98 @@ describe('HostTaskLedger rework (ready_for_test → todo with a note)', () => {
     return ledger
   }
 
-  it('parks the card back in todo and stores the trimmed note for the next run', () => {
+  it('sends the card back to todo and stamps the return', () => {
     const ledger = parked()
-    const result = ledger.applyRequest('rework', { kind: 'rework', taskId: 'card', note: '  the redirect is missing  ' })
+    const result = ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'todo' })
     expect(result.state.tasks[0].status).toBe('todo')
-    expect(result.state.tasks[0].reworkNote).toBe('the redirect is missing')
-    // A rework never runs: the human decides when the agent works again.
+    expect(result.state.tasks[0].reworkAt).toBe(NOW)
+    expect(result.state.tasks[0].reworkCount).toBe(1)
+    // A rework never runs: the human decides when the agent works again, and
+    // the correction itself lives in the card's own chat.
     expect(result.run).toBeUndefined()
     expect(result.state.tasks[0].executions).toHaveLength(0)
     ledger.dispose()
   })
 
-  it('hands the note to the next run and clears it from the card', () => {
+  it('stamps a return out of the failed column too, and counts every round', () => {
     const ledger = parked()
-    ledger.applyRequest('rework', { kind: 'rework', taskId: 'card', note: 'fix the redirect' })
+    ledger.applyRequest('fail', { kind: 'move', taskId: 'card', status: 'failed' })
+    expect(ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' }).state.tasks[0].reworkCount).toBe(1)
+    ledger.applyRequest('park-again', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    const second = ledger.applyRequest('back-again', { kind: 'move', taskId: 'card', status: 'todo' })
+    expect(second.state.tasks[0].reworkCount).toBe(2)
+    ledger.dispose()
+  })
+
+  it('does not stamp a move that is not a send-back', () => {
+    const ledger = parked()
+    // Review → done is an acceptance, and todo → backlog is a plain move.
+    expect(ledger.applyRequest('accept', { kind: 'move', taskId: 'card', status: 'done' }).state.tasks[0].reworkAt).toBeUndefined()
+    ledger.applyRequest('backlog', { kind: 'move', taskId: 'card', status: 'backlog' })
+    expect(ledger.state().tasks[0].reworkAt).toBeUndefined()
+    ledger.dispose()
+  })
+
+  it('marks the next run as a rework round and consumes the marker by the clock', () => {
+    // A moving clock: the marker is spent by the first run that opens after the
+    // send-back, and only by that one.
+    let clock = NOW
+    const ledger = new HostTaskLedger(tempRoot(), () => clock)
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'open the page' } })
+    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    clock += 10
+    ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'todo' })
+    clock += 10
     const started = ledger.applyRequest('run', { kind: 'run', taskId: 'card' })
-    expect(started.run?.execution.reworkNote).toBe('fix the redirect')
-    expect(started.state.tasks[0].reworkNote).toBeUndefined()
+    expect(started.run?.execution.rework).toBe(true)
+    expect(started.run?.task.reworkAt).toBe(NOW + 10)
+    // Settle it and park the card again: the marker is spent, the stamp stays.
+    clock += 10
+    ledger.settle('card', started.run!.execution.id, 'succeeded', undefined)
+    const plain = ledger.applyRequest('run-again', { kind: 'run', taskId: 'card' })
+    expect(plain.run?.execution.rework).toBeUndefined()
+    expect(plain.run?.task.reworkAt).toBe(NOW + 10)
     ledger.dispose()
   })
 
-  it('refuses a blank note, a missing card, and a card the machine has no return path for', () => {
+  it('stamps a batch return and refuses the moves the machine does not declare', () => {
     const ledger = parked()
-    expect(() => ledger.applyRequest('blank', { kind: 'rework', taskId: 'card', note: '   ' }))
-      .toThrow('rework needs a non-blank note')
-    expect(() => ledger.applyRequest('missing', { kind: 'rework', taskId: 'nope', note: 'fix it' }))
-      .toThrow('task not found')
-    // The state machine decides whether a return path exists at all: `todo` has
-    // no `todo → todo` transition, so a rework there is refused, not invented.
-    // (Batch moves never carry the `run` action, so the card stays put.)
-    ledger.applyRequest('into-todo', { kind: 'move-many', taskIds: ['card'], status: 'todo' })
-    expect(ledger.state().tasks[0].status).toBe('todo')
-    expect(() => ledger.applyRequest('not-parked', { kind: 'rework', taskId: 'card', note: 'fix it' }))
+    ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['card'], status: 'todo' })
+    expect(ledger.state().tasks[0].reworkAt).toBe(NOW)
+    // `todo → todo` is not a transition, so a card already parked there cannot
+    // be sent back again (and stays unstamped).
+    expect(() => ledger.applyRequest('not-parked', { kind: 'move', taskId: 'card', status: 'todo' }))
       .toThrow('invalid state transition: todo → todo')
-    expect(ledger.state().tasks[0].reworkNote).toBeUndefined()
+    expect(ledger.state().tasks[0].reworkCount).toBe(1)
     ledger.dispose()
   })
 
-  it('refuses a rework while an execution is open and on an archived card', () => {
+  it('pulls a reviewed or failed card straight onto the run column', () => {
+    const ledger = parked()
+    const started = ledger.applyRequest('run-now', { kind: 'move', taskId: 'card', status: 'running' })
+    expect(started.run).toBeDefined()
+    expect(started.state.tasks[0].status).toBe('running')
+    // Pulling the card onto the run column is a start, not a send-back: no
+    // rework stamp is written for it.
+    expect(started.state.tasks[0].reworkAt).toBeUndefined()
+    ledger.dispose()
+
+    const failed = parked()
+    failed.applyRequest('fail', { kind: 'move', taskId: 'card', status: 'failed' })
+    expect(failed.applyRequest('retry', { kind: 'move', taskId: 'card', status: 'running' }).run).toBeDefined()
+    failed.dispose()
+  })
+
+  it('refuses a return while an execution is open and on an archived card', () => {
     const ledger = parked()
     ledger.applyRequest('run', { kind: 'run', taskId: 'card' })
-    expect(() => ledger.applyRequest('running', { kind: 'rework', taskId: 'card', note: 'fix it' }))
+    expect(() => ledger.applyRequest('running', { kind: 'move', taskId: 'card', status: 'todo' }))
       .toThrow('running task cannot be moved')
     ledger.dispose()
 
     const archived = parked()
     archived.applyRequest('archive', { kind: 'archive', taskId: 'card' })
-    expect(() => archived.applyRequest('archived', { kind: 'rework', taskId: 'card', note: 'fix it' }))
+    expect(() => archived.applyRequest('archived', { kind: 'move', taskId: 'card', status: 'todo' }))
       .toThrow('archived task is read-only')
     archived.dispose()
   })
@@ -917,10 +980,16 @@ describe('HostTaskLedger group move (move-many)', () => {
 
   it('refuses a batch whose transition opens an execution', () => {
     const ledger = seeded(['a'])
+    // The run column is only reachable from `todo` (a backlog card has no such
+    // transition), so the batch starts from the clarification step.
+    ledger.applyRequest('to-todo', { kind: 'move', taskId: 'a', status: 'todo' })
     expect(() => ledger.applyRequest('batch-run', { kind: 'move-many', taskIds: ['a'], status: 'running' }))
       .toThrow('batch move cannot start executions')
-    expect(ledger.state().tasks[0].status).toBe('backlog')
-    expect(ledger.state().tasks[0].executions).toHaveLength(0)
+    expect(ledger.state().tasks[0].status).toBe('todo')
+    // Only the todo step's own clarification execution exists: the refused
+    // batch added none.
+    expect(ledger.state().tasks[0].executions).toHaveLength(1)
+    expect(ledger.state().tasks[0].executions[0].kind).toBe('clarify')
     ledger.dispose()
   })
 
@@ -933,5 +1002,114 @@ describe('HostTaskLedger group move (move-many)', () => {
       .toThrow('archived task is read-only')
     expect(statusOf(ledger)).toEqual([['a', 'backlog'], ['b', 'backlog']])
     ledger.dispose()
+  })
+})
+
+describe('HostTaskLedger pause/resume of open runs', () => {
+  /** A ledger with one card whose open run holds `session-a`. */
+  function running(extra: ConstructorParameters<typeof HostTaskLedger>[2] = {}): HostTaskLedger {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW, extra)
+    ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
+    const opened = ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
+    ledger.attachSession('a', opened.run!.execution.id, 'session-a')
+    return ledger
+  }
+
+  const cardOf = (ledger: HostTaskLedger): TaskRecord => ledger.state().tasks[0]
+
+  it('pauses the open run without moving the card and reports its session', () => {
+    const ledger = running()
+    const result = ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    expect(result.paused).toEqual([{ taskId: 'a', sessionId: 'session-a' }])
+    const task = cardOf(ledger)
+    expect(task.status).toBe('running')
+    expect(task.pausedAt).toBe(NOW)
+    // The run itself stays open: the card is suspended, not settled.
+    expect(task.executions).toHaveLength(1)
+    expect(task.executions[0].endedAt).toBeUndefined()
+    ledger.dispose()
+  })
+
+  it('hides a paused run from the monitor and from the WIP occupancy', () => {
+    const ledger = running()
+    expect(ledger.runtimeView().openExecutions).toHaveLength(1)
+    ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    expect(ledger.runtimeView().openExecutions).toEqual([])
+    expect(ledger.isPaused('a')).toBe(true)
+    ledger.dispose()
+  })
+
+  it('ignores a settle that races the pause', () => {
+    const ledger = running()
+    ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    ledger.settle('a', cardOf(ledger).executions[0].id, 'failed', 'agent turn was aborted by the user')
+    expect(cardOf(ledger).status).toBe('running')
+    expect(cardOf(ledger).pausedAt).toBe(NOW)
+    expect(cardOf(ledger).executions[0].endedAt).toBeUndefined()
+    ledger.dispose()
+  })
+
+  it('resumes the same run, clears the stamp and hands the execution back', () => {
+    const ledger = running()
+    ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    const result = ledger.applyRequest('resume-a', { kind: 'resume', taskIds: ['a'] })
+    expect(result.resumed).toHaveLength(1)
+    expect(result.resumed![0].execution.sessionId).toBe('session-a')
+    const task = cardOf(ledger)
+    expect(task.pausedAt).toBeUndefined()
+    expect(task.status).toBe('running')
+    expect(ledger.isPaused('a')).toBe(false)
+    expect(ledger.runtimeView().openExecutions).toHaveLength(1)
+    ledger.dispose()
+  })
+
+  it('pauses a queued run that has no session yet', () => {
+    // A run waiting for a WIP slot: the card is `running` with an open
+    // execution but no session attached.
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
+    ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
+    const result = ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    expect(result.paused).toEqual([{ taskId: 'a', sessionId: undefined }])
+    expect(cardOf(ledger).pausedAt).toBe(NOW)
+    expect(ledger.runtimeView().openExecutions).toEqual([])
+    ledger.dispose()
+  })
+
+  it('skips cards that are already paused or have no open run, and refuses to run them', () => {
+    const ledger = running()
+    ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    expect(ledger.applyRequest('pause-again', { kind: 'pause', taskIds: ['a', 'nope'] }).paused).toBeUndefined()
+    expect(() => ledger.applyRequest('run-a-again', { kind: 'run', taskId: 'a' })).toThrow('already running')
+    expect(() => ledger.applyRequest('rerun-a', { kind: 'rerun', taskId: 'a' })).toThrow('already running')
+    expect(() => ledger.applyRequest('move-a', { kind: 'move', taskId: 'a', status: 'todo' })).toThrow('running task cannot be moved')
+    ledger.dispose()
+  })
+
+  it('clears a pause without resuming the run', () => {
+    const ledger = running()
+    ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    ledger.clearPause('a')
+    expect(ledger.isPaused('a')).toBe(false)
+    expect(cardOf(ledger).status).toBe('running')
+    expect(ledger.runtimeView().openExecutions).toHaveLength(1)
+    ledger.dispose()
+  })
+
+  it('keeps a paused card paused across a Host restart', () => {
+    const root = tempRoot()
+    const ledger = new HostTaskLedger(root, () => NOW)
+    ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
+    // A queued run (no session) is what a restart would otherwise cancel.
+    ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
+    ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
+    ledger.dispose()
+
+    const restarted = new HostTaskLedger(root, () => NOW + 1000)
+    const task = restarted.state().tasks[0]
+    expect(task.pausedAt).toBe(NOW)
+    expect(task.status).toBe('running')
+    expect(task.executions[0].result).toBeUndefined()
+    restarted.dispose()
   })
 })

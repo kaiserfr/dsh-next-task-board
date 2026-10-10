@@ -15,7 +15,88 @@ import css from '../board.module.css'
 /** DOM id shared by the tag-name inputs and their datalist (one board at a time). */
 const TAG_NAME_LIST_ID = 'dsh-task-board-tag-names'
 
-/** Modal overlay: closes on backdrop press, submits through the form. */
+/**
+ * Draft seat keys. One key per modal instance: the blank "new task" form, one
+ * duplicate form per source card, and one content/label form per card — so a
+ * draft kept for one card never reappears while a different card is edited.
+ */
+export const NEW_TASK_DRAFT_KEY = 'new'
+export const duplicateDraftKey = (sourceTaskId: string): string => `duplicate:${sourceTaskId}`
+export const editDraftKey = (taskId: string): string => `edit:${taskId}`
+export const tagsDraftKey = (taskId: string): string => `tags:${taskId}`
+
+/**
+ * The draft a modal opens on, read once from the controller's seat. `restored`
+ * drives the "draft restored" note; `discard` forgets the seat (the explicit
+ * discard button, which then also puts the untouched form back on screen).
+ */
+export function useStoredFormDraft<T>(
+  controller: BoardController,
+  key: string,
+): { stored: T | undefined; restored: boolean; discard: () => void } {
+  const [stored] = useState(() => controller.getFormDraft?.<T>(key))
+  const [restored, setRestored] = useState(stored !== undefined)
+  return {
+    stored,
+    restored,
+    discard: () => { controller.discardFormDraft?.(key); setRestored(false) },
+  }
+}
+
+/**
+ * Persist a modal's form into the controller's seat when the popup goes away —
+ * the way an accidental click next to the popup, Escape, Cancel, or the board
+ * view itself disappearing all keep what was typed. Values are read through a
+ * ref, so the last render's state is what lands in the seat. A form nobody
+ * touched leaves no draft behind, and `spend` retires a form whose task was
+ * created or saved — even when that confirmation arrives after the popup closed.
+ */
+export function useFormDraftSeat<T>(
+  controller: BoardController,
+  key: string,
+  seat: {
+    /** The modal's latest field values. */
+    snapshot: () => T
+    /** Whether the form holds anything worth restoring (a pristine form is not a draft). */
+    dirty: () => boolean
+  },
+): {
+  /** The form became a task: drop the seat and never restore this form again. */
+  spend: () => void
+} {
+  const latest = useRef(seat)
+  latest.current = seat
+  const spent = useRef(false)
+  useEffect(() => () => {
+    const current = latest.current
+    if (!spent.current && current.dirty()) controller.saveFormDraft?.(key, current.snapshot())
+    else controller.discardFormDraft?.(key)
+  }, [controller, key])
+  return {
+    spend: () => {
+      spent.current = true
+      controller.discardFormDraft?.(key)
+    },
+  }
+}
+
+/**
+ * "Draft restored" note of a modal that reopened on the form an earlier visit
+ * left behind, with the one explicit way to throw it away. It sits at the top
+ * of the form so a restored draft is never mistaken for a fresh, empty form.
+ */
+export function DraftNotice({ onDiscard }: { onDiscard: () => void }) {
+  return (
+    <p className={css.draftNotice} data-draft-notice="">
+      <span>{t('draft.restored')}</span>
+      <button type="button" className={css.linkButton} onClick={onDiscard}>
+        {t('draft.discard')}
+      </button>
+    </p>
+  )
+}
+
+/** Modal overlay: closes on backdrop press or Escape, submits through the form. */
 export function ModalShell({
   ariaLabel,
   title,
@@ -35,6 +116,22 @@ export function ModalShell({
   onClose: () => void
   children: ReactNode
 }) {
+  // Escape is the keyboard's click next to the popup: it closes the overlay and
+  // nothing else — whatever was typed is kept as a draft by the owning modal.
+  // The callback is read through a ref so the listener survives re-renders
+  // (the board re-renders on every Host poll).
+  const close = useRef(onClose)
+  close.current = onClose
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      close.current()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown) }
+  }, [])
+
   return (
     <div className={css.modalBackdrop} onMouseDown={event => { if (event.target === event.currentTarget) onClose() }}>
       <form
@@ -106,6 +203,10 @@ export function useAiParse(
   useEffect(() => {
     if (model === '' && models.length > 0) setModel(models[0]!.id)
   }, [model, models])
+
+  // A closing popup stops a parse that is still running: its result would land
+  // in a form nobody is looking at. The pasted text itself stays in the draft.
+  useEffect(() => () => { abort.current?.abort() }, [])
 
   const run = async (): Promise<void> => {
     const value = text.trim()

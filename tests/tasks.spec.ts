@@ -3,8 +3,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  canMoveManually, createTask, EXECUTION_HISTORY_LIMIT, executionLabel, retainRecentExecutions,
-  settleExecution, startExecution, withSchedule, withStatus,
+  canMoveManually, createTask, EXECUTION_HISTORY_LIMIT, executionLabel, isTaskExecuting, isTaskPaused,
+  openExecution, retainRecentExecutions, settleExecution, startExecution, withPause, withSchedule, withStatus,
 } from '../src/core/tasks.ts'
 
 const NOW = 1_700_000_000_000
@@ -249,5 +249,39 @@ describe('withSchedule', () => {
     expect(cleared.schedule?.enabled).toBe(true)
     expect(cleared.schedule?.cron).toBe('0 9 * * *')
     expect(cleared.schedule?.nextRunAt).toBeUndefined()
+  })
+})
+
+describe('pause of an open run', () => {
+  function running() {
+    const task = createTask({ title: 'p', description: '', prompt: '' }, NOW, 't-p')
+    const opened = startExecution(task, NOW, 'e-1')
+    return { ...opened.task, executions: [{ ...opened.execution, sessionId: 'session-a' }] }
+  }
+
+  it('keeps the run open but stops counting as running', () => {
+    const task = running()
+    expect(isTaskExecuting(task)).toBe(true)
+    const paused = withPause(task, true, NOW + 1)
+    expect(isTaskPaused(paused)).toBe(true)
+    expect(paused.status).toBe('running')
+    expect(openExecution(paused)).toBeDefined()
+    expect(isTaskExecuting(paused)).toBe(false)
+  })
+
+  it('keeps the first stamp while pausing twice and clears it on resume', () => {
+    const paused = withPause(running(), true, NOW + 1)
+    expect(withPause(paused, true, NOW + 5).pausedAt).toBe(NOW + 1)
+    expect(withPause(paused, false, NOW + 9).pausedAt).toBeUndefined()
+  })
+
+  it('never carries a pause into a fresh run', () => {
+    const paused = withPause(running(), true, NOW + 1)
+    expect(startExecution(paused, NOW + 2, 'e-2').task.pausedAt).toBeUndefined()
+  })
+
+  it('ends the pause when the run settles', () => {
+    const paused = withPause(running(), true, NOW + 1)
+    expect(settleExecution(paused, 'e-1', 'cancelled', NOW + 2, undefined).pausedAt).toBeUndefined()
   })
 })

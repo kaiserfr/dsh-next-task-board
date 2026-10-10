@@ -37,12 +37,35 @@ export interface TaskBoardSnapshot {
      * shipped machine.
      */
     stateMachine?: StateMachineConfig;
+    /**
+     * The enforced WIP limit per workspace/lane (`maxConcurrentRuns`). Only used
+     * to explain a waiting card ("one run per workspace"); the Host stays the
+     * authority on whether a launch starts. Absent on an older Host.
+     */
+    maxConcurrentRuns?: number;
+    /** The enforced Done-column limit (`maxDoneTasks`). Absent on an older Host. */
+    maxDoneTasks?: number;
+    /**
+     * Task id → the session waiting for the human's answer, for every card whose
+     * conversation holds a question the agent asked and stopped on. The card shows
+     * its question symbol and jumps there. Derived from the conversations on each
+     * poll, so it is no ledger state; absent on an older Host.
+     */
+    awaitingAnswer?: Record<string, string>;
 }
 /** SSE event frame: revision/scheduler/power only, never the task list. */
 export interface TaskBoardEventPayload {
     revision: number;
     scheduler: TaskBoardSchedulerSnapshot;
     power: TaskBoardPowerSnapshot;
+    /** Enforced limits, so a settings change reaches every open board. */
+    maxConcurrentRuns?: number;
+    maxDoneTasks?: number;
+    /**
+     * Waiting questions, carried on the frame like the limits because the map is
+     * derived: it never bumps the revision the frame is gated on.
+     */
+    awaitingAnswer?: Record<string, string>;
 }
 /**
  * Request body of `POST {TASK_BOARD_API_PREFIX}/parse` (issue #1540): the text
@@ -106,9 +129,11 @@ export type TaskBoardAction = {
     kind: 'rerun';
     taskId: string;
 } | {
-    kind: 'rework';
-    taskId: string;
-    note: string;
+    kind: 'pause';
+    taskIds: string[];
+} | {
+    kind: 'resume';
+    taskIds: string[];
 } | {
     kind: 'confirm-permission';
     taskId: string;

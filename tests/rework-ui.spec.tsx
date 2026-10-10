@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
 /**
- * Rework UI: a card that failed its test can go back to To Do with a
- * correction note, and the note is only offered where it means something.
+ * Rework UI: a card that failed its test goes back to To Do with the button
+ * that is left (the status move), and the correction is written in the card's
+ * own chat — the detail view collects no note text any more.
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { TaskDetail } from '../src/client/board/TaskDetail.tsx'
+import { t } from '../src/client/locales.ts'
 import type { BoardController, ControllerSnapshot } from '../src/core/controller.ts'
 import type { TaskRecord } from '../src/core/tasks.ts'
 
@@ -32,7 +34,7 @@ function card(overrides: Partial<TaskRecord> = {}): TaskRecord {
   }
 }
 
-function controller(reworkTask = vi.fn(async () => true)): { controller: BoardController; reworkTask: typeof reworkTask } {
+function controller(): BoardController {
   const state: ControllerSnapshot = {
     tasks: [],
     boardOpen: true,
@@ -42,14 +44,12 @@ function controller(reworkTask = vi.fn(async () => true)): { controller: BoardCo
     pendingTaskIds: [],
     host: { revision: 1, scheduler: { timeZone: 'UTC' }, power: { platform: 'linux', phase: 'unsupported', enabled: false, runningSessions: 0, armedSchedules: 0, sessionStateKnown: true }, sessionDefaultPermission: 'read-only' },
   }
-  const controller = {
+  return {
     getSnapshot: () => state,
     subscribe: () => () => {},
     closeTask: () => {},
     moveTask: () => {},
-    reworkTask,
   } as unknown as BoardController
-  return { controller, reworkTask }
 }
 
 function render(element: React.ReactElement): HTMLElement {
@@ -61,64 +61,30 @@ function render(element: React.ReactElement): HTMLElement {
   return container
 }
 
-function type(textarea: HTMLTextAreaElement, value: string): void {
-  act(() => {
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-    setter?.call(textarea, value)
-    textarea.dispatchEvent(new Event('input', { bubbles: true }))
-  })
-}
-
 describe('rework after a failed test', () => {
-  it('offers a correction note on a card parked in ready_for_test', () => {
-    const { controller: ctrl } = controller()
-    const container = render(<TaskDetail controller={ctrl} task={card()} />)
-    expect(container.querySelector('[data-dsh-part="rework"]')).not.toBeNull()
-    const textarea = container.querySelector('[data-dsh-part="rework"] textarea') as HTMLTextAreaElement
-    expect(textarea).not.toBeNull()
-    const send = container.querySelector('[data-dsh-part="rework"] button') as HTMLButtonElement
-    // Nothing to send yet: an empty note never opens a round.
-    expect(send.disabled).toBe(true)
-    type(textarea, 'the redirect is missing')
-    expect(send.disabled).toBe(false)
-  })
-
-  it('sends the trimmed note through the controller', async () => {
-    const reworkTask = vi.fn(async () => true)
-    const { controller: ctrl } = controller(reworkTask)
-    const container = render(<TaskDetail controller={ctrl} task={card()} />)
-    const textarea = container.querySelector('[data-dsh-part="rework"] textarea') as HTMLTextAreaElement
-    type(textarea, '  the redirect is missing  ')
-    const send = container.querySelector('[data-dsh-part="rework"] button') as HTMLButtonElement
-    await act(async () => { send.click() })
-    expect(reworkTask).toHaveBeenCalledWith('card-1', 'the redirect is missing')
-    // An accepted note leaves the field empty, ready for the next round.
-    expect(textarea.value).toBe('')
-  })
-
-  it('hides the note field where it has no meaning and shows a pending note instead', () => {
-    const { controller: ctrl } = controller()
-    const container = render(<TaskDetail controller={ctrl} task={card({ status: 'todo' })} />)
+  it('offers no correction note field on a card parked in ready_for_test', () => {
+    const container = render(<TaskDetail controller={controller()} task={card()} />)
     expect(container.querySelector('[data-dsh-part="rework"]')).toBeNull()
-
-    const pending = render(<TaskDetail controller={ctrl} task={card({ status: 'todo', reworkNote: 'fix the redirect' })} />)
-    const note = pending.querySelector('[data-dsh-part="rework-note"]')
-    expect(note).not.toBeNull()
-    expect(note!.textContent).toContain('fix the redirect')
+    expect(container.querySelector('textarea')).toBeNull()
   })
 
-  it('keeps the note readable on the execution row after the run consumed it', () => {
-    const { controller: ctrl } = controller()
-    const consumed = card({
-      status: 'ready_for_test',
-      executions: [{
-        id: 'e2', sessionId: 'session-run', startedAt: 0, endedAt: 1, result: 'succeeded', error: undefined,
-        reworkNote: 'the redirect is missing',
-      }],
-    })
-    const container = render(<TaskDetail controller={ctrl} task={consumed} />)
-    const row = container.querySelector('[data-dsh-part="execution-rework-note"]')
-    expect(row).not.toBeNull()
-    expect(row!.textContent).toContain('the redirect is missing')
+  it('keeps the way back to To Do as a plain status move', () => {
+    const container = render(<TaskDetail controller={controller()} task={card()} />)
+    const button = [...container.querySelectorAll('button')].find(item => item.textContent?.includes(t('status.move.todo')))
+    expect(button).toBeDefined()
+  })
+
+  it('shows the stamp of a card that was sent back, without any note text', () => {
+    const container = render(<TaskDetail controller={controller()} task={card({ status: 'todo', reworkAt: 1_700_000_000_000, reworkCount: 2 })} />)
+    const stamp = container.querySelector('[data-dsh-part="rework-stamp"]')
+    expect(stamp).not.toBeNull()
+    expect(stamp!.textContent).toContain('2')
+  })
+
+  it('marks the execution row of a rework round', () => {
+    const container = render(<TaskDetail controller={controller()} task={card({
+      executions: [{ id: 'e2', sessionId: 'session-run', startedAt: 0, endedAt: 1, result: 'succeeded', error: undefined, rework: true }],
+    })} />)
+    expect(container.querySelector('[data-dsh-part="execution-rework"]')).not.toBeNull()
   })
 })

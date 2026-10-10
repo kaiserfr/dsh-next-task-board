@@ -7,7 +7,8 @@
  * - `transitions`  — the allowed state changes; anything not listed is refused,
  *                    which is what validates a drag & drop target.
  * - `actions`      — what runs when a transition fires (`git.openBranch`,
- *                    `git.mergeBranch`, `run`, `stamp`).
+ *                    `git.commitBranch`, `git.mergeBranch`, `run`, `clarify`,
+ *                    `stamp`).
  *
  * Framework-free (no cordis, no runtime imports) so the two sides that need it
  * can share it: the Host enforces moves with the very same machine the browser
@@ -45,8 +46,17 @@ const TRIGGERS: readonly StateTrigger[] = ['manual', 'runner', 'cron']
  * options:
  *
  * - `'git.openBranch'`   — cut the card's feature branch (no-op without a repo).
- * - `'git.mergeBranch'`  — commit the run's work and merge the branch back.
+ * - `'git.commitBranch'` — commit the worktree onto the feature branch, so no
+ *                          run's work waits uncommitted (no-op without a repo
+ *                          or when there is nothing to commit).
+ * - `'git.mergeBranch'`  — commit any leftover and merge the branch back.
  * - `'run'`              — open an execution for the card (see the ledger).
+ * - `'clarify'`          — start the card's clarification run: the same
+ *                          execution as `run` (same queue, but WIP-free — the
+ *                          `todo` column waits for no lane slot), yet it checks
+ *                          no branch out, its prompt asks the agent's open
+ *                          questions in the card's chat and stops, and settling
+ *                          it keeps the card's column.
  * - `{ kind: 'stamp', field: 'doneAt' }` — write a timestamped task field.
  */
 export type StateAction = string | { kind: string; field?: string }
@@ -88,7 +98,7 @@ export interface StateMachineConfig {
 }
 
 /** Actions the built-in Host understands; anything else is rejected by the normalizer. */
-export const STATE_ACTION_KINDS = ['git.openBranch', 'git.mergeBranch', 'run', 'stamp'] as const
+export const STATE_ACTION_KINDS = ['git.openBranch', 'git.commitBranch', 'git.mergeBranch', 'run', 'clarify', 'stamp'] as const
 /** Action kind. */
 export type StateActionKind = typeof STATE_ACTION_KINDS[number]
 /** Task fields the `stamp` action may write. */
@@ -104,12 +114,29 @@ function manual(from: TaskStatus, to: TaskStatus, actions?: StateAction[]): Stat
  * hardcoded board implemented:
  *
  * - new cards land in `backlog`; a human pulls them in
- * - `backlog → todo` opens the feature branch
+ * - `backlog → todo` opens the feature branch and is the card's clarification
+ *   step: every card gets its clarification run there — the run column's
+ *   execution (same queue, same session link, but WIP-free, so it starts at
+ *   once) whose prompt asks the open questions first and stops. It stays in
+ *   `todo`, reads as Running on the board and settles without moving the card
+ *   (`clarify`)
  * - `running` is the runner's own state: it is entered by a run and left by
  *   that run settling (success → `ready_for_test`, failure → `failed`),
  *   never by a drag
- * - `ready_for_test → done` commits and merges the feature branch back
- * - every manual → manual move is allowed, as before
+ * - every manual move into `ready_for_test` commits the worktree onto the
+ *   card's feature branch (`git.commitBranch`), and the runner's own settle
+ *   does the same, so no run's work is ever left uncommitted in the worktree
+ * - `ready_for_test → done` merges the feature branch back (committing any
+ *   leftover as a safety net)
+ * - `ready_for_test → running` and `failed → running` pull the card onto the
+ *   run column from there: the run continues the card's conversation, so a
+ *   correction the human typed into that chat is already in context
+ * - every manual → manual move is allowed, as before — except a drag straight
+ *   from `backlog` to `running`, which has no transition at all: the card has
+ *   to pass the clarification step in `todo` first
+ * - the `run` transition is the go-ahead: starting the work closes the card's
+ *   open clarification round and continues the very session the questions were
+ *   asked and answered in.
  *
  * `git` is a hand-maintained summary of the host's git hooks in comments only;
  * the operational hooks live in `git-workflow.ts`.
@@ -121,15 +148,19 @@ export const DEFAULT_STATE_MACHINE: StateMachineConfig = {
     { status: 'todo' },
     { status: 'running', drop: false },
     { status: 'ready_for_test' },
-    { status: 'done' },
     { status: 'failed' },
+    { status: 'done' },
   ],
   transitions: [
-    manual('backlog', 'todo', ['git.openBranch']),    manual('backlog', 'ready_for_test'),
+    manual('backlog', 'todo', ['git.openBranch', 'clarify']),
+    // Every way into the review column commits: the work stays on the card's
+    // feature branch from the moment it is parked, so the worktree is clean
+    // while the human reviews and while the next card uses the same worktree.
+    manual('backlog', 'ready_for_test', ['git.commitBranch']),
     manual('backlog', 'done'),
     manual('backlog', 'failed'),
     manual('todo', 'backlog'),
-    manual('todo', 'ready_for_test'),
+    manual('todo', 'ready_for_test', ['git.commitBranch']),
     manual('todo', 'done'),
     manual('todo', 'failed'),
     manual('ready_for_test', 'backlog'),
@@ -138,17 +169,24 @@ export const DEFAULT_STATE_MACHINE: StateMachineConfig = {
     manual('ready_for_test', 'failed'),
     manual('done', 'backlog'),
     manual('done', 'todo'),
-    manual('done', 'ready_for_test'),
+    manual('done', 'ready_for_test', ['git.commitBranch']),
     manual('done', 'failed'),
     manual('failed', 'backlog'),
     manual('failed', 'todo'),
-    manual('failed', 'ready_for_test'),
+    manual('failed', 'ready_for_test', ['git.commitBranch']),
     manual('failed', 'done'),
-    // Dropping a card straight onto "In progress" starts it (the runner's own
-    // entry). The Host fires this through the `run` action — the same action
-    // the detail view's Run button uses — and opens the feature branch on the
-    // way when the card never passed through `todo`.
-    manual('backlog', 'running', ['git.openBranch', 'run']),
+    // A card in the review or the failure column can be pulled straight onto
+    // the run column: the run continues the card's conversation (the review
+    // remark the human typed there stays in context), so the card does not have
+    // to be routed through `todo` first. The `run` action is what makes the
+    // drop start an execution instead of a plain status move.
+    manual('ready_for_test', 'running', ['run']),
+    manual('failed', 'running', ['run']),
+    // Dropping a card onto "In progress" starts it (the runner's own entry).
+    // Only `todo` has that transition: a drag straight from `backlog` is
+    // refused (no transition exists), so the clarification step in `todo`
+    // cannot be skipped. The Host fires this through the `run` action, which
+    // closes the card's open clarification round and continues its session.
     manual('todo', 'running', ['run']),
     { from: 'running', to: 'ready_for_test', trigger: 'runner' },
     { from: 'running', to: 'failed', trigger: 'runner' },
