@@ -56,10 +56,10 @@ interface ComposeWorkflowOptions {
   file?: string
   /**
    * Environment for the card's stack, as `KEY=VALUE` pairs separated by commas
-   * or newlines. `{port}` is replaced by a free host port picked for the card
-   * (and kept for it), `{task}` by its id — that is how a compose file that
-   * publishes a fixed host port (`${PORT:-8092}`) gets one port per card
-   * instead of colliding with the human's own stack.
+   * or newlines. `{port}`, `{port2}` … become distinct free host ports picked
+   * for the card (and kept for it), `{task}` its id — that is how a compose file
+   * that publishes fixed host ports (`${PORT:-8092}`) gets its own ports per
+   * card instead of colliding with the human's own stack.
    */
   env?: string
   /** Base of the per-card port range. */
@@ -225,11 +225,13 @@ export class ComposeWorkflow implements TaskComposeController {
 }
 
 /**
- * Resolve the environment template for one card. `{task}` becomes the card id,
- * `{port}` a free host port: the card's own remembered port when it has one,
- * otherwise a port from the configured base (offset by the card id so two cards
- * do not start probing at the same number), skipping ports that are already
- * taken on the loopback interface.
+ * Resolve the environment template for one card. `{task}` becomes the card id;
+ * `{port}`, `{port2}` … `{port9}` become free host ports, one distinct port per
+ * placeholder (a compose file may publish several: app, devtools, VNC). The
+ * ports are probed on the loopback interface, start at the configured base
+ * offset by the card id, and are **remembered** on the card
+ * (`DSH_COMPOSE_PORT`, `DSH_COMPOSE_PORT2`, …), so re-running a card re-creates
+ * its stack on the very ports the human already knows.
  */
 export async function resolveComposeEnv(
   template: string,
@@ -242,19 +244,38 @@ export async function resolveComposeEnv(
     .filter(entry => entry !== '' && entry.includes('='))
   if (pairs.length === 0) return {}
   const base = options.base ?? DEFAULT_COMPOSE_PORT_BASE
-  let port = options.previous?.DSH_COMPOSE_PORT !== undefined ? Number(options.previous.DSH_COMPOSE_PORT) : undefined
-  if (port === undefined || !Number.isFinite(port)) {
-    const offset = hashOf(task.id) % DEFAULT_COMPOSE_PORT_RANGE
-    port = await firstFreePort(base + offset, options.probe ?? isPortFree)
+  const previous = options.previous ?? {}
+  const probe = options.probe ?? isPortFree
+
+  // Which ports the template asks for: {port} is the first, {port2} the second…
+  const indexes = new Set<number>()
+  for (const pair of pairs) {
+    for (const match of pair.matchAll(/\{port([2-9])?\}/g)) indexes.add(match[1] === undefined ? 1 : Number(match[1]))
   }
-  const env: Record<string, string> = { DSH_COMPOSE_PORT: String(port) }
+  const env: Record<string, string> = {}
+  const taken = new Set<number>()
+  for (const index of [...indexes].sort((left, right) => left - right)) {
+    const key = index === 1 ? 'DSH_COMPOSE_PORT' : `DSH_COMPOSE_PORT${index}`
+    const remembered = Number(previous[key])
+    let port = Number.isFinite(remembered) && remembered > 0 ? remembered : undefined
+    if (port === undefined) {
+      const offset = hashOf(`${task.id}#${index}`) % DEFAULT_COMPOSE_PORT_RANGE
+      port = await firstFreePort(base + offset, async candidate => !taken.has(candidate) && await probe(candidate))
+    }
+    taken.add(port)
+    env[key] = String(port)
+  }
+
   for (const pair of pairs) {
     const index = pair.indexOf('=')
     const key = pair.slice(0, index).trim()
     if (key === '' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue
-    // The remembered port wins over a `{port}` in the template, so a re-run
-    // re-creates the stack on the very port the human already knows.
-    const value = pair.slice(index + 1).trim().replaceAll('{task}', task.id).replaceAll('{port}', String(port))
+    // The remembered ports win over the template, so a re-run re-creates the
+    // stack on the very ports the human already knows.
+    const value = pair.slice(index + 1).trim()
+      .replaceAll('{task}', task.id)
+      .replace(/\{port([2-9])?\}/g, (_match, digit: string | undefined) =>
+        env[digit === undefined ? 'DSH_COMPOSE_PORT' : `DSH_COMPOSE_PORT${digit}`] ?? '')
     env[key] = value
   }
   return env

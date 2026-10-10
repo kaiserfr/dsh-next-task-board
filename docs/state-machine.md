@@ -288,13 +288,20 @@ containers:
   environment that never started would be worse than not starting.
 * **Ports**: the board never rewrites the compose file's port mappings. What it
   does is hand the stack an environment of its own (`composeEnv`, `KEY=VALUE`
-  pairs): `{port}` becomes a free host port picked for that card (probed on the
-  loopback interface and **remembered on the card**, so a re-run re-creates the
-  stack on the port the human already knows) and `{task}` the card id. A compose
-  file that publishes a variable port — `ports: ["${PORT:-8092}:${PORT:-8092}"]`
-  — therefore gets one port per card instead of colliding with the stack the
-  human runs themselves; `composeEnv: PORT={port}` is the whole configuration. A
+  pairs): `{port}`, `{port2}` … `{port9}` become distinct free host ports picked
+  for that card (probed on the loopback interface and **remembered on the card**,
+  so a re-run re-creates the stack on the ports the human already knows) and
+  `{task}` the card id. A compose file that publishes variable ports —
+  `ports: ["${PORT:-8092}:${PORT:-8092}"]`, or three of them for app, devtools
+  and VNC — therefore gets its own ports per card instead of colliding with the
+  stack the human runs themselves; `composeEnv: PORT={port}` (or
+  `JOBSUCHE_PORT={port},JOBSUCHE_CDP_PORT={port2}`) is the whole configuration. A
   file with hard-coded ports still collides, and compose says so on the card.
+* Two things a compose file has to do itself, because the board must not rewrite
+  it: a **fixed `container_name:`** collides with the human's own container (use
+  a variable, as the fork's own examples do), and a **named volume** is
+  per-project, so a task stack starts with an empty database — which is the
+  isolation the feature is for, and `down -v` removes it again.
 * The card's environment is also **announced in the run prompt** (project name
   and published ports), so the agent works against that stack with
   `docker compose -p <project> ...` instead of starting a second one under the

@@ -21,10 +21,10 @@ interface ComposeWorkflowOptions {
     file?: string;
     /**
      * Environment for the card's stack, as `KEY=VALUE` pairs separated by commas
-     * or newlines. `{port}` is replaced by a free host port picked for the card
-     * (and kept for it), `{task}` by its id — that is how a compose file that
-     * publishes a fixed host port (`${PORT:-8092}`) gets one port per card
-     * instead of colliding with the human's own stack.
+     * or newlines. `{port}`, `{port2}` … become distinct free host ports picked
+     * for the card (and kept for it), `{task}` its id — that is how a compose file
+     * that publishes fixed host ports (`${PORT:-8092}`) gets its own ports per
+     * card instead of colliding with the human's own stack.
      */
     env?: string;
     /** Base of the per-card port range. */
@@ -82,11 +82,13 @@ export declare class ComposeWorkflow implements TaskComposeController {
     private exec;
 }
 /**
- * Resolve the environment template for one card. `{task}` becomes the card id,
- * `{port}` a free host port: the card's own remembered port when it has one,
- * otherwise a port from the configured base (offset by the card id so two cards
- * do not start probing at the same number), skipping ports that are already
- * taken on the loopback interface.
+ * Resolve the environment template for one card. `{task}` becomes the card id;
+ * `{port}`, `{port2}` … `{port9}` become free host ports, one distinct port per
+ * placeholder (a compose file may publish several: app, devtools, VNC). The
+ * ports are probed on the loopback interface, start at the configured base
+ * offset by the card id, and are **remembered** on the card
+ * (`DSH_COMPOSE_PORT`, `DSH_COMPOSE_PORT2`, …), so re-running a card re-creates
+ * its stack on the very ports the human already knows.
  */
 export declare function resolveComposeEnv(template: string, task: Pick<TaskRecord, 'id'>, options?: {
     base?: number;

@@ -844,10 +844,11 @@ Die englische Fassung dieser Übersicht steht im README unter
       Ausführung (`error`) und als `TaskCompose.error` auf der Karte.
     - **Ports pro Karte über die Umgebung:** die Compose-Datei wird nie
       umgeschrieben. Stattdessen injiziert die Einstellung `composeEnv`
-      (`KEY=VALUE`, Komma/Zeilen) Variablen in den Stack: `{port}` wird durch
-      einen freien Host-Port ersetzt — auf 127.0.0.1 geprüft, ab
-      `DEFAULT_COMPOSE_PORT_BASE` (8100) um die Karten-Id verschoben, bis ein
-      freier Port gefunden ist — und `{task}` durch die Karten-Id. Der gewählte
+      (`KEY=VALUE`, Komma/Zeilen) Variablen in den Stack: `{port}`, `{port2}` …
+      `{port9}` werden durch je einen freien Host-Port ersetzt — auf 127.0.0.1
+      geprüft, ab `DEFAULT_COMPOSE_PORT_BASE` (8100) um Karten-Id und Platzhalter
+      verschoben, bis ein freier Port gefunden ist, innerhalb einer Auflösung
+      paarweise verschieden — und `{task}` durch die Karten-Id. Der gewählte
       Port wird **an der Karte gemerkt** (`TaskCompose.env.DSH_COMPOSE_PORT`),
       ein erneuter Lauf baut den Stack also wieder auf demselben Port auf. Damit
       bekommt eine Datei mit variablem Port (`${PORT:-8092}`) pro Karte ihren

@@ -231,3 +231,30 @@ exit 0
     expect(call).toContain('PROJECT=dsh-tb-card1')
   })
 })
+
+describe('several ports per card', () => {
+  it('gives every placeholder its own port and remembers all of them', async () => {
+    const template = 'JOBSUCHE_PORT={port},JOBSUCHE_CDP_PORT={port2},JOBSUCHE_LOGIN_WEB_PORT={port3},NAME=card-{task}'
+    const env = await resolveComposeEnv(template, { id: 'card-9' }, { base: 8300, probe: async () => true })
+    const ports = [env.JOBSUCHE_PORT, env.JOBSUCHE_CDP_PORT, env.JOBSUCHE_LOGIN_WEB_PORT]
+    expect(new Set(ports).size).toBe(3)
+    expect(ports.every(port => Number(port) >= 8300)).toBe(true)
+    expect(env.NAME).toBe('card-card-9')
+    expect([env.DSH_COMPOSE_PORT, env.DSH_COMPOSE_PORT2, env.DSH_COMPOSE_PORT3]).toEqual(ports)
+
+    // A re-run resolves to the very same ports without probing at all.
+    const again = await resolveComposeEnv(template, { id: 'card-9' }, {
+      base: 8300,
+      previous: env,
+      probe: async () => { throw new Error('must not probe a remembered port') },
+    })
+    expect([again.JOBSUCHE_PORT, again.JOBSUCHE_CDP_PORT, again.JOBSUCHE_LOGIN_WEB_PORT]).toEqual(ports)
+  })
+
+  it('never hands the same port to two placeholders of one card', async () => {
+    // The probe reports every port as free; the allocation still has to keep the
+    // placeholders apart.
+    const env = await resolveComposeEnv('A={port},B={port2}', { id: 'card-1' }, { base: 8400, probe: async () => true })
+    expect(env.A).not.toBe(env.B)
+  })
+})
