@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **siebzehn echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19 und 20) plus drei
+Kurzfassung: **achtzehn echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 und 21) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -38,6 +38,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 18 | **Mehr können** | **WIP 1 strikt je Workspace/Lane**: der Platz gehört jeder offenen Implementierungs-Ausführung **mit angehängter Session**, von der Session-Zuweisung bis zum `settle()` (Erfolg erst nach dem Ende der Session) oder bis zur Pause — der Roster gibt ihn **nicht** mehr frei. Damit kann nie eine zweite Implementierungs-Session derselben Workspace im selben Worktree arbeiten; wartende Karten bleiben in „In progress" und tragen ein Warte-Abzeichen samt Blocker und Workspace, der Drop auf die Laufspalte meldet den Grund einmalig. Todo und Ready for Test bleiben ohne Limit |
 | 19 | **Mehr können** | Kein stiller Verlust von Formular-Eingaben: Klick neben das Popup, Escape und „Cancel" schließen es, die Eingaben bleiben aber als **Entwurf** im Board-Controller und kommen beim nächsten Öffnen zurück (eigener Entwurf je Formular/Karte, Hinweis mit „Entwurf verwerfen", Punkt am „+ New task"-Knopf); nach dem Anlegen/Speichern ist der Entwurf verbraucht |
 | 20 | **Mehr können** | **Wartende Frage auf der Karte**: hält die Konversation einer Karte eine Frage, die der Agent gestellt hat und auf die er wartet (blockierender `ask_user_question`-Aufruf ohne Ergebnis, oder ein Turn, den der Agent mit eigener Nachricht beendet hat, während die Session stillsteht), trägt die Karte ein Fragezeichen in der linken oberen Ecke; ein Klick springt über denselben `#session=<id>`-Deep-Link direkt in die Session mit der Frage. Der Host liest das je Poll aus der Konversation (`awaitingAnswerWatch` + `runner.awaitingAnswer`, zusätzlich die `userQuestions`-Projektion für das timed-Schema) und schickt `awaitingAnswer: { taskId → sessionId }` im Snapshot und im SSE-Frame — nie ins Ledger. Die Markierung erscheint mit der Frage und verschwindet mit der Antwort; ein fehlgeschlagener Read hält das letzte Urteil, eine unbekannte Session-Liste ändert nichts |
+| 21 | **Mehr können** | **Freigabe an den geprüften Commit gebunden (Merge-Gate)**: das Parken in „Ready for test" stempelt den Branch-HEAD als `TaskGit.reviewedCommit`; `git.mergeBranch` (`ready_for_test → done`) merged nur noch exakt diesen Stand und verweigert fail-closed, wenn der Worktree schmutzig ist, der Branch weitergewandert ist oder der Stempel fehlt — der Sicherheitsnetz-Commit beim Mergen ist entfernt, die Karte bleibt in der Review-Spalte. Erneutes Parken bindet die Freigabe an den neuen Stand |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -683,6 +684,35 @@ Die englische Fassung dieser Übersicht steht im README unter
       einen neuen Tab.
     - Abgedeckt durch `tests/awaiting-answer.spec.ts` und
       `tests/card-awaiting-answer.spec.tsx`.
+
+21. **Freigabe an den geprüften Commit gebunden (Merge-Gate)** — ein Merge nach
+    „Done" befördert nur noch genau den Stand, den der Mensch in „Ready for test"
+    vor sich hatte; Arbeit, die danach entsteht, macht die Freigabe ungültig,
+    statt unbemerkt auf den Basisbranch zu rutschen.
+    - **Stempel beim Parken:** jeder Weg nach „Ready for test" committet
+      weiterhin (`git.commitBranch`, auch beim Settle des Runners) und schreibt
+      jetzt zusätzlich den resultierenden Branch-HEAD als `TaskGit.reviewedCommit`
+      (voller SHA) an die Karte. Bei sauberem Worktree ohne Commit wird der
+      bestehende HEAD gestempelt, es entsteht weiterhin kein leerer Commit.
+    - **Tor beim Mergen:** `git.mergeBranch` (`ready_for_test → done`) verweigert
+      fail-closed, wenn (a) der Worktree noch uncommittete Änderungen hält, (b)
+      der Branch-HEAD nicht mehr exakt `reviewedCommit` ist oder (c) gar kein
+      `reviewedCommit` existiert (Karten von vor diesem Gate, oder eine eigene
+      State-Machine ohne `git.commitBranch` auf dem Weg in die Review-Spalte).
+      Der **Sicherheitsnetz-Commit beim Mergen ist entfernt** — genau er war der
+      Weg, auf dem ungereviewte Arbeit nach `main` kam. Die Verweigerung ist ein
+      Fehler auf der `move`: die Karte bleibt in „Ready for test", der Host nennt
+      den Grund.
+    - **Neubewertung:** erneutes Parken stempelt den neuen HEAD. Der übliche Weg,
+      nachgearbeiteten Code reviewen zu lassen, ist damit unverändert
+      `ready_for_test → todo` (Rework-Rückgabe), Korrektur im Karten-Chat,
+      nächster Lauf, nächstes Parken.
+    - `reviewedCommit` ist ein Bindungswert, kein Anzeigefeld: er geht durch
+      `normalizeGit` (ein kaputter Stempel wird verworfen, damit keine Karte eine
+      Review behauptet, die sie nicht hat).
+    - Abgedeckt durch `tests/git-workflow.spec.ts` (Gate, Nach-Commit-Fall,
+      fehlender Stempel, Ende-zu-Ende mit erneutem Parken) und
+      `tests/store.spec.ts`.
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

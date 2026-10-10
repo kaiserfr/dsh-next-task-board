@@ -172,20 +172,24 @@ describe('parseLedger', () => {
     expect(repaired[0].archivedAt).toBeUndefined()
   })
 
-  it('keeps the git workflow state — commit and merge stamps included', () => {
+  it('keeps the git workflow state — commit, review and merge stamps included', () => {
     const base = {
       id: 't1', title: 'a', description: '', prompt: 'a',
       createdAt: NOW, updatedAt: NOW, executions: [], status: 'ready_for_test',
-      git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, mergedAt: 5678 },
+      git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, reviewedCommit: 'abc123', mergedAt: 5678 },
     }
     const parsed = parseLedger(JSON.stringify([base]))
-    expect(parsed[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, mergedAt: 5678 })
+    expect(parsed[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, reviewedCommit: 'abc123', mergedAt: 5678 })
     // A half-written state (no usable triple) drops the field entirely.
     const broken = parseLedger(JSON.stringify([{ ...base, git: { branch: '', base: 'main', repoPath: '/repo', committedAt: 1 } }]))
     expect(broken[0].git).toBeUndefined()
     // A malformed stamp is dropped, the rest of the state survives.
     const stamped = parseLedger(JSON.stringify([{ ...base, git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 'later' } }]))
     expect(stamped[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo' })
+    // A malformed reviewed commit drops the stamp, so a card can never claim a
+    // review it does not have.
+    const reviewed = parseLedger(JSON.stringify([{ ...base, git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', reviewedCommit: 42 } }]))
+    expect(reviewed[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo' })
   })
   it('round-trips execution targets and repairs broken ones', () => {
     const pinned = createTask(

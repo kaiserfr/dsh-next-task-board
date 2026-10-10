@@ -113,8 +113,8 @@ card:
 | Action              | Effect                                                                 |
 |---------------------|------------------------------------------------------------------------|
 | `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch. No-op without a git repository. |
-| `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp), cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
-| `git.mergeBranch`   | Commits any leftover as a safety net and merges the branch back into its base branch, stamping `mergedAt`. |
+| `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp) and stamps the resulting head as `reviewedCommit` — the commit the review column shows, cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
+| `git.mergeBranch`   | Merges the feature branch back into its base branch — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused, so the card stays in `ready_for_test` (see *Review gate*). |
 | `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start releases the clarification gate and continues the card's clarification session; only cron refuses an unresolved card. |
 | `clarify`           | Opens the card's clarification run: the same execution as `run` (same queue, but WIP-free — `todo` starts without waiting for a lane slot), its prompt asks the agent's open questions in the card's chat and stops, it checks no branch out, and settling it leaves the card in its column. |
 | `{ kind: "stamp", field: "doneAt" }` | Writes a timestamp into a task field.                    |
@@ -164,6 +164,34 @@ holding uncommitted card work:
   has no execution to carry it and only gets a Host warning.
 * The card's `TaskGit` records `committedAt` (the instant of the last commit, not
   shown in the UI) next to `mergedAt`.
+
+## Review gate: the approval is bound to one commit
+
+Reaching `ready_for_test` does not only commit — it stamps the commit the branch
+now stands on as the card's `reviewedCommit`. That is the state a human reviews,
+and `git.mergeBranch` (the way into `done`) merges **exactly** it:
+
+* The branch head must still equal `reviewedCommit`, and the worktree must be
+  clean. A commit or an edit that lands after the park makes the approval stale:
+  the merge is refused, the card stays in `ready_for_test`, and nothing lands on
+  the base branch. Committing the leftover as a "safety net" is deliberately
+  gone — that is precisely the unreviewed work the gate exists to stop.
+* Re-parking the card rebinds the approval: every route back into
+  `ready_for_test` (`git.commitBranch` on the manual moves, and the runner's own
+  settle) stamps the new head. The ordinary way to review new work is therefore
+  `ready_for_test → todo` (the rework return), correction in the card's chat,
+  the next run, and the next park.
+* A card **without** a `reviewedCommit` is refused too (fail closed): cards
+  parked before this gate existed, and cards a custom machine routes into
+  `ready_for_test` without `git.commitBranch`. Moving such a card out of the
+  review column and back in stamps the commit; a custom machine should carry
+  `git.commitBranch` on every way into `ready_for_test` (it already should, for
+  the commit policy above).
+* The refusal is an error on the `move`, not a card field: the browser shows the
+  Host's reason and the card keeps its column.
+
+`reviewedCommit` is only a bind — the merge target, the commit that reaches
+`done`, is the one the human saw in the review column.
 
 ## Rework: back to `todo` from the review
 

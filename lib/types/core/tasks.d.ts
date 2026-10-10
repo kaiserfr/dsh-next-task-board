@@ -108,6 +108,15 @@ export interface TaskGit {
      * work. A park that found nothing to commit leaves the previous instant.
      */
     committedAt?: number;
+    /**
+     * Commit the human reviews in `ready_for_test`, i.e. the branch head at the
+     * instant the card was parked there (full SHA). The approval is bound to this
+     * one commit: `git.mergeBranch` refuses unless the branch still stands exactly
+     * here and the worktree is clean, so committing after the review invalidates
+     * it instead of slipping unreviewed work into the base branch. Re-parking the
+     * card (every way back into `ready_for_test` commits) stamps the new head.
+     */
+    reviewedCommit?: string;
     /** When the feature branch was merged back into `base` (ms epoch). */
     mergedAt?: number;
 }

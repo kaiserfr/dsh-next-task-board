@@ -104,6 +104,8 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     const committed = workflow.commitBranch({ ...task, git: state }, NOW)
     expect(committed?.committedAt).toBe(NOW)
     expect(committed?.branch).toBe(state.branch)
+    // Parking binds the review to the commit the branch now stands on.
+    expect(committed?.reviewedCommit).toBe(git(repo, ['rev-parse', 'HEAD']))
     expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
     expect(git(repo, ['status', '--porcelain'])).toBe('')
     expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe('task: Fix login')
@@ -133,13 +135,52 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     const task = boardTask()
     const state = workflow.openBranch(task)!
     writeFileSync(join(repo, 'feature.txt'), 'done\n')
-    const merged = workflow.mergeBranch({ ...task, git: state }, NOW)
+    // The review park commits and stamps the head the merge is bound to.
+    const parked = workflow.commitBranch({ ...task, git: state }, NOW)!
+    const merged = workflow.mergeBranch({ ...task, git: parked }, NOW)
     expect(merged?.mergedAt).toBe(NOW)
     expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
     expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
     expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe(`merge ${state.branch} (task board)`)
     // Already merged: a second accept is a no-op.
     expect(workflow.mergeBranch({ ...task, git: merged! }, NOW + 1)).toBeUndefined()
+  })
+
+  it('refuses to merge what the review did not see', () => {
+    const repo = createRepo()
+    const workflow = new GitWorkflow(registryFor(repo))
+    const task = boardTask()
+    const state = workflow.openBranch(task)!
+    writeFileSync(join(repo, 'feature.txt'), 'reviewed\n')
+    const parked = workflow.commitBranch({ ...task, git: state }, NOW)!
+
+    // Work committed after the park moved the branch past the reviewed commit.
+    writeFileSync(join(repo, 'later.txt'), 'after the review\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-qm', 'unreviewed work'])
+    expect(() => workflow.mergeBranch({ ...task, git: parked }, NOW))
+      .toThrow(/moved from the reviewed commit/)
+    expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
+    expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe('unreviewed work')
+
+    // Uncommitted work is the same refusal, not a commit behind the review's
+    // back: the safety-net commit is gone.
+    writeFileSync(join(repo, 'dirty.txt'), 'still being written\n')
+    expect(() => workflow.mergeBranch({ ...task, git: parked }, NOW))
+      .toThrow(/still holds uncommitted work/)
+    rmSync(join(repo, 'dirty.txt'), { force: true })
+    expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe('unreviewed work')
+  })
+
+  it('refuses to merge a card that was never park-reviewed', () => {
+    const repo = createRepo()
+    const workflow = new GitWorkflow(registryFor(repo))
+    const task = boardTask()
+    // A card with a branch but no review stamp — parked before the gate existed.
+    const state = workflow.openBranch(task)!
+    expect(() => workflow.mergeBranch({ ...task, git: state }, NOW))
+      .toThrow(/no reviewed commit/)
+    expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
   })
 
   it('is a no-op without a repository', () => {
@@ -363,7 +404,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('keeps the card in ready_for_test when the merge fails', () => {    const repo = createRepo()
+  it('keeps the card in ready_for_test when the merge fails', () => {
+    const repo = createRepo()
     const workflow = new GitWorkflow(registryFor(repo))
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflow })
     try {
@@ -388,6 +430,50 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         .toThrow(/git merge/)
       expect(ledger.state().tasks[0].status).toBe('ready_for_test')
       expect(ledger.state().tasks[0].git?.mergedAt).toBeUndefined()
+    } finally {
+      ledger.dispose()
+    }
+  })
+
+  it('refuses the accept once the reviewed commit moved, until the card is parked again', () => {
+    const repo = createRepo()
+    const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: new GitWorkflow(registryFor(repo)) })
+    try {
+      ledger.applyRequest('r-create', {
+        kind: 'create',
+        id: 'card-1',
+        input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
+      })
+      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' })
+      writeFileSync(join(repo, 'feature.txt'), 'reviewed\n')
+      ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
+      const reviewed = ledger.state().tasks[0].git!.reviewedCommit
+      expect(reviewed).toBe(git(repo, ['rev-parse', 'HEAD']))
+
+      // A commit after the park invalidates the approval: the card stays where
+      // it is and nothing lands on main.
+      writeFileSync(join(repo, 'later.txt'), 'nobody reviewed this\n')
+      git(repo, ['add', '-A'])
+      git(repo, ['commit', '-qm', 'late work'])
+      expect(() => ledger.applyRequest('r-done', { kind: 'move', taskId: 'card-1', status: 'done' }))
+        .toThrow(/moved from the reviewed commit/)
+      expect(ledger.state().tasks[0].status).toBe('ready_for_test')
+      expect(ledger.state().tasks[0].git?.mergedAt).toBeUndefined()
+      expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('task/fix-login-card1')
+      expect(existsSync(join(repo, 'later.txt'))).toBe(true)
+
+      // Re-parking rebinds the approval to the new head, and then the accept
+      // goes through.
+      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      const rebound = ledger.state().tasks[0].git!.reviewedCommit
+      expect(rebound).toBe(git(repo, ['rev-parse', 'HEAD']))
+      expect(rebound).not.toBe(reviewed)
+      ledger.applyRequest('r-done-2', { kind: 'move', taskId: 'card-1', status: 'done' })
+      expect(ledger.state().tasks[0].git?.mergedAt).toBe(NOW)
+      expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
+      expect(existsSync(join(repo, 'later.txt'))).toBe(true)
     } finally {
       ledger.dispose()
     }
