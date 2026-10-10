@@ -803,7 +803,10 @@ Die englische Fassung dieser Übersicht steht im README unter
       --force` das Wegwerf-Verzeichnis (Branch, Commits und Review-Stempel
       bleiben im Repository); verweigert git das Entfernen (unversionierte
       Build-Artefakte), bleibt das Verzeichnis stehen und die Annahme schlägt
-      **nicht** fehl.
+      **nicht** fehl. Auch das **Löschen** einer Karte gibt ihren Worktree frei
+      (auf ihn zeigt sonst nichts mehr); **Archivieren** nicht — eine
+      wiederhergestellte Karte findet ihn sonst nicht wieder und fällt auf die
+      gemeinsame Checkout zurück.
     - **Rückfall:** verweigert `git worktree` das Anlegen (altes git, Branch
       anderswo ausgecheckt, Restverzeichnis) oder ist das Verzeichnis später
       verschwunden, arbeitet die Karte wie vorher in der gemeinsamen Checkout

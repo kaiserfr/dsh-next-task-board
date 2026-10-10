@@ -427,6 +427,33 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
+  it('releases the card worktree when the card is deleted', () => {
+    const repo = createRepo()
+    const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
+    try {
+      ledger.applyRequest('r-create', {
+        kind: 'create',
+        id: 'card-1',
+        input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
+      })
+      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      const dir = ledger.state().tasks[0].git!.worktreePath!
+      expect(existsSync(dir)).toBe(true)
+      // The clarification round has to be settled: a card with an open
+      // execution is never deletable.
+      ledger.settle('card-1', ledger.state().tasks[0].executions[0].id, 'succeeded')
+
+      ledger.applyRequest('r-delete', { kind: 'delete', taskId: 'card-1' })
+      expect(ledger.state().tasks).toEqual([])
+      // The directory is only ever referenced by this card; the branch and its
+      // commits stay in the repository.
+      expect(existsSync(dir)).toBe(false)
+      expect(git(repo, ['branch', '--list', 'task/fix-login-card1'])).toContain('task/fix-login-card1')
+    } finally {
+      ledger.dispose()
+    }
+  })
+
   it('opens a branch when a card is started without the todo pull', () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })

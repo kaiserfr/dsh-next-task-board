@@ -188,6 +188,9 @@ holding uncommitted card work:
   branch, the commits and the review stamp all live on in the repository. A
   worktree git refuses to remove (untracked build artifacts) is left alone and
   never fails the accept.
+* **Deleting** a card releases its worktree too: nothing else points at the
+  directory. Archiving does not — a restored card has to find its checkout
+  again (and falls back to the main checkout when it is gone).
 * The card's `TaskGit` records `committedAt` (the instant of the last commit, not
   shown in the UI) next to `mergedAt`.
 

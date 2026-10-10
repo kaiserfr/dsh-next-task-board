@@ -267,6 +267,15 @@ export class GitWorkflow {
   }
 
   /**
+   * Drop a card's worktree because the card itself is gone (deleted from the
+   * board): nothing points at the directory any more, so it is not kept around.
+   * A git that refuses (untracked build artifacts, a lock) only logs.
+   */
+  releaseWorktree(task: TaskRecord): void {
+    if (task.git !== undefined) this.removeWorktree(task.git)
+  }
+
+  /**
    * Drop the card's worktree after its branch was merged: the directory was
    * disposal-only from the start (the branch, the commits and the review stamp
    * all survive in the repository). A worktree git refuses to remove — untracked

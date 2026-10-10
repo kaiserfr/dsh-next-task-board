@@ -900,6 +900,9 @@ export class HostTaskLedger {
           const task = this.document.tasks.find(task => task.id === action.taskId)
           if (task === undefined) throw new Error('task not found')
           if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
+          // The card's worktree is only ever referenced by this card, so deleting
+          // the card releases it (the branch and its commits stay in the repo).
+          this.git?.releaseWorktree(task)
         }
         this.document.tasks = [...applyDeleteTask(this.document.tasks, undefined, action.taskId).tasks]
         break
