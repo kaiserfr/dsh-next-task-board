@@ -67,7 +67,7 @@ describe('state machine config', () => {
   it('falls back to the shipped machine on an invalid config', () => {
     const { machine, errors } = resolveStateMachine({ states: [] })
     expect(errors).not.toEqual([])
-    expect(machine.canTransition('backlog', 'todo')).toBe(true)
+    expect(machine.canTransition('backlog', 'clarification')).toBe(true)
   })
 
   it('requires an explicit initial state once backlog is not a column', () => {
@@ -113,16 +113,18 @@ describe('transitions are the drag & drop rule', () => {
     expect(defaultMachine.targets('running', 'runner')).toEqual(['ready_for_test', 'failed', 'todo'])
     expect(defaultMachine.canTransition('running', 'ready_for_test', 'runner')).toBe(true)
     expect(defaultMachine.canTransition('running', 'todo', 'runner')).toBe(true)
-    // The clarification step and the two corrected columns reach the run
-    // column: a card in `todo` may be dropped onto "In progress" (the action,
-    // not the status move, starts it), and a reviewed or failed card may be
-    // pulled straight back onto it — a card in `backlog` may not, that drag has
-    // no transition at all.
+    // `todo` and the two corrected columns reach the run column: a card in
+    // `todo` may be dropped onto "In progress" (the action, not the status move,
+    // starts it), and a reviewed or failed card may be pulled straight back onto
+    // it. A card in `backlog` or in the clarification column may not — those
+    // drags have no transition at all.
     expect(defaultMachine.actionsFor('todo', 'running')).toEqual(['run'])
     expect(defaultMachine.actionsFor('ready_for_test', 'running')).toEqual(['run'])
     expect(defaultMachine.actionsFor('failed', 'running')).toEqual(['run'])
     expect(defaultMachine.canTransition('backlog', 'running')).toBe(false)
+    expect(defaultMachine.canTransition('clarification', 'running')).toBe(false)
     expect(defaultMachine.targets('backlog')).not.toContain('running')
+    expect(defaultMachine.targets('clarification')).not.toContain('running')
   })
 
   it('treats a same-state move as no transition', () => {
@@ -132,9 +134,13 @@ describe('transitions are the drag & drop rule', () => {
 
 describe('actions hang off transitions', () => {
   it('fires the git hooks on exactly the workflow transitions', () => {
-    // `clarify` rides the same transition: pulling a card out of the backlog is
-    // its clarification step, not just a branch cut.
-    expect(defaultMachine.actionsFor('backlog', 'todo')).toEqual(['git.openBranch', 'clarify'])
+    // `clarify` rides the same transition: pulling a card out of the backlog
+    // lands it in the clarification column and opens its round, not just a
+    // branch cut. Closing the step is a plain move, and re-opening the questions
+    // from `todo` fires `clarify` again.
+    expect(defaultMachine.actionsFor('backlog', 'clarification')).toEqual(['git.openBranch', 'clarify'])
+    expect(defaultMachine.actionsFor('clarification', 'todo')).toEqual([])
+    expect(defaultMachine.actionsFor('todo', 'clarification')).toEqual(['clarify'])
     // Every manual way into the review column commits, so no run's work waits
     // uncommitted while the card is reviewed.
     expect(defaultMachine.actionsFor('todo', 'ready_for_test')).toEqual(['git.commitBranch'])
@@ -177,7 +183,8 @@ describe('diagram', () => {
   it('names every column and every transition of the machine', () => {
     const diagram = renderStateMachineMermaid(defaultMachine)
     for (const status of ALL_STATUSES) expect(diagram).toContain(status)
-    expect(diagram).toContain('backlog --> todo: manual: openBranch')
+    expect(diagram).toContain('backlog --> clarification: manual: openBranch, clarify')
+    expect(diagram).toContain('clarification --> todo: manual')
     expect(diagram).toContain('todo --> ready_for_test: manual: commitBranch')
     expect(diagram).toContain('ready_for_test --> done: manual: mergeBranch')
     expect(diagram).toContain('running --> ready_for_test, failed, todo: runner')

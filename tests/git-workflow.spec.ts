@@ -205,7 +205,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(ledger.state().tasks[0].status).toBe('backlog')
       expect(ledger.state().tasks[0].git).toBeUndefined()
 
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
       const opened = ledger.state().tasks[0]
       expect(opened.git?.branch).toBe('task/fix-login-card1')
       expect(opened.git?.base).toBe('main')
@@ -247,7 +248,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
           id,
           input: { title: `Fix ${id}`, description: '', prompt: 'p', workspaceId: 'ws-1' },
         })
-        ledger.applyRequest(`r-todo-${id}`, { kind: 'move', taskId: id, status: 'todo' })
+        ledger.applyRequest(`r-todo-${id}`, { kind: 'move', taskId: id, status: 'clarification' })
+        ledger.applyRequest(`r-step-on-${id}`, { kind: 'move', taskId: id, status: 'todo' })
         ledger.applyRequest(`r-approve-${id}`, { kind: 'approve-spec', taskId: id })
         const run = ledger.applyRequest(`r-run-${id}`, { kind: 'run', taskId: id }).run
         writeFileSync(join(repo, `work-${id}.txt`), `${outcome}\n`)
@@ -273,7 +275,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       // Backlog → Todo opens the branch and the clarification round.
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
       const clarification = ledger.state().tasks[0].executions.at(-1)!
       expect(clarification.kind).toBe('clarify')
       writeFileSync(join(repo, 'question-notes.txt'), 'clarification wrote nothing to keep\n')
@@ -316,7 +319,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
       ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       writeFileSync(join(repo, 'feature.txt'), 'agent output\n')
@@ -420,7 +424,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
       // A conflicting commit on main makes the merge refuse.
       writeFileSync(join(repo, 'feature.txt'), 'branch\n')
       git(repo, ['add', '-A'])
@@ -450,7 +455,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
       ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' })
       writeFileSync(join(repo, 'feature.txt'), 'reviewed\n')

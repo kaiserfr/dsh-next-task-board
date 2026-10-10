@@ -47,17 +47,18 @@ export function hasContentPatch(patch: TaskUpdatePatch): boolean {
 
 /**
  * Whether a task's content may still be edited: the task must be on-board (not
- * archived) and must still sit in one of the pre-execution columns `backlog` or
- * `todo`. Fail-closed everywhere else: a running task holds the content its
- * session reads, and once a card moved on to `ready_for_test`/`done`/`failed`
- * its content is the record of what ran.
+ * archived) and must still sit in one of the pre-execution columns `backlog`,
+ * `clarification` or `todo`. Fail-closed everywhere else: a running task holds
+ * the content its session reads, and once a card moved on to
+ * `ready_for_test`/`done`/`failed` its content is the record of what ran.
  *
  * Earlier attempts do NOT lock the card: a task whose run failed (or was
- * cancelled) and was dragged back to `backlog`/`todo` is preparation again and
- * gets the edit form back — including the "Parse with AI" source text.
+ * cancelled) and was dragged back to `backlog`/`clarification`/`todo` is
+ * preparation again and gets the edit form back — including the "Parse with AI"
+ * source text.
  */
 export function canEditTaskContent(task: TaskRecord): boolean {
-  return task.archivedAt === undefined && (task.status === 'backlog' || task.status === 'todo')
+  return task.archivedAt === undefined && (task.status === 'backlog' || task.status === 'clarification' || task.status === 'todo')
 }
 
 /** Keep an unknown permission string from entering the ledger. */

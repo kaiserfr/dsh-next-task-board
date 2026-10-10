@@ -295,11 +295,11 @@ describe('TaskBoardHostService clarification runs', () => {
     await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
 
     // The lane's only slot is held by `busy` (the roster says it is working) —
-    // and the card still starts at once: `todo` never waits for a slot, so the
-    // human gets the questions without waiting for the run to settle. The prompt
-    // is the card's own prompt plus the clarification addendum, and the run
-    // links the card's conversation.
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    // and the card still starts at once: the clarification column never waits
+    // for a slot, so the human gets the questions without waiting for the run to
+    // settle. The prompt is the card's own prompt plus the clarification
+    // addendum, and the run links the card's conversation.
+    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     expect(created).toBe(1)
     expect(prompts[0]?.sessionId).toBe('session-clarify')
@@ -307,7 +307,7 @@ describe('TaskBoardHostService clarification runs', () => {
     expect(prompts[0]?.text).toContain('Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.')
     expect(prompts[0]?.text).toContain('Die Implementierung beginnt erst mit')
     const card = ledger.state().tasks.find(task => task.id === 'card')!
-    expect(card.status).toBe('todo')
+    expect(card.status).toBe('clarification')
     expect(card.clarificationSessionId).toBe('session-clarify')
 
     // The go-ahead closes the clarification round and starts the run, which
@@ -315,6 +315,9 @@ describe('TaskBoardHostService clarification runs', () => {
     // short prompt (plus the completion contract). The *implementation* run is
     // an ordinary run: it needs the lane's slot, which `busy` still holds.
     service.setMaxConcurrentRuns(2)
+    // Out of the clarification column and on to `todo`: that is where the run
+    // column becomes reachable.
+    service.apply('card-through-todo', { kind: 'move', taskId: 'card', status: 'todo' })
     service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(prompts[1]?.sessionId).toBe('session-clarify')
@@ -376,7 +379,8 @@ describe('TaskBoardHostService clarification runs', () => {
     // The round starts at once (WIP-free) and the go-ahead follows before its
     // session could attach; the implementation is an ordinary run, so the busy
     // lane keeps it queued until the limit is raised.
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
+    service.apply('card-through-todo', { kind: 'move', taskId: 'card', status: 'todo' })
     service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(created).toBe(1)
@@ -775,7 +779,7 @@ describe('TaskBoardHostService lane occupancy', () => {
     const service = new TaskBoardHostService(gateway, { ledger, power: new PowerInhibitor({ platform: 'linux' }), now: () => now })
     await poll(service)
 
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     // `busy` still carries an open, session-attached execution — but the roster
     // saw that session at rest, so it is not working and the clarification must
@@ -837,14 +841,16 @@ describe('TaskBoardHostService lane occupancy', () => {
     await poll(service)
 
     // `busy` works in the run column and holds the lane's slot, and the card's
-    // round still starts at once: `todo` is WIP-free.
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    // round still starts at once: the clarification column is WIP-free.
+    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     expect(created()).toBe(1)
     expect(prompts[0]?.text).toContain('Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.')
 
-    // The go-ahead is an implementation run: that one is gated, so it queues
-    // behind the occupant instead of opening a second session.
+    // The go-ahead is an implementation run: the card goes on to `todo` first
+    // (that is where the run column is reachable), and the run queues behind
+    // the occupant instead of opening a second session.
+    service.apply('card-through-todo', { kind: 'move', taskId: 'card', status: 'todo' })
     service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(created()).toBe(1)

@@ -208,6 +208,9 @@ describe('HostTaskLedger done-column limit', () => {
     const { ledger, create, move } = harness(1)
     create('done-card'); create('todo-card')
     move('done-card', 'done')
+    // The card reaches `todo` through the clarification column: `backlog → todo`
+    // is not a transition any more.
+    move('todo-card', 'clarification')
     move('todo-card', 'todo')
     const tasks = ledger.state().tasks
     expect(byId(tasks, 'done-card').archivedAt).toBeUndefined()

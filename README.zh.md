@@ -23,9 +23,9 @@
 | **卡片直达会话** | 卡片只为最近一次执行显示一个会话符号；要查看 transcript 得先打开详情、再找到执行记录。 | **每张带会话的卡片都直接链接到该会话**：卡片角上的链接直接跳到 transcript，运行中（active）与已结束（inactive）的执行都一样，无需打开详情。链接是带 `#session=<id>` 深链的锚点，因此中键 / Ctrl 点击或复制 URL 也能打开会话——本地名录还没有该 id 时会先刷新会话名录，确实未知的会话会明确报错而不是静默失败。 |
 | **运行中卡片与 WIP 顺序** | `running` 列与其他列外观一致，卡片按账本顺序排列。 | **此刻持有会话**的卡片一眼可辨（加粗警告色边框、警告色底、脉冲光环与 “Running now” 徽标）；仍在等待 WIP 名额的卡片保持细边框并标记 “Queued”。该列按队列排序：正在运行的卡片在最上，等待中的运行按到达顺序排列——最后拖入的卡片在最下面。 |
 | **暂停运行中的任务** | 运行中的卡片只能在聊天界面里取消会话；卡片随后按结果落到对应列。 | **运行中可暂停/继续**：看板顶栏按钮**一次点击暂停「进行中」列的全部卡片**（每张卡片保留所在列与执行记录），运行打开时卡片角上是暂停符号、暂停后是播放符号，详情页的执行按钮就是同一个控件。暂停会停止该运行的会话，该运行不再算「正在运行」（不再被监控、不占 WIP 名额）；继续时在同一会话里写入一条简短的 **「继续」消息** —— 卡片全程不换列。只剩已暂停卡片时，批量按钮变为「全部继续」。 |
-| **看板流程** | 五列；新任务落在 `todo`。 | **面向 agentic programming 的默认值**：六列，**待测试（Ready for test）** 紧邻 Failed 之前，**Done** 为最后一列；新任务落在 **Backlog**；执行成功后卡片停在 Ready for test，Done 只能手动到达。 |
+| **看板流程** | 五列；新任务落在 `todo`。 | **面向 agentic programming 的默认值**：七列——**Backlog → 澄清（Clarification）→ Todo → In progress → 待测试（Ready for test）→ Failed → Done**，**待测试**紧邻 Failed 之前，**Done** 为最后一列；新任务落在 **Backlog**；执行成功后卡片停在 Ready for test，Done 只能手动到达。 |
 | **状态机** | 列与允许的移动写死在代码里。 | **可配置状态机** `stateMachine`：列即任务状态，`transitions` 声明存在哪些转移，每个转移带自己的 `actions`（`git.openBranch`、`git.commitBranch`、`git.mergeBranch`、`run`、`clarify`、`stamp`）。未声明的 `move` 一律被 Host 拒绝，且 Host 把已解析的状态机随快照下发给浏览器，拖放校验与实际执行完全一致。详见 [`docs/state-machine.md`](docs/state-machine.md)。 |
-| **开工前先澄清** | 任务直接开始实现，不清楚的地方在运行中才暴露。 | **澄清步骤**：`backlog → todo` 会为每张卡片启动它的运行（动作 `clarify`）——与拖到运行列完全相同：同一条启动队列，但**不占 lane WIP 名额**（Todo 无 WIP 限制，因此立即启动并挂上会话，同样可暂停/继续），唯一区别是 Prompt：卡片正常 Prompt 加上澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」。**开放问题由 agent 在那条会话里提出**，用户在聊天里回答，agent 问完就停；卡片留在 Todo，卡片上**没有让用户填写问题的字段**。把卡片拖到 In progress（或点运行按钮）就是放行：关闭尚未结算的澄清运行，并在同一会话里补一句「Bitte jetzt implementieren.」。从 Backlog 直接拖到 In progress 没有任何转移，一律拒绝。 |
+| **开工前先澄清** | 任务直接开始实现，不清楚的地方在运行中才暴露。 | **澄清列**：`backlog → clarification` 会为每张卡片在澄清列启动它的运行（动作 `clarify`）——与拖到运行列完全相同：同一条启动队列，但**不占 lane WIP 名额**（澄清列无 WIP 限制，因此立即启动并挂上会话，同样可暂停/继续），唯一区别是 Prompt：卡片正常 Prompt 加上澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」。**开放问题由 agent 在那条会话里提出**，用户在聊天里回答，agent 问完就停；卡片留在澄清列，卡片上**没有让用户填写问题的字段**。把卡片拖到 **Todo** 结束这一步（`todo → clarification` 可重新进入同一条会话）。把卡片拖到 In progress（或点运行按钮）就是放行：关闭尚未结算的澄清运行，并在同一会话里补一句「Bitte jetzt implementieren.」——前提是规格已放行。从 Backlog 或澄清列直接拖到 In progress 都没有任何转移，一律拒绝。 |
 | **等待回答** | agent 提问过的卡片和别的卡片长得一样，要打开会话读聊天才知道它在等。 | **卡片自己说明它在等，并跳转到问题**：只要卡片的会话里存在 agent 提出后停下等待的问题，卡片左上角就出现一个问号锚点。问题出现它就出现，问题被回答它就消失（Host 按 5 秒轮询重读会话）；点它直接跳到那条会话——问题卡片就在该会话的输入区，或提问的聊天就在眼前。深链与会话锚点相同（`#session=<id>`）。 |
 | **完工上报** | 运行结束后要到会话彻底静止才离开 `running`；若会话一直保持「运行中」，卡片看起来永远在忙，只有手动暂停才能推进。 | **运行自己上报完工，是否移动由会话决定**：agent 最后一次回答以独立一行 `FERTIG: <简短总结>` 结束，这一行是给聊天里的人看的。卡片只有在会话**确实结束**后（没有在跑的 turn、没有排队消息、没有在跑的后台 job）才进入 **Ready for test**；只要名册还把这个会话记为 running，卡片就留在「进行中」，聊天里写没写那行都一样。 |
 | **Git 集成** | 无。 | 卡片钉住的工作区若是本地 git 仓库：**进入 Todo 时开 `task/<slug>-<id8>` 分支，运行时检出该分支，卡片一进入 Ready for test 就提交（每次运行结算都提交），进入 Done 时把分支合并回基线分支**——工作区里不会留下未提交的卡片工作（没有仓库时全部为 no-op）。 |
@@ -76,14 +76,14 @@
 
 ### Agentic-programming 流程与 Git 集成
 
-- 列顺序：`backlog → todo → running → ready_for_test → failed → done`。
-- 新任务创建在 **Backlog**。把卡片拖进 **Todo** 就是澄清步骤，并在那里启动卡片的运行——与拖到运行列启动的是同一种执行（同一条启动队列、同样有会话链接与暂停控件，但不占 WIP 名额，因此立即启动），只有 Prompt 不同：让 agent 先问清它需要知道的东西，然后停下（见下节）。
-- 卡片靠**人工启动**（拖拽或运行按钮）进入 **In progress**：该动作同时关闭卡片尚未结算的澄清运行，并在那条会话里继续实现。从 Backlog 直接拖到 In progress 没有任何转移，一律拒绝。
+- 列顺序：`backlog → clarification → todo → running → ready_for_test → failed → done`。
+- 新任务创建在 **Backlog**。把卡片拖进 **澄清（Clarification）** 就是澄清步骤，并在那里启动卡片的运行——与拖到运行列启动的是同一种执行（同一条启动队列、同样有会话链接与暂停控件，但不占 WIP 名额，因此立即启动），只有 Prompt 不同：让 agent 先问清它需要知道的东西，然后停下（见下节）。问完后人工把卡片拖到 **Todo**（或退回 Backlog）。
+- 卡片靠**人工启动**（拖拽或运行按钮）进入 **In progress**：该动作同时关闭卡片尚未结算的澄清运行，并在那条会话里继续实现。从 Backlog 或澄清列直接拖到 In progress 没有任何转移，一律拒绝；规格未放行时手动运行也会被拒绝（见下）。
 - **规格放行闸门**：在人工放行规格（详情页的「放行规格」按钮，Host 动作 `approve-spec` → `specApprovedAt`）之前，Host 拒绝**所有**实现运行路径（拖到运行列、运行按钮、`rerun`），报 `spec-approval-required`；cron 跳过该卡并滚动到下一个触发点；澄清运行不受影响（提问正是放行前要做的事）。修改内容（标题、描述、Prompt 或解析源文本）会清除该印记，导入也不会携带它。详见 [`docs/state-machine.md`](docs/state-machine.md#specification-release-the-gate-in-front-of-every-run)。
 - 执行成功把卡片停在 **Ready for test**（失败则进入 Failed）；runner 不会产生 `done`，验收永远是人工动作。
 - 这个停靠是**会话结束的结论**：Host 会等到该执行所属会话真正停下来——最新一轮 turn 已结束、名册显示会话空闲、它的 prompt 收件箱为空、且没有仍在运行的后台 job——才移动卡片。单个 turn 边界从不单独触发停靠，因为会话会把每个排队 prompt、每次 job 唤醒都当作新的一轮继续跑。只有以 `completed` 收尾的 turn 才算成功：被用户中止、撞上模型 token 上限、被 interrupt 或报错的运行会带着原因进入 Failed，未完成的运行因此永远不会显示为可测试。会话仍在工作时，卡片保持 **In progress**。
 - 卡片钉住的工作区是 git worktree 时，Host 在后台把工作留在 feature 分支上：
-  - Backlog → Todo 开 `task/<标题slug>-<id8>`，从当前分支切出（若 HEAD 已在看板分支上则以 `main`/`master` 为基线，避免第二张卡叠在第一张上）。
+  - Backlog → 澄清 开 `task/<标题slug>-<id8>`，从当前分支切出（若 HEAD 已在看板分支上则以 `main`/`master` 为基线，避免第二张卡叠在第一张上）。
   - 每次运行前检出该分支，即「In progress」在该分支上工作；若启动跳过了 Todo（cron 或详情页运行按钮），则在启动时补开分支。
   - **进入 Ready for test 即提交**：`git.commitBranch` 动作覆盖所有人工进入该列的转移，Runner 自己的结算（`running → ready_for_test`）走同一个 git 助手（结算不触发任何可配置动作）。`git add -A` 把整个工作区提交为 `task: <标题>`（工作区干净则不产生空提交），卡片 git 状态记下 `committedAt`；没有分支的卡片先补开分支。
   - **审阅绑定到它看到的那次提交**：停靠时同时把分支 HEAD 记为卡片的 `reviewedCommit`。
@@ -91,14 +91,15 @@
   - **Ready for test → Done 只合并这次提交**（`--no-ff`），否则一律拒绝：工作区仍有未提交改动、分支已经越过 `reviewedCommit`、或卡片根本没有该印记（在这个闸门之前停靠的卡片，或自定义状态机没把 `git.commitBranch` 挂上进入审阅列的转移），卡片都会留在 Ready for test 并显示 Host 给出的原因。合并时的「安全网提交」已删除——它正是未审阅工作进入基线分支的通道。再次停靠会把批准绑定到新的 HEAD，因此复核后续工作的路径是：Ready for test → To do、在卡片聊天里写修正、下一轮运行、再次停靠。那里的 git 失败（如合并冲突）同样让这次移动失败。
 - 边界：git 需要钉住工作区（没有 pin 就无法知道指哪个仓库）；每个工作区各有自己的 worktree，且按 lane 计数的 WIP 上限保证同一工作区的两个**实现**运行不会共用检出——不同工作区并行是安全的。澄清运行可以与工作中的运行同时进行，但它不检出任何分支、也不实现任何东西，检出始终归那条运行所有。
 
-### Todo 里的澄清步骤
+### 澄清列（Clarification）
 
-- 把卡片从 Backlog 拖进 **Todo** 会在那里**启动卡片的运行**——与拖到运行列启动的是同一种执行：走同一条启动队列，但**不受按工作区计的 WIP 上限约束**：Todo 无 WIP 限制，因此即使同一工作区已有卡片在实现，该运行也立即启动（拿到会话后显示**正在运行**，卡片角上带会话链接），由 Host 照常监控与结算，也带同样的暂停/播放控件。卡片**留在 Todo**——该运行结算永远不改列，也不会把卡片打到 `ready_for_test`/`failed`。
+- 把卡片从 Backlog 拖进**澄清列**会在那里**启动卡片的运行**——与拖到运行列启动的是同一种执行：走同一条启动队列，但**不受按工作区计的 WIP 上限约束**：澄清列无 WIP 限制，因此即使同一工作区已有卡片在实现，该运行也立即启动（拿到会话后显示**正在运行**，卡片角上带会话链接），由 Host 照常监控与结算，也带同样的暂停/播放控件。卡片**留在澄清列**——该运行结算永远不改列，也不会把卡片打到 `ready_for_test`/`failed`。
+- **由人工关上这一步**：问题问完后拖到 **Todo**（`clarification → todo`），不满意则退回 Backlog；`todo → clarification` 会再次触发 `clarify` 并重新进入**同一条**会话。
 - 它的 Prompt 是卡片正常 Prompt 加上澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」。
 - **问题是 agent 的**：它在卡片的聊天里提问，用户在聊天里回答，agent 问完就结束本轮。卡片上**故意没有**问题输入字段——那个清单属于用户，而需要澄清的是 agent 还不知道的东西。
 - **停止规则覆盖后续每一轮**：看板的系统提示段落里有一条澄清会话停止规则，以该块首行为触发（`CLARIFICATION_ADDENDUM` 常量），且**每一轮都会重新下发**：判定为澄清会话时 agent 什么都不实现——每次回答后要么提出下一个问题并停下，要么在问完后停下。提示词与规则来自同一个常量，不会各自漂移。
 - **把卡片拖到运行列（或点运行按钮）就是放行**：Host 关闭尚未结算的澄清运行，并在同一会话里只补一句「Bitte jetzt implementieren.」——Agent 的上下文里已经有卡片 Prompt、它提出的问题和答案。若放行时该澄清运行仍在启动过程中，它同样会被关闭：迟到的会话被停掉而不是被挂上，因此一张卡片始终只有一条未结算运行和一条会话。
-- `backlog → running` 根本没有转移，因此无法用拖拽跳过澄清步骤。
+- `backlog → running` 与 `clarification → running` 都没有转移，因此无法用拖拽跳过澄清步骤与 Todo。
 - 之后的执行**延续澄清会话**（`clarificationSessionId`），不再新建对话：答案已在它的上下文里；再次经过该步骤也只是重进这条会话。该会话不存在或正忙时，运行与可选会话复用一样退化为新建会话。
 
 ### 卡片显示「等待回答」
@@ -126,8 +127,8 @@
 
 ## 功能
 
-- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供六列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。新任务落在 Backlog，卡片可在 Backlog、Todo、Ready for test、Done 之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页「运行」按钮相同的宿主动作，真正启动该任务**（本分支新增）**。最近一次执行带会话的卡片，角上还有一个直达会话的链接，对运行中与已结束的会话都可用**（本分支新增）**。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
-- **开工前的澄清步骤（本分支新增）**：把卡片拖进 Todo 会在那里启动卡片的运行——与 In progress 用同一条启动队列，但不占 WIP 名额（Todo 无 WIP 限制），因此立即启动、同样可暂停——Prompt 是卡片 Prompt 加澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」，并由系统提示里的停止规则保证每次回答后依然生效。Agent 在那条聊天里提出自己的开放问题，用户在那里回答（卡片上没有问题输入字段）；再拖到 In progress（或点运行按钮）即关闭该轮，并在同一会话里补一句「Bitte jetzt implementieren.」。详见[Todo 里的澄清步骤](#todo-里的澄清步骤)。
+- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供七列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。新任务落在 Backlog，卡片可在 Backlog、Todo、Ready for test、Done 之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页「运行」按钮相同的宿主动作，真正启动该任务**（本分支新增）**。最近一次执行带会话的卡片，角上还有一个直达会话的链接，对运行中与已结束的会话都可用**（本分支新增）**。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
+- **开工前的澄清列（本分支新增）**：把卡片拖进澄清列会在那里启动卡片的运行——与 In progress 用同一条启动队列，但不占 WIP 名额（澄清列无 WIP 限制），因此立即启动、同样可暂停——Prompt 是卡片 Prompt 加澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」，并由系统提示里的停止规则保证每次回答后依然生效。Agent 在那条聊天里提出自己的开放问题，用户在那里回答（卡片上没有问题输入字段）；拖到 **Todo** 结束这一步（`todo → clarification` 会重新进入同一条会话），再拖到 In progress（或点运行按钮）即关闭该轮，并在同一会话里补一句「Bitte jetzt implementieren.」（需先放行规格）。详见[澄清列](#澄清列clarification)。
 - **Host 侧按工作区计的 WIP 并发上限（本分支新增）**：同一工作区同一时间最多 `maxConcurrentRuns` 个任务运行持有会话（默认 `1`）；该工作区其余手动与 cron 运行进入 FIFO 队列，在名额空出后按先来后到启动；不同工作区互不影响、可并行。名额从会话挂上起一直占到该执行结算或卡片暂停为止，空闲会话不释放名额；Todo 里的澄清运行完全不占名额，拖进即启动**（本分支新增）**。详见[本分支相对上游的增强](#本分支相对上游的增强)。
 - **运行自行上报完工（本分支新增）**：实现运行在最后一次回答里以独立一行 `FERTIG: <总结>` 上报完工，这一行供人阅读；Host 只有在会话本身结束之后才结算该运行并把卡片移到 Ready for test——名册仍记为 running 的会话会挡住这次移动。详见[运行自己上报完工](#运行自己上报完工)。
 - **Host 侧 Done 列上限（本分支新增）**：`done` 列最多 `maxDoneTasks` 张卡片（默认 `9`）；移入 Done 超出上限时按进入顺序归档最早的卡片（FIFO），只归档所需张数，不删除，可在归档视图恢复；应用上限时也会立即收敛已超限的列。详见[本分支相对上游的增强](#本分支相对上游的增强)。

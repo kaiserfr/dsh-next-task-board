@@ -537,7 +537,7 @@ export class HostTaskLedger {
       if (task.archivedAt !== undefined || task.pausedAt !== undefined) continue
       const latest = task.executions[task.executions.length - 1]
       const open = latest !== undefined && latest.endedAt === undefined
-      const clarifying = task.status === 'todo' && task.clarificationSessionId !== undefined
+      const clarifying = task.status === 'clarification' && task.clarificationSessionId !== undefined
       if (!open && !clarifying) continue
       // The card's own jump target: the newest execution's conversation, and the
       // clarification conversation of a card that only ever had that one.
@@ -935,10 +935,11 @@ export class HostTaskLedger {
         // card's clarification run — the same execution the run column starts
         // (it goes through the launch queue, but not the lane's WIP limit: the
         // card starts right away and links its session), only its prompt asks
-        // first and stops. The card keeps `todo`: the human pulls it on to the
-        // run column afterwards, which continues this very session. A card that
-        // already has a clarification conversation re-enters it instead, so a
-        // round trip through the backlog never mints a second session.
+        // first and stops. The card keeps the clarification column: the human
+        // answers in the chat and pulls it on to `todo` (or re-opens the
+        // questions from `todo`), and the implementation continues this very
+        // session. A card that already has a clarification conversation
+        // re-enters it instead, so a round trip never mints a second session.
         if (actions.includes('clarify') && !hasOpenExecution(task)) {
           const opened = startExecution(next, now, crypto.randomUUID(), initiator, 'clarify')
           next = opened.task
@@ -988,8 +989,12 @@ export class HostTaskLedger {
           const transition = this.machine.transition(task.status, action.status, 'manual')
           if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → ${action.status}`)
           // A batch never opens executions: the runner owns the single run
-          // slot and the board routes the run column through `rerun`.
+          // slot and the board routes the run column through `rerun`. The
+          // clarification round is an execution too, so a group drop may not
+          // land on a transition that opens one — a batch-parked card would
+          // otherwise sit in the clarification column without its round.
           if ((transition.actions ?? []).includes('run')) throw new Error('batch move cannot start executions')
+          if ((transition.actions ?? []).includes('clarify')) throw new Error('batch move cannot start the clarification round')
           return { task, transition }
         })
         const moved = new Map<string, TaskRecord>()

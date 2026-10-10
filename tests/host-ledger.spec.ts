@@ -247,14 +247,14 @@ describe('HostTaskLedger', () => {
     ledger.applyRequest('create', {
       kind: 'create', id: 'task-q', input: { title: 'Q', description: '', prompt: '' },
     })
-    ledger.applyRequest('to-todo', { kind: 'move', taskId: 'task-q', status: 'todo' })
+    ledger.applyRequest('to-todo', { kind: 'move', taskId: 'task-q', status: 'clarification' })
     ledger.dispose()
     // The Host died between opening the clarification run and recording its
-    // session: the dead start is cancelled and the card stays in `todo`.
+    // session: the dead start is cancelled and the card stays in its column.
     const restarted = new HostTaskLedger(root, () => NOW + 1000)
     const task = restarted.state().tasks[0]
     expect(task.executions[0].result).toBe('cancelled')
-    expect(task.status).toBe('todo')
+    expect(task.status).toBe('clarification')
     expect(restarted.runtimeView().openExecutions).toEqual([])
     restarted.dispose()
   })
@@ -805,13 +805,16 @@ describe('HostTaskLedger state machine', () => {
     ledger.dispose()
   })
 
-  it('applies a machine change and falls back to the machine in force when it is invalid', () => {
+  it('falls back to the built-in machine when the new config is invalid', () => {
     const ledger = seeded({ stateMachine: machine })
     expect(ledger.setStateMachine({ states: [] })).toEqual(['stateMachine.states: expected a non-empty array'])
-    // The invalid config changed nothing: the custom machine is still enforced.
-    expect(() => ledger.applyRequest('still-custom', { kind: 'move', taskId: 'card', status: 'backlog' }))
-      .toThrow('invalid state transition')
-    expect(ledger.applyRequest('custom-run', { kind: 'move', taskId: 'card', status: 'todo' }).state.tasks[0].status).toBe('todo')
+    // `resolveStateMachine` hands back the built-in machine for a refused
+    // config, so the custom `backlog → todo` is gone and the built-in moves
+    // apply instead.
+    expect(() => ledger.applyRequest('custom-run', { kind: 'move', taskId: 'card', status: 'todo' }))
+      .toThrow('invalid state transition: backlog → todo')
+    expect(ledger.applyRequest('built-in-clarify', { kind: 'move', taskId: 'card', status: 'clarification' }).state.tasks[0].status)
+      .toBe('clarification')
     ledger.dispose()
   })
 })
@@ -998,13 +1001,17 @@ describe('HostTaskLedger group move (move-many)', () => {
   it('refuses a batch whose transition opens an execution', () => {
     const ledger = seeded(['a'])
     // The run column is only reachable from `todo` (a backlog card has no such
-    // transition), so the batch starts from the clarification step.
+    // transition), and the clarification column itself may not be a batch
+    // target either: a batch would leave the card there without its round.
+    expect(() => ledger.applyRequest('batch-clarify', { kind: 'move-many', taskIds: ['a'], status: 'clarification' }))
+      .toThrow('batch move cannot start the clarification round')
+    ledger.applyRequest('to-clarify', { kind: 'move', taskId: 'a', status: 'clarification' })
     ledger.applyRequest('to-todo', { kind: 'move', taskId: 'a', status: 'todo' })
     expect(() => ledger.applyRequest('batch-run', { kind: 'move-many', taskIds: ['a'], status: 'running' }))
       .toThrow('batch move cannot start executions')
     expect(ledger.state().tasks[0].status).toBe('todo')
-    // Only the todo step's own clarification execution exists: the refused
-    // batch added none.
+    // Only the clarification step's own execution exists: the refused batches
+    // added none.
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
     expect(ledger.state().tasks[0].executions[0].kind).toBe('clarify')
     ledger.dispose()
@@ -1013,9 +1020,9 @@ describe('HostTaskLedger group move (move-many)', () => {
   it('rejects an unknown card and an archived card without moving the rest', () => {
     const ledger = seeded(['a', 'b'])
     ledger.applyRequest('archive-b', { kind: 'archive', taskId: 'b' })
-    expect(() => ledger.applyRequest('batch-unknown', { kind: 'move-many', taskIds: ['a', 'nope'], status: 'todo' }))
+    expect(() => ledger.applyRequest('batch-unknown', { kind: 'move-many', taskIds: ['a', 'nope'], status: 'ready_for_test' }))
       .toThrow('task not found: nope')
-    expect(() => ledger.applyRequest('batch-archived', { kind: 'move-many', taskIds: ['a', 'b'], status: 'todo' }))
+    expect(() => ledger.applyRequest('batch-archived', { kind: 'move-many', taskIds: ['a', 'b'], status: 'ready_for_test' }))
       .toThrow('archived task is read-only')
     expect(statusOf(ledger)).toEqual([['a', 'backlog'], ['b', 'backlog']])
     ledger.dispose()

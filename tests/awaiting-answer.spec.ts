@@ -172,15 +172,15 @@ describe('HostTaskLedger.awaitingAnswerWatch', () => {
     return ledger
   }
 
-  it('follows an open run and a todo card that ran its clarification round', () => {
+  it('follows an open run and a clarification card that ran its round', () => {
     const base = createTask({ title: 'A', description: '', prompt: '' }, 1_000, 'task-a')
     const running = startExecution(base, 1_100, 'run-1')
     const attached: TaskRecord = { ...running.task, executions: running.task.executions.map(execution => ({ ...execution, sessionId: 'session-run' })) }
     expect(ledgerWith(attached).awaitingAnswerWatch()).toEqual([{ taskId: 'task-a', sessionId: 'session-run' }])
 
-    const clarify = startExecution({ ...base, status: 'todo' }, 1_100, 'clarify-1', undefined, 'clarify')
+    const clarify = startExecution({ ...base, status: 'clarification' }, 1_100, 'clarify-1', undefined, 'clarify')
     const settled = settleExecution({ ...clarify.task, clarificationSessionId: 'session-clarify' }, 'clarify-1', 'succeeded', 1_200, undefined)
-    expect(settled.status).toBe('todo')
+    expect(settled.status).toBe('clarification')
     expect(ledgerWith(settled).awaitingAnswerWatch()).toEqual([{ taskId: 'task-a', sessionId: 'session-clarify' }])
   })
 
@@ -200,10 +200,10 @@ describe('HostTaskLedger.awaitingAnswerWatch', () => {
 })
 
 describe('TaskBoardHostService publishes waiting questions', () => {
-  /** A todo card whose clarification round asked and settled, session attached. */
+  /** A clarification card whose round asked and settled, session attached. */
   function clarifyingCard(): TaskRecord {
     const base = createTask({ title: 'A', description: '', prompt: '' }, 1_000, 'task-a')
-    const clarify = startExecution({ ...base, status: 'todo' }, 1_100, 'clarify-1', undefined, 'clarify')
+    const clarify = startExecution({ ...base, status: 'clarification' }, 1_100, 'clarify-1', undefined, 'clarify')
     return settleExecution({ ...clarify.task, clarificationSessionId: 'session-clarify' }, 'clarify-1', 'succeeded', 1_200, undefined)
   }
 

@@ -168,7 +168,9 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     )
     await act(async () => { root.render(<TaskBoard controller={controller} />) })
 
-    const todoColumn = container.querySelector('section[data-status="todo"]')
+    // A backlog card's first stop is the clarification column: the machine has
+    // no `backlog → todo` transition any more.
+    const todoColumn = container.querySelector('section[data-status="clarification"]')
     expect(todoColumn).not.toBeNull()
 
     // Simulate drag and drop
@@ -185,7 +187,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
       )
     })
 
-    expect(moveCalls).toEqual([{ id: 't-backlog', status: 'todo' }])
+    expect(moveCalls).toEqual([{ id: 't-backlog', status: 'clarification' }])
   })
 
   it('renders Ready for test directly before Failed, with Done last', async () => {
@@ -199,7 +201,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
       .map(column => column.getAttribute('data-status'))
     // The full default column order: the swap moved `failed` in front of
     // `done`, every other column kept its slot, and none is lost or doubled.
-    expect(statuses).toEqual(['backlog', 'todo', 'running', 'ready_for_test', 'failed', 'done'])
+    expect(statuses).toEqual(['backlog', 'clarification', 'todo', 'running', 'ready_for_test', 'failed', 'done'])
   })
 
   it('drops a ready_for_test card onto the done column and triggers controller.moveTask', async () => {
@@ -767,7 +769,10 @@ describe('TaskBoard multi-selection and group drag', () => {
     expect(JSON.parse(dataTransfer.data[BATCH_DRAG_MIME]!)).toEqual(['t-a', 't-b'])
     expect(board.container.querySelector('[data-dsh-part="drag-count"]')?.textContent).toContain('2')
 
-    await drop(board.column('todo'), dataTransfer)
+    // A plain target for the whole batch: the clarification column is refused
+    // for a group drop (it would open a round per card), so the batch goes to
+    // the review column, whose transition only carries the commit hook.
+    await drop(board.column('ready_for_test'), dataTransfer)
     expect(batches).toEqual([['t-a', 't-b']])
     expect(singles).toEqual([])
     // A successful move ends the selection and the drag marker.

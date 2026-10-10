@@ -252,6 +252,7 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 }
 
 .statusDot[data-status='backlog'] { background: var(--dsw-alias-label-tertiary); }
+.statusDot[data-status='clarification'] { background: var(--dsw-alias-state-business-secondary); }
 .statusDot[data-status='todo'] { background: var(--dsw-alias-state-business-primary); }
 .statusDot[data-status='running'] { background: var(--dsw-alias-state-warn-primary); }
 .statusDot[data-status='ready_for_test'] { background: var(--dsw-alias-state-warn-secondary); }
@@ -891,6 +892,11 @@ textarea.input::-webkit-resizer {
   border-radius: 999px;
   border: 1px solid var(--dsw-alias-border-l2);
   color: var(--dsw-alias-label-secondary);
+}
+
+.statusBadge[data-status='clarification'] {
+  color: var(--dsw-alias-state-business-secondary);
+  border-color: var(--dsw-alias-state-business-secondary);
 }
 
 .statusBadge[data-status='running'] {

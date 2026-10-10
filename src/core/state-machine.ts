@@ -23,11 +23,11 @@
  */
 
 /** Task lifecycle status. The closed union is stable; the machine says which are columns. */
-export type TaskStatus = 'backlog' | 'todo' | 'running' | 'ready_for_test' | 'done' | 'failed'
+export type TaskStatus = 'backlog' | 'clarification' | 'todo' | 'running' | 'ready_for_test' | 'done' | 'failed'
 
 /** Every status the ledger knows, independent of any machine configuration. */
 export const ALL_STATUSES: readonly TaskStatus[] = [
-  'backlog', 'todo', 'running', 'ready_for_test', 'done', 'failed',
+  'backlog', 'clarification', 'todo', 'running', 'ready_for_test', 'done', 'failed',
 ]
 
 /** Brand an unknown string as a status; undefined when it is not one. */
@@ -53,8 +53,8 @@ const TRIGGERS: readonly StateTrigger[] = ['manual', 'runner', 'cron']
  * - `'run'`              — open an execution for the card (see the ledger).
  * - `'clarify'`          — start the card's clarification run: the same
  *                          execution as `run` (same queue, but WIP-free — the
- *                          `todo` column waits for no lane slot), yet it checks
- *                          no branch out, its prompt asks the agent's open
+ *                          clarification column waits for no lane slot), yet it
+ *                          checks no branch out, its prompt asks the agent's open
  *                          questions in the card's chat and stops, and settling
  *                          it keeps the card's column.
  * - `{ kind: 'stamp', field: 'doneAt' }` — write a timestamped task field.
@@ -114,26 +114,32 @@ function manual(from: TaskStatus, to: TaskStatus, actions?: StateAction[]): Stat
  * hardcoded board implemented:
  *
  * - new cards land in `backlog`; a human pulls them in
- * - `backlog → todo` opens the feature branch and is the card's clarification
- *   step: every card gets its clarification run there — the run column's
- *   execution (same queue, same session link, but WIP-free, so it starts at
- *   once) whose prompt asks the open questions first and stops. It stays in
- *   `todo`, reads as Running on the board and settles without moving the card
- *   (`clarify`)
+ * - `backlog → clarification` opens the feature branch and is the card's
+ *   clarification step: the run column's execution (same queue, same session
+ *   link, but WIP-free, so it starts at once) whose prompt asks the open
+ *   questions first and stops. The card stays in `clarification`, reads as
+ *   Running on the board and settles without moving (`clarify`). The human
+ *   answers in the card's chat, and the card is pulled on to `todo` when the
+ *   questions are settled — a drag the machine validates like any other move.
+ *   `todo → clarification` re-opens that same conversation, so a card whose
+ *   questions resurface never mints a second chat.
  * - `running` is the runner's own state: it is entered by a run and left by
  *   that run settling (success → `ready_for_test`, failure → `failed`),
  *   never by a drag
  * - every manual move into `ready_for_test` commits the worktree onto the
  *   card's feature branch (`git.commitBranch`), and the runner's own settle
- *   does the same, so no run's work is ever left uncommitted in the worktree
- * - `ready_for_test → done` merges the feature branch back (committing any
- *   leftover as a safety net)
+ *   does the same, so no run's work is ever left uncommitted in the worktree.
+ *   Reaching `ready_for_test` also stamps the reviewed commit the merge gate is
+ *   bound to
+ * - `ready_for_test → done` merges that reviewed commit back (and refuses when
+ *   the branch moved on since)
  * - `ready_for_test → running` and `failed → running` pull the card onto the
  *   run column from there: the run continues the card's conversation, so a
  *   correction the human typed into that chat is already in context
  * - every manual → manual move is allowed, as before — except a drag straight
- *   from `backlog` to `running`, which has no transition at all: the card has
- *   to pass the clarification step in `todo` first
+ *   from `backlog` to `running` and from `clarification` to `running`, which
+ *   have no transition at all: the card has to pass the clarification step and
+ *   `todo` first
  * - the `run` transition is the go-ahead: starting the work closes the card's
  *   open clarification round and continues the very session the questions were
  *   asked and answered in.
@@ -145,6 +151,7 @@ export const DEFAULT_STATE_MACHINE: StateMachineConfig = {
   initial: 'backlog',
   states: [
     { status: 'backlog' },
+    { status: 'clarification' },
     { status: 'todo' },
     { status: 'running', drop: false },
     { status: 'ready_for_test' },
@@ -152,13 +159,22 @@ export const DEFAULT_STATE_MACHINE: StateMachineConfig = {
     { status: 'done' },
   ],
   transitions: [
-    manual('backlog', 'todo', ['git.openBranch', 'clarify']),
+    manual('backlog', 'clarification', ['git.openBranch', 'clarify']),
     // Every way into the review column commits: the work stays on the card's
     // feature branch from the moment it is parked, so the worktree is clean
     // while the human reviews and while the next card uses the same worktree.
     manual('backlog', 'ready_for_test', ['git.commitBranch']),
     manual('backlog', 'done'),
     manual('backlog', 'failed'),
+    // Out of the clarification column: the human answered the questions and
+    // pulls the card on to `todo`, or back to the backlog. Re-opening the
+    // questions (from `todo`) re-enters the card's one clarification session.
+    manual('clarification', 'todo'),
+    manual('clarification', 'backlog'),
+    manual('clarification', 'ready_for_test', ['git.commitBranch']),
+    manual('clarification', 'done'),
+    manual('clarification', 'failed'),
+    manual('todo', 'clarification', ['clarify']),
     manual('todo', 'backlog'),
     manual('todo', 'ready_for_test', ['git.commitBranch']),
     manual('todo', 'done'),
@@ -183,10 +199,11 @@ export const DEFAULT_STATE_MACHINE: StateMachineConfig = {
     manual('ready_for_test', 'running', ['run']),
     manual('failed', 'running', ['run']),
     // Dropping a card onto "In progress" starts it (the runner's own entry).
-    // Only `todo` has that transition: a drag straight from `backlog` is
-    // refused (no transition exists), so the clarification step in `todo`
-    // cannot be skipped. The Host fires this through the `run` action, which
-    // closes the card's open clarification round and continues its session.
+    // Only `todo` has that transition: a drag straight from `backlog` or
+    // `clarification` is refused (no transition exists), so the clarification
+    // step and the released specification in `todo` cannot be skipped. The Host
+    // fires this through the `run` action, which closes the card's open
+    // clarification round and continues its session.
     manual('todo', 'running', ['run']),
     { from: 'running', to: 'ready_for_test', trigger: 'runner' },
     { from: 'running', to: 'failed', trigger: 'runner' },

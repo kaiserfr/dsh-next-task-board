@@ -54,9 +54,10 @@ describe('specification release: the Host gate', () => {
     const ledger = seeded()
     expect(() => ledger.applyRequest('run', { kind: 'run', taskId: 'card' })).toThrow(/spec-approval-required/)
     expect(() => ledger.applyRequest('rerun', { kind: 'rerun', taskId: 'card' })).toThrow(/spec-approval-required/)
+    expect(() => ledger.applyRequest('clarify', { kind: 'move', taskId: 'card', status: 'clarification' })).not.toThrow()
     expect(() => ledger.applyRequest('todo', { kind: 'move', taskId: 'card', status: 'todo' })).not.toThrow()
     expect(() => ledger.applyRequest('to-running', { kind: 'move', taskId: 'card', status: 'running' })).toThrow(/spec-approval-required/)
-    // Only the clarification round of the todo move ran; no implementation.
+    // Only the clarification round ran; no implementation.
     expect(ledger.state().tasks[0].executions.map(execution => execution.kind)).toEqual(['clarify'])
     expect(ledger.state().tasks[0].status).toBe('todo')
     ledger.dispose()
@@ -129,7 +130,7 @@ describe('specification release: the Host gate', () => {
   it('allows the clarification round of an unreleased card', () => {
     // Asking the questions is exactly what happens before the release.
     const ledger = seeded()
-    const moved = ledger.applyRequest('todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    const moved = ledger.applyRequest('todo', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(moved.clarification).toBeDefined()
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
     expect(ledger.state().tasks[0].executions[0].kind).toBe('clarify')

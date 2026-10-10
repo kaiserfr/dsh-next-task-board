@@ -127,7 +127,7 @@ describe('task-board WIP limit', () => {
     service.dispose()
   })
 
-  it('starts a card pulled into todo without a WIP slot, but still gates its run', async () => {
+  it('starts a card pulled into clarification without a WIP slot, but still gates its run', async () => {
     const { service, ledger, started, releases, run, flush, settleTask } = harness(Date.now())
     // `a` holds the lane's only slot (default limit 1) and keeps working.
     run('a')
@@ -136,15 +136,15 @@ describe('task-board WIP limit', () => {
     await flush()
     expect(started).toEqual(['a'])
 
-    // `todo` is WIP-free: the clarification run starts next to the working run
-    // instead of reading Queued.
-    service.apply('b-to-todo', { kind: 'move', taskId: 'b', status: 'todo' })
+    // The clarification column is WIP-free: the round starts next to the
+    // working run instead of reading Queued.
+    service.apply('b-to-todo', { kind: 'move', taskId: 'b', status: 'clarification' })
     await flush()
     expect(started).toEqual(['a', 'b'])
     releases[1]?.()
     await flush()
     const clarified = ledger.state().tasks.find(task => task.id === 'b')!
-    expect(clarified.status).toBe('todo')
+    expect(clarified.status).toBe('clarification')
     expect(clarified.executions[0]?.kind).toBe('clarify')
     expect(clarified.executions[0]?.sessionId).toBe('session-b')
 
@@ -153,6 +153,8 @@ describe('task-board WIP limit', () => {
     // other run of the lane.
     settleTask('b')
     await flush()
+    // The human closes the step and then pulls the card on to the run column.
+    service.apply('b-to-todo-2', { kind: 'move', taskId: 'b', status: 'todo' })
     service.apply('b-to-running', { kind: 'move', taskId: 'b', status: 'running' })
     await flush()
     expect(started).toEqual(['a', 'b'])

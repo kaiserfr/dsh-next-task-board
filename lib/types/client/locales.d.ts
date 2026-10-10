@@ -19,6 +19,7 @@ export declare const zh: {
     'archive.empty': string;
     'board.status': string;
     'board.status.backlog': string;
+    'board.status.clarification': string;
     'board.status.todo': string;
     'board.status.running': string;
     'board.status.ready_for_test': string;
@@ -165,6 +166,7 @@ export declare const zh: {
     'delete.ok': string;
     'delete.cancel': string;
     'status.move.backlog': string;
+    'status.move.clarification': string;
     'status.move.todo': string;
     'status.move.ready_for_test': string;
     'status.move.done': string;

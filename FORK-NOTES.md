@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **neunzehn echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 und 22) plus drei
+Kurzfassung: **zwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 und 23) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -31,7 +31,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 11 | **Mehr können** | Mehrfachauswahl und Gruppen-Verschieben: Karten per Klick, Ctrl/Cmd-Klick und Shift-Bereich markieren (Doppelklick öffnet weiterhin das Detail), eine markierte Karte ziehen bewegt die ganze Auswahl als **eine** atomare Host-Aktion `move-many` |
 | 12 | **Mehr können** | Korrektur nach Test: Karte von „Ready for test" zurück nach „To do" mit Anmerkung; die Anmerkung geht als **eigene neue Nachricht** in die vorherige Session (der ursprüngliche Prompt bleibt unverändert) |
 | 13 | **Mehr können** | Inhalte bleiben editierbar, solange die Karte in „Backlog"/„To do" wartet — auch nach einem früheren Lauf; der Text der Box „Parse with AI" liegt als `parseText` an der Karte und wird beim Bearbeiten wiederverwendet |
-| 14 | **Mehr können** | Klärungsschritt vor der Implementierung: `backlog → todo` startet für **jede** Karte ihren Lauf (Aktion `clarify`) — dieselbe Execution wie in der In-Progress-Spalte (gleiche Start-Queue, aber **WIP-frei**: startet sofort statt „Queued", pausierbar), nur der Prompt ist der Karten-Prompt plus Klärungsblock („Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts." … „Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".") samt System-Prompt-Stoppregel, die in jedem Turn gilt; **der Agent stellt seine offenen Fragen im Chat der Karte**, der Nutzer antwortet dort (kein Fragenfeld, kein `openQuestions`/`questionsResolvedAt`); die Karte bleibt in Todo, das Ziehen nach In Progress schließt die Runde und setzt **dieselbe Session** mit „Bitte jetzt implementieren." fort, direktes Ziehen Backlog → In Progress bleibt unmöglich |
+| 14 | **Mehr können** | Klärungsschritt vor der Implementierung *(seit 23 in der eigenen Spalte „Klärung“ statt in Todo)*: `backlog → clarification` startet für **jede** Karte ihren Lauf (Aktion `clarify`) — dieselbe Execution wie in der In-Progress-Spalte (gleiche Start-Queue, aber **WIP-frei**: startet sofort statt „Queued", pausierbar), nur der Prompt ist der Karten-Prompt plus Klärungsblock („Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts." … „Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".") samt System-Prompt-Stoppregel, die in jedem Turn gilt; **der Agent stellt seine offenen Fragen im Chat der Karte**, der Nutzer antwortet dort (kein Fragenfeld, kein `openQuestions`/`questionsResolvedAt`); die Karte bleibt in Todo, das Ziehen nach In Progress schließt die Runde und setzt **dieselbe Session** mit „Bitte jetzt implementieren." fort, direktes Ziehen Backlog → In Progress bleibt unmöglich |
 | 15 | **Mehr können** | Pausieren/Fortsetzen laufender Arbeit: ein Klick pausiert **alle** Karten in „In progress“ (Host-Aktion `pause`, stoppt je Lauf die Session), Karten bleiben in ihrer Spalte (`pausedAt`, Lauf bleibt offen), Pause-/Play-Symbolik am Kopf-Button, an jeder Karte und am Ausführungs-Knopf im Detail; Fortsetzen (`resume`) schreibt „Weitermachen“ in dieselbe Session |
 | 16 | **Mehr können** | Fertig-Meldung des Laufs, Session-Ende entscheidet: der Agent beendet seine letzte Antwort mit einer eigenen Zeile `FERTIG: <Zusammenfassung>` (Bericht für den Menschen im Chat); die Karte wandert erst nach „Ready for test", wenn die Session des Laufs **tatsächlich beendet** ist — eine weiter als laufend geführte Session blockiert den Wechsel, unabhängig von der Meldung |
 | 17 | **Mehr können** | *(durch 18 abgelöst)* WIP-Platz nur für **wirklich arbeitende** Läufe: eine offene Ausführung, deren Session der letzte Roster-Poll als untätig sah, belegte keinen Platz mehr — der Roster kennt aber nur „läuft gerade ein Turn?", nicht „ist der Lauf fertig?" |
@@ -40,6 +40,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 20 | **Mehr können** | **Wartende Frage auf der Karte**: hält die Konversation einer Karte eine Frage, die der Agent gestellt hat und auf die er wartet (blockierender `ask_user_question`-Aufruf ohne Ergebnis, oder ein Turn, den der Agent mit eigener Nachricht beendet hat, während die Session stillsteht), trägt die Karte ein Fragezeichen in der linken oberen Ecke; ein Klick springt über denselben `#session=<id>`-Deep-Link direkt in die Session mit der Frage. Der Host liest das je Poll aus der Konversation (`awaitingAnswerWatch` + `runner.awaitingAnswer`, zusätzlich die `userQuestions`-Projektion für das timed-Schema) und schickt `awaitingAnswer: { taskId → sessionId }` im Snapshot und im SSE-Frame — nie ins Ledger. Die Markierung erscheint mit der Frage und verschwindet mit der Antwort; ein fehlgeschlagener Read hält das letzte Urteil, eine unbekannte Session-Liste ändert nichts |
 | 21 | **Mehr können** | **Freigabe an den geprüften Commit gebunden (Merge-Gate)**: das Parken in „Ready for test" stempelt den Branch-HEAD als `TaskGit.reviewedCommit`; `git.mergeBranch` (`ready_for_test → done`) merged nur noch exakt diesen Stand und verweigert fail-closed, wenn der Worktree schmutzig ist, der Branch weitergewandert ist oder der Stempel fehlt — der Sicherheitsnetz-Commit beim Mergen ist entfernt, die Karte bleibt in der Review-Spalte. Erneutes Parken bindet die Freigabe an den neuen Stand |
 | 22 | **Mehr können** | **Spec-Freigabe-Gate vor jedem Implementierungslauf**: `specApprovedAt` wird ausschließlich von der Host-Aktion `approve-spec` gesetzt (Knopf „Spezifikation freigeben" in der Kartendetailansicht). Jeder `run`-Weg prüft sie serverseitig — der Zug auf die Laufspalte, der Ausführen-Knopf und `rerun` werden mit `spec-approval-required` abgelehnt, Cron überspringt die Karte und rollt den nächsten Termin; der Klärungslauf (`clarify`) ist nicht betroffen. Eine Inhaltsänderung (Titel/Beschreibung/Prompt/Parse-Text) entwaffnet die Freigabe wieder, ebenso ein Import |
+| 23 | **Mehr können** | **Eigene Klärungsspalte**: `backlog → clarification` (Aktion `clarify`) startet den Klärungslauf in der neuen Spalte, die Karte bleibt dort (`clarification → todo` schließt den Schritt, `clarification → backlog` schickt zurück, `todo → clarification` öffnet dieselbe Konversation erneut); `backlog → todo` gibt es nicht mehr, ebenso keine Transition aus Backlog/Klärung direkt nach „In progress“. Die Spalte ist WIP-frei, wartende Fragen werden dort erkannt, und ein Gruppen-Drop in die Klärungsspalte wird abgelehnt (er würde die Runde überspringen) |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -743,6 +744,39 @@ Die englische Fassung dieser Übersicht steht im README unter
     - Abgedeckt durch `tests/spec-approval.spec.ts` (Protokoll, alle
       Run-Wege, Cron, Entwaffnen, Import, Store-Reparatur) und
       `tests/spec-approval-ui.spec.tsx`.
+
+23. **Eigene Klärungsspalte: Backlog → Klärung → Todo → In progress** — der
+    Klärungsschritt ist eine eigene Spalte statt eines Zwischenzustands in Todo.
+    - **Maschine:** `backlog → clarification` trägt `git.openBranch` + `clarify`,
+      `clarification → todo` schließt den Schritt (einfacher Zug, keine Aktion),
+      `clarification → backlog` schickt die Karte zurück, und
+      `todo → clarification` feuert `clarify` erneut — sie landet in **derselben**
+      Konversation (`clarificationSessionId`), es entsteht nie ein zweiter Chat.
+      `backlog → todo` gibt es **nicht** mehr, und weder `backlog → running` noch
+      `clarification → running` existieren: erst Todo macht die Laufspalte
+      erreichbar. `clarification → ready_for_test` committet wie jeder andere
+      Weg in die Review-Spalte.
+    - **Verhalten unverändert:** die Runde ist eine echte Ausführung (gleiche
+      Start-Queue, **WIP-frei**, pausierbar, Host-monitored), ihr Prompt ist der
+      Karten-Prompt plus Klärungsblock, das Session-Ende bewegt die Karte nicht,
+      und die Fragen stehen im Chat der Karte — kein Feld im Ledger.
+    - **Wartende Frage:** der Frage-Watch liest jetzt Karten in `clarification`
+      (statt in `todo`) als Kandidaten; die Fragezeichen-Markierung funktioniert
+      dort unverändert.
+    - **Gruppen-Drop:** `move-many` lehnt jede Transition mit `clarify` ab (wie
+      bisher schon `run`) — eine Gruppe in die Klärungsspalte würde die Karten
+      ohne ihre Runde dort abstellen.
+    - **Inhalt editierbar:** `canEditTaskContent` erlaubt die Vorspalten
+      `backlog`/`clarification`/`todo`; die Karte darf also während der Runde
+      noch korrigiert werden.
+    - **Statusvokabular:** `clarification` ist der siebte Status der geschlossenen
+      Union (`ALL_STATUSES`), mit Spaltenfarbe und Locale-Label („Klärung" /
+      „Clarification"). Bestehende Karten behalten ihren Status; Karten, die
+      vorher in `todo` standen, bleiben dort (die Spalte bleibt die
+      Implementierungs-Vorbereitung).
+    - Abgedeckt durch `tests/clarification-step.spec.ts`, `tests/state-machine.spec.ts`,
+      `tests/host-ledger.spec.ts`, `tests/board-view.spec.tsx` und
+      `tests/awaiting-answer.spec.ts`.
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`
