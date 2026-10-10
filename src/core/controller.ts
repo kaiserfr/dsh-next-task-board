@@ -620,6 +620,25 @@ export class BoardController {
     return await this.commitRemote({ kind: 'confirm-permission', taskId: id }, id)
   }
 
+  /**
+   * Release a card's specification through the Host: the gate every
+   * implementation run (`run`, `rerun`, cron) checks. Without a transport the
+   * stamp is applied locally for the legacy seam; a second release is a no-op.
+   */
+  async approveSpec(id: string): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined || task.archivedAt !== undefined) return false
+    if (task.specApprovedAt !== undefined) return true
+    if (this.deps.transport === undefined) {
+      this.tasks = this.tasks.map(candidate => candidate.id === id
+        ? { ...candidate, specApprovedAt: this.now(), updatedAt: this.now() }
+        : candidate)
+      this.persistAndNotify()
+      return true
+    }
+    return await this.commitRemote({ kind: 'approve-spec', taskId: id }, id)
+  }
+
   /** Re-run a settled task through the Host (the Host replans and executes). */
   async rerunTask(id: string): Promise<void> {
     const task = this.tasks.find(candidate => candidate.id === id)

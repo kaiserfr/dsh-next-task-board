@@ -355,6 +355,14 @@ export interface TaskRecord {
    */
   permissionConfirmedAt?: number
   /**
+   * Human release of the card's specification (ms epoch). Absent while the
+   * card still waits for its "Freigabe": the Host refuses to start an
+   * implementation run (`run`, `rerun`, cron) until the human pressed the
+   * approve action. A clarification round and a content edit re-arm the gate by
+   * clearing it — the approval belongs to the text that was released.
+   */
+  specApprovedAt?: number
+  /**
    * Git feature-branch state for the agentic-programming workflow; absent on
    * cards whose workspace is not a git worktree.
    */
@@ -768,6 +776,17 @@ export function openExecution(task: TaskRecord): ExecutionRecord | undefined {
  */
 export function hasOpenRun(task: TaskRecord): boolean {
   return task.executions.some(execution => execution.endedAt === undefined && execution.kind !== 'clarify')
+}
+
+/**
+ * Whether the card still needs the human's specification release. The gate
+ * lives on the `run` action — drag onto the run column, the detail Run button
+ * and cron all pass through it — so an unreleased card is never implemented.
+ * A clarification run (`clarify`) is not gated: asking questions is exactly what
+ * has to happen before the release.
+ */
+export function requiresSpecApproval(task: Pick<TaskRecord, 'specApprovedAt'>): boolean {
+  return task.specApprovedAt === undefined
 }
 
 /**

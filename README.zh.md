@@ -79,6 +79,7 @@
 - 列顺序：`backlog → todo → running → ready_for_test → failed → done`。
 - 新任务创建在 **Backlog**。把卡片拖进 **Todo** 就是澄清步骤，并在那里启动卡片的运行——与拖到运行列启动的是同一种执行（同一条启动队列、同样有会话链接与暂停控件，但不占 WIP 名额，因此立即启动），只有 Prompt 不同：让 agent 先问清它需要知道的东西，然后停下（见下节）。
 - 卡片靠**人工启动**（拖拽或运行按钮）进入 **In progress**：该动作同时关闭卡片尚未结算的澄清运行，并在那条会话里继续实现。从 Backlog 直接拖到 In progress 没有任何转移，一律拒绝。
+- **规格放行闸门**：在人工放行规格（详情页的「放行规格」按钮，Host 动作 `approve-spec` → `specApprovedAt`）之前，Host 拒绝**所有**实现运行路径（拖到运行列、运行按钮、`rerun`），报 `spec-approval-required`；cron 跳过该卡并滚动到下一个触发点；澄清运行不受影响（提问正是放行前要做的事）。修改内容（标题、描述、Prompt 或解析源文本）会清除该印记，导入也不会携带它。详见 [`docs/state-machine.md`](docs/state-machine.md#specification-release-the-gate-in-front-of-every-run)。
 - 执行成功把卡片停在 **Ready for test**（失败则进入 Failed）；runner 不会产生 `done`，验收永远是人工动作。
 - 这个停靠是**会话结束的结论**：Host 会等到该执行所属会话真正停下来——最新一轮 turn 已结束、名册显示会话空闲、它的 prompt 收件箱为空、且没有仍在运行的后台 job——才移动卡片。单个 turn 边界从不单独触发停靠，因为会话会把每个排队 prompt、每次 job 唤醒都当作新的一轮继续跑。只有以 `completed` 收尾的 turn 才算成功：被用户中止、撞上模型 token 上限、被 interrupt 或报错的运行会带着原因进入 Failed，未完成的运行因此永远不会显示为可测试。会话仍在工作时，卡片保持 **In progress**。
 - 卡片钉住的工作区是 git worktree 时，Host 在后台把工作留在 feature 分支上：

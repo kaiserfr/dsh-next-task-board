@@ -117,6 +117,9 @@ export declare const zh: {
     'detail.permissionPending': string;
     'detail.permissionConfirm': string;
     'detail.permissionConfirmed': string;
+    'detail.specPending': string;
+    'detail.specApprove': string;
+    'detail.specApproved': string;
     'detail.title': string;
     'detail.edit': string;
     'detail.editTags': string;

@@ -37,6 +37,8 @@ function seeded(): HostTaskLedger {
     id: 'a',
     input: { title: 'A', description: 'the card', prompt: 'implement it' },
   })
+  // Released: these cases are about the clarification round and the go-ahead.
+  ledger.applyRequest('seed-approve', { kind: 'approve-spec', taskId: 'a' })
   return ledger
 }
 

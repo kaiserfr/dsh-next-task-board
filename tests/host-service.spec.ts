@@ -82,6 +82,8 @@ describe('TaskBoardHostService scheduling without a browser', () => {
         title: 'Scheduled', description: '', prompt: 'work', schedule: { enabled: true, cron: '* * * * *' },
       },
     })
+    // Cron implements released specifications only.
+    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'scheduled' })
     const create = vi.fn(async (_request: GatewayRequest) => ({ sessionId: 'session-scheduled' }))
     const prompt = vi.fn(async (_request: GatewayRequest) => ({ accepted: true }))
     const { gateway } = makeGateway(request => {
@@ -261,11 +263,13 @@ describe('TaskBoardHostService clarification runs', () => {
     const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-busy', { kind: 'create', id: 'busy', input: { title: 'Busy', description: '', prompt: 'work' } })
+    ledger.applyRequest('approve-busy', { kind: 'approve-spec', taskId: 'busy' })
     const busy = ledger.applyRequest('run-busy', { kind: 'run', taskId: 'busy' }).run!
     ledger.attachSession('busy', busy.execution.id, 'session-busy')
     ledger.applyRequest('create-card', {
       kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' },
     })
+    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
 
     const prompts: Array<{ sessionId: string; text: string }> = []
     let created = 0
@@ -336,11 +340,13 @@ describe('TaskBoardHostService clarification runs', () => {
     const now = new Date(2026, 7, 16, 10, 2, 0).getTime()
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-busy', { kind: 'create', id: 'busy', input: { title: 'Busy', description: '', prompt: 'work' } })
+    ledger.applyRequest('approve-busy', { kind: 'approve-spec', taskId: 'busy' })
     const busy = ledger.applyRequest('run-busy', { kind: 'run', taskId: 'busy' }).run!
     ledger.attachSession('busy', busy.execution.id, 'session-busy')
     ledger.applyRequest('create-card', {
       kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' },
     })
+    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
 
     const prompts: Array<{ sessionId: string; text: string }> = []
     const cancelled: string[] = []
@@ -408,6 +414,7 @@ describe('TaskBoardHostService rework continuation', () => {
     let clock = now
     const ledger = new HostTaskLedger(root(), () => clock)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     // A first run that finished, then a review that did not accept it: the card
     // goes back to todo and is stamped.
     const first = ledger.applyRequest('run-first', { kind: 'run', taskId: 'card' }).run
@@ -751,10 +758,12 @@ describe('TaskBoardHostService lane occupancy', () => {
   function laneLedger(now: number): HostTaskLedger {
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-busy', { kind: 'create', id: 'busy', input: { title: 'Busy', description: '', prompt: 'work' } })
+    ledger.applyRequest('approve-busy', { kind: 'approve-spec', taskId: 'busy' })
     ledger.applyRequest('run-busy', { kind: 'run', taskId: 'busy' })
     const occupant = ledger.state().tasks.find(task => task.id === 'busy')!.executions.at(-1)!
     ledger.attachSession('busy', occupant.id, 'session-busy')
     ledger.applyRequest('create-card', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' } })
+    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
     return ledger
   }
 
@@ -868,6 +877,7 @@ describe('TaskBoardHostService completion report', () => {
     const now = new Date(2026, 7, 16, 10, 6, 0).getTime()
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-card', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'do work' } })
+    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
     const opened = ledger.applyRequest('run-card', { kind: 'run', taskId: 'card' }).run!
     ledger.attachSession('card', opened.execution.id, 'session-card')
 
@@ -913,6 +923,7 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
   function parked(now: number): HostTaskLedger {
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     const run = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
     ledger.attachSession('card', run!.execution.id, 'session-card')
     ledger.settle('card', run!.execution.id, 'succeeded', undefined)

@@ -211,6 +211,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(opened.git?.base).toBe('main')
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(opened.git!.branch)
 
+      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       expect(run).toBeDefined()
       expect(ledger.state().tasks[0].status).toBe('running')
@@ -247,6 +248,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
           input: { title: `Fix ${id}`, description: '', prompt: 'p', workspaceId: 'ws-1' },
         })
         ledger.applyRequest(`r-todo-${id}`, { kind: 'move', taskId: id, status: 'todo' })
+        ledger.applyRequest(`r-approve-${id}`, { kind: 'approve-spec', taskId: id })
         const run = ledger.applyRequest(`r-run-${id}`, { kind: 'run', taskId: id }).run
         writeFileSync(join(repo, `work-${id}.txt`), `${outcome}\n`)
         ledger.settle(id, run!.execution.id, outcome)
@@ -283,6 +285,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
 
       // A run interrupted before its session was recorded is cancelled on the
       // next Host start — and that cancellation commits the work.
+      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       expect(run).toBeDefined()
       writeFileSync(join(repo, 'interrupted.txt'), 'work of the interrupted run\n')
@@ -314,6 +317,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       writeFileSync(join(repo, 'feature.txt'), 'agent output\n')
       ledger.settle('card-1', run!.execution.id, 'succeeded')
@@ -369,6 +373,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
+      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       expect(run).toBeDefined()
       const task = ledger.state().tasks[0]
@@ -394,6 +399,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         taskId: 'card-1',
         patch: { enabled: true, cron: '0 9 * * *' },
       })
+      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       expect(ledger.openScheduled('card-1', undefined, NOW)).toBeDefined()
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('running')
@@ -445,6 +451,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' })
       writeFileSync(join(repo, 'feature.txt'), 'reviewed\n')
       ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')

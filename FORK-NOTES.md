@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **achtzehn echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 und 21) plus drei
+Kurzfassung: **neunzehn echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21 und 22) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -39,6 +39,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 19 | **Mehr können** | Kein stiller Verlust von Formular-Eingaben: Klick neben das Popup, Escape und „Cancel" schließen es, die Eingaben bleiben aber als **Entwurf** im Board-Controller und kommen beim nächsten Öffnen zurück (eigener Entwurf je Formular/Karte, Hinweis mit „Entwurf verwerfen", Punkt am „+ New task"-Knopf); nach dem Anlegen/Speichern ist der Entwurf verbraucht |
 | 20 | **Mehr können** | **Wartende Frage auf der Karte**: hält die Konversation einer Karte eine Frage, die der Agent gestellt hat und auf die er wartet (blockierender `ask_user_question`-Aufruf ohne Ergebnis, oder ein Turn, den der Agent mit eigener Nachricht beendet hat, während die Session stillsteht), trägt die Karte ein Fragezeichen in der linken oberen Ecke; ein Klick springt über denselben `#session=<id>`-Deep-Link direkt in die Session mit der Frage. Der Host liest das je Poll aus der Konversation (`awaitingAnswerWatch` + `runner.awaitingAnswer`, zusätzlich die `userQuestions`-Projektion für das timed-Schema) und schickt `awaitingAnswer: { taskId → sessionId }` im Snapshot und im SSE-Frame — nie ins Ledger. Die Markierung erscheint mit der Frage und verschwindet mit der Antwort; ein fehlgeschlagener Read hält das letzte Urteil, eine unbekannte Session-Liste ändert nichts |
 | 21 | **Mehr können** | **Freigabe an den geprüften Commit gebunden (Merge-Gate)**: das Parken in „Ready for test" stempelt den Branch-HEAD als `TaskGit.reviewedCommit`; `git.mergeBranch` (`ready_for_test → done`) merged nur noch exakt diesen Stand und verweigert fail-closed, wenn der Worktree schmutzig ist, der Branch weitergewandert ist oder der Stempel fehlt — der Sicherheitsnetz-Commit beim Mergen ist entfernt, die Karte bleibt in der Review-Spalte. Erneutes Parken bindet die Freigabe an den neuen Stand |
+| 22 | **Mehr können** | **Spec-Freigabe-Gate vor jedem Implementierungslauf**: `specApprovedAt` wird ausschließlich von der Host-Aktion `approve-spec` gesetzt (Knopf „Spezifikation freigeben" in der Kartendetailansicht). Jeder `run`-Weg prüft sie serverseitig — der Zug auf die Laufspalte, der Ausführen-Knopf und `rerun` werden mit `spec-approval-required` abgelehnt, Cron überspringt die Karte und rollt den nächsten Termin; der Klärungslauf (`clarify`) ist nicht betroffen. Eine Inhaltsänderung (Titel/Beschreibung/Prompt/Parse-Text) entwaffnet die Freigabe wieder, ebenso ein Import |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -713,6 +714,35 @@ Die englische Fassung dieser Übersicht steht im README unter
     - Abgedeckt durch `tests/git-workflow.spec.ts` (Gate, Nach-Commit-Fall,
       fehlender Stempel, Ende-zu-Ende mit erneutem Parken) und
       `tests/store.spec.ts`.
+
+22. **Spec-Freigabe-Gate: erst nach deiner Freigabe wird implementiert** — der
+    Agent arbeitet nie an einer Spezifikation, die der Mensch nicht freigegeben
+    hat, und kein Browser-Weg kann das umgehen.
+    - **Ein Schreiber:** die Host-Aktion `approve-spec` setzt `specApprovedAt`
+      (idempotent — der erste Zeitpunkt bleibt stehen, damit der Stempel die
+      Freigabe benennt, mit der gearbeitet wurde). Auf der Karte sitzt dafür der
+      Knopf „Spezifikation freigeben" (`data-dsh-part="spec-gate"`), danach zeigt
+      die Detailansicht „Spezifikation freigegeben · <Zeit>".
+    - **Geprüft wird serverseitig, auf jedem Weg in die Implementierung:** das
+      `run`-Ziel der State-Machine (Zug auf die Laufspalte), der
+      Ausführen-Knopf (`run`/`rerun`) und Cron (`openScheduled`). Manuell wird
+      mit `spec-approval-required` abgelehnt (die Karte bleibt, wo sie ist, der
+      Browser zeigt den Host-Grund), Cron überspringt die Karte und rollt den
+      nächsten Termin — dieselbe Politik wie beim
+      `confirm-permission`-Gate, das unverändert davor greift. Der
+      **Klärungslauf** (`clarify`) ist bewusst nicht betroffen: Fragen stellen
+      ist genau das, was vor der Freigabe passiert.
+    - **Die Freigabe gehört zum freigegebenen Text:** eine Inhaltsänderung
+      (Titel, Beschreibung, Prompt oder Parse-Quelle) löscht den Stempel, damit
+      eine Karte mit geänderter Anweisung nicht auf der alten Freigabe läuft.
+      Ein Import trägt die Freigabe ebenfalls nicht mit (die Wire-Sanitizer-
+      Whitelist des Import-Pfads), ebenso wenig eine Kopie.
+    - **Migration:** Karten von vor diesem Gate haben keinen Stempel und werden
+      bis zu einer Freigabe nicht gestartet — die Detailansicht sagt genau das
+      und der Knopf ist ein Klick.
+    - Abgedeckt durch `tests/spec-approval.spec.ts` (Protokoll, alle
+      Run-Wege, Cron, Entwaffnen, Import, Store-Reparatur) und
+      `tests/spec-approval-ui.spec.tsx`.
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

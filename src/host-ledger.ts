@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import { DEFAULT_MAX_DONE_TASKS, hasOpenRun, isReworkReturn, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, hasOpenRun, isReworkReturn, openExecution, requiresSpecApproval, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -749,6 +749,13 @@ export class HostTaskLedger {
       this.commit()
       return undefined
     }
+    if (requiresSpecApproval(task)) {
+      // An unreleased specification must never be implemented unattended
+      // either: the card waits for the human's release, and cron rolls on.
+      this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, task.schedule?.lastTriggeredAt, triggeredAt)]
+      this.commit()
+      return undefined
+    }
     if (task.status === 'running' || hasOpenExecution(task)) {
       this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, task.schedule?.lastTriggeredAt, triggeredAt)]
       this.commit()
@@ -945,6 +952,9 @@ export class HostTaskLedger {
           if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
             throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
           }
+          if (requiresSpecApproval(task)) {
+            throw new Error('spec-approval-required: the card has no released specification; release it before implementing')
+          }
           // Starting the work is the go-ahead and supersedes the card's open
           // clarification round: that execution is closed here, so the card
           // never carries two open runs. A launch not started yet is dropped by
@@ -1017,6 +1027,20 @@ export class HostTaskLedger {
           : item)
         break
       }
+      case 'approve-spec': {
+        // The human's release of the card's specification: the only writer of
+        // `specApprovedAt`, and the gate every `run` action checks. Idempotent —
+        // a second release keeps the first instant, so the stamp always names
+        // the release the work was actually authorized by.
+        const task = this.document.tasks.find(item => item.id === action.taskId)
+        if (task === undefined) throw new Error('task not found')
+        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+        if (task.specApprovedAt !== undefined) break
+        this.document.tasks = this.document.tasks.map(item => item.id === action.taskId
+          ? { ...item, specApprovedAt: now, updatedAt: now }
+          : item)
+        break
+      }
       case 'set-schedule': {
         const task = this.document.tasks.find(task => task.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
@@ -1069,6 +1093,9 @@ export class HostTaskLedger {
         if (task === undefined || task.status === 'running' || hasOpenRun(task)) throw new Error('task is already running or missing')
         if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
           throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
+        }
+        if (requiresSpecApproval(task)) {
+          throw new Error('spec-approval-required: the card has no released specification; release it before implementing')
         }
         const base = action.kind === 'rerun' ? withStatus(task, 'todo', now) : task
         // The Run button is the same go-ahead as the drag onto the run column:

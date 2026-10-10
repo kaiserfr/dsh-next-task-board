@@ -66,6 +66,7 @@ describe('ledger claim audit (issue #6)', () => {
   it('records the run initiator and captures the freeze origin on the execution record', () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('req-run', { kind: 'create', id: 'card-1', input: { title: '续接卡', description: '', prompt: '继续干活', freeze: { goal: '目标', progress: '进度', next: '下一步' } } }, 'session-author')
+    ledger.applyRequest('req-approve', { kind: 'approve-spec', taskId: 'card-1' }, 'session-author')
     ledger.applyRequest('req-run-2', { kind: 'run', taskId: 'card-1' }, 'session-claimer')
     const task = ledger.state().tasks[0]
     expect(task.freeze?.frozenBy).toBe('session-author')
@@ -78,6 +79,7 @@ describe('ledger claim audit (issue #6)', () => {
   it('leaves initiatedBy absent for cron-triggered runs and plain tasks', () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('req-c', { kind: 'create', id: 'card-1', input: { title: 'x', description: '', prompt: 'y' } })
+    ledger.applyRequest('req-approve', { kind: 'approve-spec', taskId: 'card-1' })
     ledger.openScheduled('card-1', undefined, NOW)
     const execution = ledger.state().tasks[0].executions[0]
     expect(execution.initiatedBy).toBeUndefined()

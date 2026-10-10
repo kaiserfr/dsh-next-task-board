@@ -129,6 +129,7 @@ export type TaskBoardAction =
   | { kind: 'pause'; taskIds: string[] }
   | { kind: 'resume'; taskIds: string[] }
   | { kind: 'confirm-permission'; taskId: string }
+  | { kind: 'approve-spec'; taskId: string }
 
 export interface TaskBoardActionEnvelope {
   requestId: string
@@ -411,6 +412,7 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
       }
     }
     case 'confirm-permission':
+    case 'approve-spec':
     case 'delete':
     case 'archive':
     case 'restore':

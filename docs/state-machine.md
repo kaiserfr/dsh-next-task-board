@@ -115,7 +115,7 @@ card:
 | `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch. No-op without a git repository. |
 | `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp) and stamps the resulting head as `reviewedCommit` — the commit the review column shows, cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
 | `git.mergeBranch`   | Merges the feature branch back into its base branch — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused, so the card stays in `ready_for_test` (see *Review gate*). |
-| `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start releases the clarification gate and continues the card's clarification session; only cron refuses an unresolved card. |
+| `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start releases the clarification gate and continues the card's clarification session; only cron refuses an unresolved card. **Every** `run` (this move, the detail Run button, `rerun`, cron) is refused while the card has no released specification (see *Specification release*). |
 | `clarify`           | Opens the card's clarification run: the same execution as `run` (same queue, but WIP-free — `todo` starts without waiting for a lane slot), its prompt asks the agent's open questions in the card's chat and stops, it checks no branch out, and settling it leaves the card in its column. |
 | `{ kind: "stamp", field: "doneAt" }` | Writes a timestamp into a task field.                    |
 
@@ -164,6 +164,30 @@ holding uncommitted card work:
   has no execution to carry it and only gets a Host warning.
 * The card's `TaskGit` records `committedAt` (the instant of the last commit, not
   shown in the UI) next to `mergedAt`.
+
+## Specification release: the gate in front of every run
+
+A card is implemented only after a human released its specification. The release
+is one ledger stamp, `TaskRecord.specApprovedAt`, written by exactly one action —
+`approve-spec` (the *Release specification* button in the card detail) — and
+checked by the Host on **every** `run` path:
+
+* the `run` transition (a drop onto the run column),
+* the detail view's Run button (`run`/`rerun`),
+* cron (`openScheduled`): an unreleased card is not started unattended; the
+  occurrence is skipped and the schedule rolls to the next one, exactly like the
+  permission gate.
+
+The refusal is a Host error, so no browser path can bypass it: manual runs throw
+`spec-approval-required`, cron skips silently and advances the schedule. A
+clarification run (`clarify`) is *not* gated — asking the questions is what
+happens before the release.
+
+The gate re-arms when the released text changes: editing the content (title,
+description, prompt) or the parse source clears the stamp, so a card whose
+instruction changed is never implemented on the old approval. The same holds for
+an imported card: the wire sanitizer whitelists an imported card's fields, so a
+release never travels with it.
 
 ## Review gate: the approval is bound to one commit
 

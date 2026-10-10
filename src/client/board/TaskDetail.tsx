@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron } from '../../core/schedule.ts'
 import { resolveStateMachine, type TaskStatus } from '../../core/state-machine.ts'
-import { TASK_PERMISSIONS, isTaskPaused, openExecution, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
+import { TASK_PERMISSIONS, isTaskPaused, openExecution, requiresSpecApproval, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
 import { canEditTaskContent } from '../../core/use-cases/task-update.ts'
 import { requiresPermissionConfirmation } from '../../core/handover.ts'
 import { dictionary, t, type TaskBoardKey } from '../locales.ts'
@@ -319,6 +319,9 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
   const transportError = snapshot.transportError
   const timeZone = snapshot.host?.scheduler.timeZone
   const permissionPending = requiresPermissionConfirmation(current, snapshot.host?.sessionDefaultPermission)
+  // The specification release gate: the card is prepared but not released, so
+  // no run may start. A `done` card is history and shows no gate.
+  const specPending = !archived && current.status !== 'done' && requiresSpecApproval(current)
   // Manual move targets come from the machine the Host enforces, so a chip is
   // never offered for a move the Host would refuse. A target whose transition
   // carries the `run` action is an execution start (this card's own Run
@@ -436,6 +439,18 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
           )}
           {current.permissionConfirmedAt !== undefined && (
             <p className={css.detailMeta}>{t('detail.permissionConfirmed', { time: formatHostTimestamp(current.permissionConfirmedAt, timeZone) })}</p>
+          )}
+
+          {specPending && (
+            <section className={css.detailSection} data-dsh-part="spec-gate">
+              <p className={css.formError}>{t('detail.specPending')}</p>
+              <button type="button" className={css.primaryButton} disabled={pending} onClick={() => { void controller.approveSpec(current.id) }}>
+                {t('detail.specApprove')}
+              </button>
+            </section>
+          )}
+          {current.specApprovedAt !== undefined && current.status !== 'done' && (
+            <p className={css.detailMeta}>{t('detail.specApproved', { time: formatHostTimestamp(current.specApprovedAt, timeZone) })}</p>
           )}
 
           <section className={css.detailSection}>

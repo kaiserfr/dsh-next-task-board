@@ -117,6 +117,11 @@ export function applyUpdateTask(
     if (('permission' in patch && patch.permission !== undefined && patch.permission !== task.permission) || 'handover' in patch) {
       next.permissionConfirmedAt = undefined
     }
+    // The specification release binds the text that was released: editing the
+    // content (title, description, prompt) or the parse source re-arms the gate,
+    // so an approved card whose instruction changed is never implemented on the
+    // old approval.
+    if (hasContentPatch(patch)) next.specApprovedAt = undefined
     // Session reuse is a boolean opt-in; false (or an explicit null from a
     // caller that needs to clear it) returns the task to one session per run.
     if ('reuseSession' in patch) next.reuseSession = patch.reuseSession === true ? true : undefined

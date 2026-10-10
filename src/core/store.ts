@@ -233,6 +233,10 @@ function normalizeGit(value: unknown): TaskGit | undefined {
     // persisted value clears the field instead of dropping the card row.
     task.parseText = normalizeParseText(row.parseText)
     task.permissionConfirmedAt = typeof row.permissionConfirmedAt === 'number' && Number.isFinite(row.permissionConfirmedAt) ? row.permissionConfirmedAt : undefined
+    // The specification release is repaired like the permission confirmation: a
+    // malformed stamp clears the release instead of dropping the card row, so a
+    // hand-edited ledger can never fake an approval.
+    task.specApprovedAt = typeof row.specApprovedAt === 'number' && Number.isFinite(row.specApprovedAt) ? row.specApprovedAt : undefined
     // The pause stamp is repaired like the other runtime stamps: a malformed
     // persisted value clears the pause instead of dropping the card row.
     task.pausedAt = typeof row.pausedAt === 'number' && Number.isFinite(row.pausedAt) ? row.pausedAt : undefined

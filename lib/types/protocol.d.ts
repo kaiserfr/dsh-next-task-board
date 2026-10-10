@@ -137,6 +137,9 @@ export type TaskBoardAction = {
 } | {
     kind: 'confirm-permission';
     taskId: string;
+} | {
+    kind: 'approve-spec';
+    taskId: string;
 };
 export interface TaskBoardActionEnvelope {
     requestId: string;

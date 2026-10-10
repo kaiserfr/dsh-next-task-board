@@ -88,6 +88,7 @@ describe('TaskBoardHostService pause/resume', () => {
   function runningLedger(): HostTaskLedger {
     const ledger = new HostTaskLedger(root(), () => 0)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     const opened = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
     ledger.attachSession('card', opened!.execution.id, 'session-a')
     return ledger
@@ -145,6 +146,7 @@ describe('TaskBoardHostService pause/resume', () => {
   it('never starts a run that was paused while it waited in the queue', async () => {
     const ledger = new HostTaskLedger(root(), () => 0)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     const opened = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
     const { service, invoke } = serviceWith(ledger, () => ({ accepted: true }))
     service.apply('pause', { kind: 'pause', taskIds: ['card'] })

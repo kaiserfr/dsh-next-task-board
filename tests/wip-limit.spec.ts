@@ -43,6 +43,8 @@ function harness(now: number, workspaces: Record<string, string> = {}) {
       id,
       input: { title: id.toUpperCase(), description: '', prompt: `work ${id}`, ...(workspaces[id] === undefined ? {} : { workspaceId: workspaces[id] }) },
     })
+    // Released: these cases measure the lane slots, not the release gate.
+    ledger.applyRequest(`approve-${id}`, { kind: 'approve-spec', taskId: id })
   }
   const service = new TaskBoardHostService({} as unknown as TypertGateway, {
     ledger,
