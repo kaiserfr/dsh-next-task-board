@@ -2,11 +2,19 @@
  * Host-side git integration for the board's agentic-programming flow.
  *
  * Everything here is a no-op unless the card's pinned workspace is a git
- * worktree (`repoPath` returns undefined otherwise), so the board keeps
+ * repository (`repoPath` returns undefined otherwise), so the board keeps
  * working in plain directories:
  *
- * - `backlog` → `todo` (a human pulls the card in) opens the feature branch,
- * - `running` checks the feature branch out before the agent session starts,
+ * - `backlog` → `clarification` (a human pulls the card in) opens the feature
+ *   branch **and the card's own worktree** under `worktreesRoot`: the session
+ *   then works in that directory (the runner passes it as the session `cwd`), so
+ *   the main checkout stays on whatever the human is using and two cards of one
+ *   workspace never share a directory. Where `git worktree` refuses (an older
+ *   git, a branch already checked out elsewhere, a leftover directory), the
+ *   function falls back to the historical shared checkout — no worktree path on
+ *   the card, and every later step checks the branch out as before,
+ * - the run works in that worktree, which never changes branch (`useBranch` is a
+ *   no-op there),
  * - reaching `ready_for_test` commits what the run left behind onto the feature
  *   branch (`git.commitBranch`, and the runner's own settle), so no run's work
  *   ever waits uncommitted in the worktree, and stamps the resulting head as the
@@ -17,14 +25,15 @@
  *   committed after the review makes the approval stale and the merge refuses
  *   instead of merging something nobody reviewed.
  *
- * The board's WIP limit is per workspace (WIP lane), so two *implementation*
- * runs of one workspace never overlap and one shared worktree per workspace is
- * enough; different workspaces have their own worktrees and `useBranch` targets
- * the card's own. A clarification run (`todo`) may start next to a working run,
- * but it checks no branch out at all (see `TaskBoardHostService.launch`), so the
- * checkout stays with the run that is working.
+ * The board's WIP limit stays per workspace (WIP lane): one implementation run
+ * per workspace. The card's worktree is what makes that limit about *slots*, not
+ * about a shared directory — a clarification round of another card of the same
+ * workspace no longer has a checkout to fight over.
  */
 import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
+import { dshHome } from './dsh-home.ts'
 import type { TaskGit, TaskRecord } from './core/tasks.ts'
 import type { TaskBoardWorkspaceRegistry } from './host-runner.ts'
 
@@ -51,8 +60,22 @@ export function taskBranch(task: TaskRecord): string {
   return `${TASK_BRANCH_PREFIX}${name === '' ? '' : `${name}-`}${id}`
 }
 
+/** Options of the git integration. */
+export interface GitWorkflowOptions {
+  /**
+   * Directory the per-card worktrees are created in; one subdirectory per card
+   * id. Defaults to `$DSH_HOME/task-board/worktrees`, so the board owns them and
+   * nothing appears next to the user's repository.
+   */
+  worktreesRoot?: string
+}
+
 export class GitWorkflow {
-  constructor(private readonly registry?: TaskBoardWorkspaceRegistry) {}
+  private readonly worktreesRoot: string
+
+  constructor(private readonly registry?: TaskBoardWorkspaceRegistry, options: GitWorkflowOptions = {}) {
+    this.worktreesRoot = options.worktreesRoot ?? join(dshHome(), 'task-board', 'worktrees')
+  }
 
   private run(cwd: string, args: readonly string[]): string {
     const result = spawnSync('git', [...args], { cwd, encoding: 'utf8' })
@@ -80,17 +103,76 @@ export class GitWorkflow {
   }
 
   /**
-   * Cut (or re-check-out) the task's feature branch, cut from the current
-   * branch. Called on the `backlog` → `todo` move.
+   * Cut (or re-attach) the task's feature branch and its own worktree. Called on
+   * the `backlog` → `clarification` move.
+   *
+   * A branch that already exists is re-used (a card passing the step again, or a
+   * restart) and only gets a worktree when it has none. The worktree is cut from
+   * the base branch, so it never carries the main checkout's uncommitted state.
+   * When git refuses the worktree, the historical shared checkout is used
+   * instead: the card keeps working, just without its own directory.
    */
   openBranch(task: TaskRecord): TaskGit | undefined {
     const repoPath = this.repoPath(task)
     if (repoPath === undefined) return undefined
     const branch = taskBranch(task)
     const base = this.baseBranch(repoPath)
+    const worktreePath = this.worktreePath(task)
+    // Attached: the card works in its own directory from here on.
+    if (this.attachWorktree(repoPath, worktreePath, branch, base)) return { branch, base, repoPath, worktreePath }
     if (this.branchExists(repoPath, branch)) this.run(repoPath, ['checkout', branch])
     else this.run(repoPath, ['checkout', '-b', branch])
     return { branch, base, repoPath }
+  }
+
+  /**
+   * The card's worktree directory, attached when it is missing: `git worktree
+   * add` for a new branch, `git worktree add <path> <branch>` for an existing
+   * one (a re-entered step, or a restart). Returns false when git refuses, so
+   * the caller can fall back to the shared checkout.
+   */
+  private attachWorktree(repoPath: string, worktreePath: string, branch: string, base: string): boolean {
+    if (existsSync(worktreePath)) {
+      // The directory exists: it is either this card's live worktree or a
+      // leftover. Only a worktree git knows about counts.
+      return this.isWorktreeOf(repoPath, worktreePath)
+    }
+    try {
+      mkdirSync(this.worktreesRoot, { recursive: true })
+      if (this.branchExists(repoPath, branch)) this.run(repoPath, ['worktree', 'add', worktreePath, branch])
+      else this.run(repoPath, ['worktree', 'add', '-b', branch, worktreePath, base])
+      return true
+    } catch (error) {
+      console.warn(`task board: no worktree for ${branch} (${error instanceof Error ? error.message : String(error)}); working in ${repoPath} instead`)
+      return false
+    }
+  }
+
+  /** Whether git lists `worktreePath` as a worktree of `repoPath`. */
+  private isWorktreeOf(repoPath: string, worktreePath: string): boolean {
+    try {
+      return this.run(repoPath, ['worktree', 'list', '--porcelain'])
+        .split('\n')
+        .some(line => line.startsWith('worktree ') && line.slice('worktree '.length).trim() === worktreePath)
+    } catch {
+      return false
+    }
+  }
+
+  /** Absolute worktree directory of a card: one per card id. */
+  private worktreePath(task: TaskRecord): string {
+    const id = task.id.replace(/[^A-Za-z0-9]/g, '').slice(0, 16)
+    return join(this.worktreesRoot, id === '' ? 'task' : id)
+  }
+
+  /**
+   * Where the card's work happens right now: its worktree when that directory
+   * exists (the branch is fixed there, so no checkout), otherwise the main
+   * checkout (which the caller has to put on the card's branch).
+   */
+  private workDir(git: TaskGit): { dir: string; checkout: boolean } {
+    if (git.worktreePath !== undefined && existsSync(git.worktreePath)) return { dir: git.worktreePath, checkout: false }
+    return { dir: git.repoPath, checkout: true }
   }
 
   /**
@@ -116,19 +198,27 @@ export class GitWorkflow {
   commitBranch(task: TaskRecord, now: number): TaskGit | undefined {
     const git = task.git ?? this.openBranch(task)
     if (git === undefined) return undefined
+    const { dir, checkout } = this.workDir(git)
     // The commit belongs on the card's branch, whatever HEAD happens to be: a
-    // run that skipped the `todo` pull may still sit on the base branch.
-    this.run(git.repoPath, ['checkout', git.branch])
-    if (!this.isDirty(git.repoPath)) return { ...git, reviewedCommit: this.head(git.repoPath) }
-    this.run(git.repoPath, ['add', '-A'])
-    this.run(git.repoPath, ['commit', '-m', `task: ${task.title}`])
-    return { ...git, committedAt: now, reviewedCommit: this.head(git.repoPath) }
+    // run that skipped the pull may still sit on the base branch. A worktree
+    // already stands on that branch.
+    if (checkout) this.run(dir, ['checkout', git.branch])
+    if (!this.isDirty(dir)) return { ...git, reviewedCommit: this.head(dir) }
+    this.run(dir, ['add', '-A'])
+    this.run(dir, ['commit', '-m', `task: ${task.title}`])
+    return { ...git, committedAt: now, reviewedCommit: this.head(dir) }
   }
 
-  /** Check out the task's recorded feature branch before it runs. */
+  /**
+   * Put the card's branch in place before it runs. A card with its own worktree
+   * needs nothing: that directory stands on its branch already and switching
+   * branches there is exactly the yank the worktree exists to prevent.
+   */
   useBranch(task: TaskRecord): void {
     const git = task.git
     if (git === undefined) return
+    const { checkout } = this.workDir(git)
+    if (!checkout) return
     this.run(git.repoPath, ['checkout', git.branch])
   }
 
@@ -159,17 +249,36 @@ export class GitWorkflow {
     if (git.reviewedCommit === undefined) {
       throw new Error(`merge refused: ${git.branch} has no reviewed commit; park the card in "Ready for test" again so the approval is bound to the commit you reviewed`)
     }
-    if (this.isDirty(git.repoPath)) {
-      throw new Error(`merge refused: ${git.repoPath} still holds uncommitted work, so the reviewed commit ${short(git.reviewedCommit)} is not what the worktree shows; park the card in "Ready for test" again`)
+    const { dir, checkout } = this.workDir(git)
+    if (this.isDirty(dir)) {
+      throw new Error(`merge refused: ${dir} still holds uncommitted work, so the reviewed commit ${short(git.reviewedCommit)} is not what the worktree shows; park the card in "Ready for test" again`)
     }
-    this.run(git.repoPath, ['checkout', git.branch])
-    const head = this.head(git.repoPath)
+    if (checkout) this.run(dir, ['checkout', git.branch])
+    const head = this.head(dir)
     if (head !== git.reviewedCommit) {
       throw new Error(`merge refused: ${git.branch} moved from the reviewed commit ${short(git.reviewedCommit)} to ${short(head)}; review the new state (park the card again) before merging`)
     }
+    // The merge itself happens in the main checkout, on the base branch: a
+    // worktree never has the base checked out.
     this.run(git.repoPath, ['checkout', git.base])
     this.run(git.repoPath, ['merge', '--no-ff', '-m', `merge ${git.branch} (task board)`, git.branch])
+    this.removeWorktree(git)
     return { ...git, mergedAt: now }
+  }
+
+  /**
+   * Drop the card's worktree after its branch was merged: the directory was
+   * disposal-only from the start (the branch, the commits and the review stamp
+   * all survive in the repository). A worktree git refuses to remove — untracked
+   * build artifacts, a lock — is left alone and never fails the accept.
+   */
+  private removeWorktree(git: TaskGit): void {
+    if (git.worktreePath === undefined || !existsSync(git.worktreePath)) return
+    try {
+      this.run(git.repoPath, ['worktree', 'remove', '--force', git.worktreePath])
+    } catch (error) {
+      console.warn(`task board: could not remove worktree ${git.worktreePath} (${error instanceof Error ? error.message : String(error)})`)
+    }
   }
 
   /**

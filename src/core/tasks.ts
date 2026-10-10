@@ -111,8 +111,16 @@ export interface TaskGit {
   branch: string
   /** Branch the feature branch was cut from and merges back into. */
   base: string
-  /** Repository worktree the branches belong to. */
+  /** Repository the branches belong to (the main checkout, where the merge happens). */
   repoPath: string
+  /**
+   * Absolute path of the card's own git worktree, when one was created: the
+   * checkout the execution session works in, so the main checkout stays on the
+   * branch the human is using and two cards of one workspace never share a
+   * directory. Absent on cards whose branch lives in the main checkout (the
+   * legacy path, and any environment where `git worktree` refuses).
+   */
+  worktreePath?: string
   /**
    * When the card's work was last committed onto the feature branch (ms epoch).
    * Written when a card reaches `ready_for_test` (the `git.commitBranch` action

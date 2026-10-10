@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **zwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22 und 23) plus drei
+Kurzfassung: **einundzwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 und 24) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -41,6 +41,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 21 | **Mehr können** | **Freigabe an den geprüften Commit gebunden (Merge-Gate)**: das Parken in „Ready for test" stempelt den Branch-HEAD als `TaskGit.reviewedCommit`; `git.mergeBranch` (`ready_for_test → done`) merged nur noch exakt diesen Stand und verweigert fail-closed, wenn der Worktree schmutzig ist, der Branch weitergewandert ist oder der Stempel fehlt — der Sicherheitsnetz-Commit beim Mergen ist entfernt, die Karte bleibt in der Review-Spalte. Erneutes Parken bindet die Freigabe an den neuen Stand |
 | 22 | **Mehr können** | **Spec-Freigabe-Gate vor jedem Implementierungslauf**: `specApprovedAt` wird ausschließlich von der Host-Aktion `approve-spec` gesetzt (Knopf „Spezifikation freigeben" in der Kartendetailansicht). Jeder `run`-Weg prüft sie serverseitig — der Zug auf die Laufspalte, der Ausführen-Knopf und `rerun` werden mit `spec-approval-required` abgelehnt, Cron überspringt die Karte und rollt den nächsten Termin; der Klärungslauf (`clarify`) ist nicht betroffen. Eine Inhaltsänderung (Titel/Beschreibung/Prompt/Parse-Text) entwaffnet die Freigabe wieder, ebenso ein Import |
 | 23 | **Mehr können** | **Eigene Klärungsspalte**: `backlog → clarification` (Aktion `clarify`) startet den Klärungslauf in der neuen Spalte, die Karte bleibt dort (`clarification → todo` schließt den Schritt, `clarification → backlog` schickt zurück, `todo → clarification` öffnet dieselbe Konversation erneut); `backlog → todo` gibt es nicht mehr, ebenso keine Transition aus Backlog/Klärung direkt nach „In progress“. Die Spalte ist WIP-frei, wartende Fragen werden dort erkannt, und ein Gruppen-Drop in die Klärungsspalte wird abgelehnt (er würde die Runde überspringen) |
+| 24 | **Mehr können** | **Git-Worktree pro Karte**: `git.openBranch` legt neben dem Feature-Branch einen eigenen Checkout unter `$DSH_HOME/task-board/worktrees/<Karten-Id>` an (`TaskGit.worktreePath`), und die Ausführungssitzung wird mit diesem Verzeichnis als `cwd` erstellt — die Hauptcheckout des Menschen bleibt auf ihrem Branch und unangetastet, zwei Karten eines Workspace teilen sich kein Verzeichnis mehr. `useBranch` ist dort ein No-op, Commit und Review-Gate arbeiten im Worktree, nur der Merge läuft in der Hauptcheckout und entfernt danach den Wegwerf-Worktree. Wo `git worktree` verweigert, fällt das Board auf die alte gemeinsame Checkout zurück |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -777,6 +778,39 @@ Die englische Fassung dieser Übersicht steht im README unter
     - Abgedeckt durch `tests/clarification-step.spec.ts`, `tests/state-machine.spec.ts`,
       `tests/host-ledger.spec.ts`, `tests/board-view.spec.tsx` und
       `tests/awaiting-answer.spec.ts`.
+
+24. **Git-Worktree pro Karte: der Agent arbeitet in seinem eigenen Checkout** —
+    die Hauptcheckout des Menschen bleibt unangetastet, und zwei Karten eines
+    Workspace teilen sich kein Verzeichnis mehr.
+    - **Anlegen:** `git.openBranch` (also `backlog → clarification`) schneidet den
+      Branch `task/<slug>-<id8>` wie bisher und legt zusätzlich einen Worktree
+      unter `$DSH_HOME/task-board/worktrees/<Karten-Id>` an (`git worktree add`,
+      Basis ist der Basisbranch); `TaskGit.worktreePath` merkt sich den Pfad. Ein
+      bereits existierender Branch wird nur noch angehängt. Die Wurzel ist per
+      Konstruktor-Option `worktreesRoot` austauschbar — die Tests **müssen** das
+      nutzen, damit nichts in ein echtes `$DSH_HOME` geschrieben wird.
+    - **Ausführen:** `HostExecutionRunner.launch` erstellt die Sitzung mit `cwd:
+      <worktree>` statt mit `workspaceId` (die gepinnte Workspace wird weiterhin
+      validiert — sie benennt das Repository). Damit landet „In progress" im
+      Kartenverzeichnis; die Klärungsrunde einer anderen Karte desselben
+      Workspace kann keinem laufenden Lauf mehr das Verzeichnis unter den Füßen
+      wegziehen, und die Hauptcheckout behält Branch und uncommittete Änderungen.
+    - **Committen und prüfen:** `useBranch` ist für eine Karte mit Worktree ein
+      No-op (der Branch ist dort fixiert), `commitBranch` und das Review-Gate
+      prüfen Sauberkeit und HEAD **im Worktree**; nur der Merge läuft in der
+      Hauptcheckout (dort ist der Basisbranch ausgecheckt).
+    - **Aufräumen:** nach erfolgreichem Merge entfernt `git worktree remove
+      --force` das Wegwerf-Verzeichnis (Branch, Commits und Review-Stempel
+      bleiben im Repository); verweigert git das Entfernen (unversionierte
+      Build-Artefakte), bleibt das Verzeichnis stehen und die Annahme schlägt
+      **nicht** fehl.
+    - **Rückfall:** verweigert `git worktree` das Anlegen (altes git, Branch
+      anderswo ausgecheckt, Restverzeichnis) oder ist das Verzeichnis später
+      verschwunden, arbeitet die Karte wie vorher in der gemeinsamen Checkout
+      (`worktreePath` fehlt dann bzw. wird ignoriert) — inklusive `useBranch`.
+    - Abgedeckt durch `tests/git-workflow.spec.ts` (Anlegen, zweiter Worktree,
+      `useBranch`, Commit/Merge im Worktree, Aufräumen nach dem Merge),
+      `tests/host-runner.spec.ts` (Sitzung mit `cwd`) und `tests/store.spec.ts`.
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

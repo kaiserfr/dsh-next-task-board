@@ -169,6 +169,7 @@ function normalizeGit(value: unknown): TaskGit | undefined {
   const committedAt = typeof row.committedAt === 'number' && Number.isFinite(row.committedAt) ? row.committedAt : undefined
   const mergedAt = typeof row.mergedAt === 'number' && Number.isFinite(row.mergedAt) ? row.mergedAt : undefined
   const reviewedCommit = typeof row.reviewedCommit === 'string' ? row.reviewedCommit.trim() : ''
+  const worktreePath = typeof row.worktreePath === 'string' ? row.worktreePath.trim() : ''
   return {
     branch,
     base,
@@ -176,6 +177,7 @@ function normalizeGit(value: unknown): TaskGit | undefined {
     ...(committedAt === undefined ? {} : { committedAt }),
     ...(mergedAt === undefined ? {} : { mergedAt }),
     ...(reviewedCommit === '' ? {} : { reviewedCommit }),
+    ...(worktreePath === '' ? {} : { worktreePath }),
   }
 }
 

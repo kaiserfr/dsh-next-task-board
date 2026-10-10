@@ -125,7 +125,7 @@ every card — the column is where the agent asks before anything is implemented
 
 | Action              | Effect                                                                 |
 |---------------------|------------------------------------------------------------------------|
-| `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch. No-op without a git repository. |
+| `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch **and its own worktree** under `$DSH_HOME/task-board/worktrees/<id>`: the run session is created on that directory, so the main checkout keeps the branch the human left it on. A branch that already exists is re-attached; where `git worktree` refuses, the historical shared checkout is used instead. No-op without a git repository. |
 | `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp) and stamps the resulting head as `reviewedCommit` — the commit the review column shows, cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
 | `git.mergeBranch`   | Merges the feature branch back into its base branch — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused, so the card stays in `ready_for_test` (see *Review gate*). |
 | `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start releases the clarification gate and continues the card's clarification session; only cron refuses an unresolved card. **Every** `run` (this move, the detail Run button, `rerun`, cron) is refused while the card has no released specification (see *Specification release*). |
@@ -153,7 +153,15 @@ Work on a card happens on its **feature branch**, and the worktree is never left
 holding uncommitted card work:
 
 * The branch is cut when the card enters `clarification` (and at run start when
-  a cron trigger or the Run button skipped that step).
+  a cron trigger or the Run button skipped that step). The card gets its **own
+  worktree** there, and the run's session is created in it (`cwd`), so the main
+  checkout is never used as the card's workspace: a clarification round of
+  another card of the same workspace cannot yank a working run's directory, and
+  the human's checkout keeps its branch and its uncommitted state. Everything
+  below happens in that worktree; only the merge runs in the main checkout.
+* A card whose worktree is gone (removed by hand, or merged earlier) falls back
+  to the main checkout and checks the branch out there, exactly like a card from
+  before this feature.
 * **A run settles into `ready_for_test` only once its session has ended**: the
   runner reports `succeeded` after the newest `turn/end` solely when a fresh
   roster read no longer lists the session as running and its live inbox and jobs
@@ -175,6 +183,11 @@ holding uncommitted card work:
   the settle**: the error is appended to the newest execution's `error`, which
   the card's execution history in the detail view shows. A card that never ran
   has no execution to carry it and only gets a Host warning.
+* Merging happens in the **main checkout** (a worktree never has the base branch
+  checked out), and the merged card's worktree is removed afterwards — the
+  branch, the commits and the review stamp all live on in the repository. A
+  worktree git refuses to remove (untracked build artifacts) is left alone and
+  never fails the accept.
 * The card's `TaskGit` records `committedAt` (the instant of the last commit, not
   shown in the UI) next to `mergedAt`.
 

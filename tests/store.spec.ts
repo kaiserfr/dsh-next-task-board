@@ -176,10 +176,10 @@ describe('parseLedger', () => {
     const base = {
       id: 't1', title: 'a', description: '', prompt: 'a',
       createdAt: NOW, updatedAt: NOW, executions: [], status: 'ready_for_test',
-      git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, reviewedCommit: 'abc123', mergedAt: 5678 },
+      git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', worktreePath: '/wt/t1', committedAt: 1234, reviewedCommit: 'abc123', mergedAt: 5678 },
     }
     const parsed = parseLedger(JSON.stringify([base]))
-    expect(parsed[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo', committedAt: 1234, reviewedCommit: 'abc123', mergedAt: 5678 })
+    expect(parsed[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo', worktreePath: '/wt/t1', committedAt: 1234, reviewedCommit: 'abc123', mergedAt: 5678 })
     // A half-written state (no usable triple) drops the field entirely.
     const broken = parseLedger(JSON.stringify([{ ...base, git: { branch: '', base: 'main', repoPath: '/repo', committedAt: 1 } }]))
     expect(broken[0].git).toBeUndefined()
@@ -190,6 +190,10 @@ describe('parseLedger', () => {
     // review it does not have.
     const reviewed = parseLedger(JSON.stringify([{ ...base, git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', reviewedCommit: 42 } }]))
     expect(reviewed[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo' })
+    // A worktree path is optional and repaired like the other strings: a blank
+    // one just means "no worktree", the card keeps the legacy shared checkout.
+    const noWorktree = parseLedger(JSON.stringify([{ ...base, git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', worktreePath: '   ' } }]))
+    expect(noWorktree[0].git).toEqual({ branch: 'task/a-t1', base: 'main', repoPath: '/repo' })
   })
   it('round-trips execution targets and repairs broken ones', () => {
     const pinned = createTask(

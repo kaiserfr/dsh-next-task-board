@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { SessionSummary } from '@deepseek-ai/dsh-api-session-controller/types'
@@ -159,6 +162,30 @@ describe('HostExecutionRunner', () => {
     expect(order).toEqual(['preset', 'create', 'rename', 'permission', 'prompt'])
     expect(gateway.invoke.mock.calls[1]?.[0].args).toEqual({ request: { workspaceId: 'workspace-a', agentPreset: 'preset-a' } })
     expect(promptPayloads).toEqual([{ sessionId: 'session-a', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: `do work\n\n${COMPLETION_INSTRUCTION}` }] }])
+  })
+
+  it('creates the session on the card worktree instead of the pinned workspace', async () => {
+    // The card works in its own checkout: the session is created with that
+    // directory as its cwd, so the human's main checkout stays untouched.
+    const worktree = mkdtempSync(join(tmpdir(), 'dsh-task-board-worktree-'))
+    const commands = { execute: vi.fn(async () => ({ kind: 'success' as const })) }
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => {
+        if (request.namespace === 'agentPresets') return { presets: [{ id: 'preset-a', isDefault: false }] }
+        if (request.method === 'create') return { sessionId: 'session-a' }
+        if (request.method === 'rename') return { title: 'Run me', seq: 1 }
+        if (request.method === 'prompt') return { accepted: true }
+        throw new Error('unexpected gateway call')
+      }),
+    }
+    const task: TaskRecord = {
+      ...configuredTask(),
+      git: { branch: 'task/run-me-task-a', base: 'main', repoPath: '/repo', worktreePath: worktree },
+    }
+    await expect(new HostExecutionRunner(gateway, commands, workspaceRegistry()).launch(task)).resolves.toBe('session-a')
+    expect(gateway.invoke.mock.calls.find(call => (call[0] as GatewayRequest).method === 'create')?.[0].args)
+      .toEqual({ request: { cwd: worktree, agentPreset: 'preset-a' } })
+    rmSync(worktree, { recursive: true, force: true })
   })
 
   it('continues in the reused session without creating or renaming one (#1419)', async () => {

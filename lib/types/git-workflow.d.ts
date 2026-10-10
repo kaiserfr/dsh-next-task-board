@@ -4,17 +4,50 @@ import type { TaskBoardWorkspaceRegistry } from './host-runner.ts';
 export declare const TASK_BRANCH_PREFIX = "task/";
 /** Feature branch name of a task: `task/<title-slug>-<id8>`. */
 export declare function taskBranch(task: TaskRecord): string;
+/** Options of the git integration. */
+export interface GitWorkflowOptions {
+    /**
+     * Directory the per-card worktrees are created in; one subdirectory per card
+     * id. Defaults to `$DSH_HOME/task-board/worktrees`, so the board owns them and
+     * nothing appears next to the user's repository.
+     */
+    worktreesRoot?: string;
+}
 export declare class GitWorkflow {
     private readonly registry?;
-    constructor(registry?: TaskBoardWorkspaceRegistry | undefined);
+    private readonly worktreesRoot;
+    constructor(registry?: TaskBoardWorkspaceRegistry | undefined, options?: GitWorkflowOptions);
     private run;
     /** Worktree of the task's pinned workspace when it is a git repository. */
     repoPath(task: TaskRecord): string | undefined;
     /**
-     * Cut (or re-check-out) the task's feature branch, cut from the current
-     * branch. Called on the `backlog` → `todo` move.
+     * Cut (or re-attach) the task's feature branch and its own worktree. Called on
+     * the `backlog` → `clarification` move.
+     *
+     * A branch that already exists is re-used (a card passing the step again, or a
+     * restart) and only gets a worktree when it has none. The worktree is cut from
+     * the base branch, so it never carries the main checkout's uncommitted state.
+     * When git refuses the worktree, the historical shared checkout is used
+     * instead: the card keeps working, just without its own directory.
      */
     openBranch(task: TaskRecord): TaskGit | undefined;
+    /**
+     * The card's worktree directory, attached when it is missing: `git worktree
+     * add` for a new branch, `git worktree add <path> <branch>` for an existing
+     * one (a re-entered step, or a restart). Returns false when git refuses, so
+     * the caller can fall back to the shared checkout.
+     */
+    private attachWorktree;
+    /** Whether git lists `worktreePath` as a worktree of `repoPath`. */
+    private isWorktreeOf;
+    /** Absolute worktree directory of a card: one per card id. */
+    private worktreePath;
+    /**
+     * Where the card's work happens right now: its worktree when that directory
+     * exists (the branch is fixed there, so no checkout), otherwise the main
+     * checkout (which the caller has to put on the card's branch).
+     */
+    private workDir;
     /**
      * Commit what the worktree holds onto the card's feature branch, stamping
      * `committedAt`. Called whenever a card reaches `ready_for_test` — the
@@ -36,7 +69,11 @@ export declare class GitWorkflow {
      *   undefined without a repository.
      */
     commitBranch(task: TaskRecord, now: number): TaskGit | undefined;
-    /** Check out the task's recorded feature branch before it runs. */
+    /**
+     * Put the card's branch in place before it runs. A card with its own worktree
+     * needs nothing: that directory stands on its branch already and switching
+     * branches there is exactly the yank the worktree exists to prevent.
+     */
     useBranch(task: TaskRecord): void;
     /**
      * Merge the card's feature branch back into the base branch — but only the
@@ -60,6 +97,13 @@ export declare class GitWorkflow {
      * @returns the git state stamped with `mergedAt`, or undefined without one.
      */
     mergeBranch(task: TaskRecord, now: number): TaskGit | undefined;
+    /**
+     * Drop the card's worktree after its branch was merged: the directory was
+     * disposal-only from the start (the branch, the commits and the review stamp
+     * all survive in the repository). A worktree git refuses to remove — untracked
+     * build artifacts, a lock — is left alone and never fails the accept.
+     */
+    private removeWorktree;
     /**
      * Branch a new feature branch starts from: HEAD while it is a normal branch,
      * otherwise the repository's main branch (a second card pulled into `todo`

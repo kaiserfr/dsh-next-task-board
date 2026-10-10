@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import type { SessionAddress, SessionControlBaseline, SessionControlFrame, SessionHistoryRecord, SessionListValue, SessionPage, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { CommandResult } from '@deepseek-ai/dsh-commands/types'
@@ -502,8 +503,15 @@ export class HostExecutionRunner {
       }
       return reused
     }
+    // A card with its own git worktree runs *in that directory*: the session is
+    // created on the worktree path instead of the pinned workspace, so the human's
+    // main checkout keeps whatever branch and state they left it in. The pinned
+    // workspace above is still validated — it names the repository the worktree
+    // was cut from.
+    const worktree = task.git?.worktreePath
+    const inWorktree = worktree !== undefined && existsSync(worktree)
     const created = await this.invoke('session', 'create', {
-      ...(workspaceId === undefined ? {} : { workspaceId }),
+      ...(inWorktree ? { cwd: worktree } : workspaceId === undefined ? {} : { workspaceId }),
       ...(mode === undefined ? {} : { agentPreset: mode }),
     }) as { sessionId: ExecutionSessionId }
     const sessionId = created.sessionId
