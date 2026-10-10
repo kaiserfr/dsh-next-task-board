@@ -319,7 +319,24 @@ function implementPrompt(): string {
  */
 export function promptText(task: TaskRecord, options: PromptTextOptions = {}): string {
   if (options.clarification === true) return clarificationPrompt(task)
-  return `${implementationTurn(task, options)}\n\n${COMPLETION_INSTRUCTION}`
+  const environment = environmentNote(task)
+  const base = environment === undefined
+    ? implementationTurn(task, options)
+    : `${implementationTurn(task, options)}\n\n${environment}`
+  return `${base}\n\n${COMPLETION_INSTRUCTION}`
+}
+
+/**
+ * The card's running Docker Compose environment, when it has one. The agent works
+ * *in* that stack (its worktree is the compose project directory), so it has to
+ * know the project name — and that it must not start a second instance under the
+ * default project name.
+ */
+function environmentNote(task: TaskRecord): string | undefined {
+  const compose = task.compose
+  if (compose === undefined || compose.startedAt === undefined || compose.error !== undefined) return undefined
+  const ports = compose.ports === undefined || compose.ports.length === 0 ? '' : ` Veröffentlichte Ports: ${compose.ports.join(', ')}.`
+  return `Entwicklungsumgebung dieser Karte: das Docker-Compose-Projekt \`${compose.project}\` läuft bereits in deinem Arbeitsverzeichnis. Nutze es mit \`docker compose -p ${compose.project} ps|logs|exec ...\`; starte keine zweite Instanz und ändere die Ports nicht.${ports}`
 }
 
 /**

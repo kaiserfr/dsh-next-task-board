@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **einundzwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 und 24) plus drei
+Kurzfassung: **zweiundzwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 und 25) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -42,6 +42,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 22 | **Mehr können** | **Spec-Freigabe-Gate vor jedem Implementierungslauf**: `specApprovedAt` wird ausschließlich von der Host-Aktion `approve-spec` gesetzt (Knopf „Spezifikation freigeben" in der Kartendetailansicht). Jeder `run`-Weg prüft sie serverseitig — der Zug auf die Laufspalte, der Ausführen-Knopf und `rerun` werden mit `spec-approval-required` abgelehnt, Cron überspringt die Karte und rollt den nächsten Termin; der Klärungslauf (`clarify`) ist nicht betroffen. Eine Inhaltsänderung (Titel/Beschreibung/Prompt/Parse-Text) entwaffnet die Freigabe wieder, ebenso ein Import |
 | 23 | **Mehr können** | **Eigene Klärungsspalte**: `backlog → clarification` (Aktion `clarify`) startet den Klärungslauf in der neuen Spalte, die Karte bleibt dort (`clarification → todo` schließt den Schritt, `clarification → backlog` schickt zurück, `todo → clarification` öffnet dieselbe Konversation erneut); `backlog → todo` gibt es nicht mehr, ebenso keine Transition aus Backlog/Klärung direkt nach „In progress“. Die Spalte ist WIP-frei, wartende Fragen werden dort erkannt, und ein Gruppen-Drop in die Klärungsspalte wird abgelehnt (er würde die Runde überspringen) |
 | 24 | **Mehr können** | **Git-Worktree pro Karte**: `git.openBranch` legt neben dem Feature-Branch einen eigenen Checkout unter `$DSH_HOME/task-board/worktrees/<Karten-Id>` an (`TaskGit.worktreePath`), und die Ausführungssitzung wird mit diesem Verzeichnis als `cwd` erstellt — die Hauptcheckout des Menschen bleibt auf ihrem Branch und unangetastet, zwei Karten eines Workspace teilen sich kein Verzeichnis mehr. `useBranch` ist dort ein No-op, Commit und Review-Gate arbeiten im Worktree, nur der Merge läuft in der Hauptcheckout und entfernt danach den Wegwerf-Worktree. Wo `git worktree` verweigert, fällt das Board auf die alte gemeinsame Checkout zurück |
+| 25 | **Mehr können** | **Eigene Container pro Karte (Docker Compose)**: liegt im Worktree der Karte eine Compose-Datei (Einstellung `composeFile`, Default `docker-compose.yml`, leer = aus), bringt der Host vor jedem Implementierungslauf eine **eigene Stack-Instanz** hoch — Projektname `dsh-tb-<Karten-Id>`, alles im Worktree der Karte, Ports werden aus `docker compose ps` zurückgelesen und auf der Karte angezeigt. Die Umgebung lebt, solange die Karte läuft oder im Review steht, und wird beim Verlassen dieser Spalten, beim Löschen und beim Archivieren mit `docker compose down -v` gestoppt; ein fehlgeschlagener Start lässt den Lauf scheitern und zeigt dockers Ausgabe auf der Karte |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -814,6 +815,56 @@ Die englische Fassung dieser Übersicht steht im README unter
     - Abgedeckt durch `tests/git-workflow.spec.ts` (Anlegen, zweiter Worktree,
       `useBranch`, Commit/Merge im Worktree, Aufräumen nach dem Merge),
       `tests/host-runner.spec.ts` (Sitzung mit `cwd`) und `tests/store.spec.ts`.
+
+25. **Eigene Container pro Karte (Docker Compose)** — jede Karte arbeitet gegen
+    ihre eigene Instanz der Anwendung, ohne die Container des Menschen
+    anzufassen.
+    - **Erkennung statt Konfiguration:** die Datei kommt aus der Einstellung
+      `composeFile` (Default `docker-compose.yml`), gesucht im Worktree der
+      Karte, mit `compose.yaml`/`docker-compose.yaml` als Rückfall. Keine Datei
+      heißt keine Umgebung (der Normalfall, kein Fehler); ein leerer Wert
+      schaltet die Funktion ganz ab.
+    - **Projekt je Karte:** jeder Aufruf läuft mit `-p dsh-tb-<Karten-Id>` und
+      `COMPOSE_PROJECT_NAME` im Worktree der Karte, die Karten-Id reist zusätzlich
+      als `DSH_TASK_ID` in die Umgebung (Compose-Dateien können ihre Ports darauf
+      schlüsseln). Container, Netze und Volumes gehören damit dieser einen Karte.
+    - **Lebenszyklus:** `docker compose up -d` läuft **vor** dem Prompt des
+      Implementierungslaufs (eine Klärungsrunde braucht keine Umgebung), danach
+      werden die veröffentlichten Ports per `docker compose ps --format json`
+      zurückgelesen und an der Karte angezeigt. Die Umgebung lebt, solange die
+      Karte `running` oder `ready_for_test` ist (der Mensch testet dagegen), und
+      wird sonst mit `docker compose down -v --remove-orphans` gestoppt — beim
+      Verlassen dieser Spalten, beim Archivieren, beim Löschen oder wenn die
+      Karte aus dem Ledger verschwunden ist. Ein Host-Neustart lässt die Stacks
+      stehen (ihr Eintrag steht im Ledger) und räumt danach weiter auf.
+    - **Asynchron, aber fail-closed:** die Compose-Aufrufe nutzen `spawn` (nie
+      `spawnSync`) — ein `up` kann Images bauen und würde die Oberfläche sonst
+      einfrieren. Eine konfigurierte Umgebung, die nicht hochkommt, lässt den
+      Lauf **vor** der Agentenarbeit scheitern: dockers Ausgabe landet in der
+      Ausführung (`error`) und als `TaskCompose.error` auf der Karte.
+    - **Ports pro Karte über die Umgebung:** die Compose-Datei wird nie
+      umgeschrieben. Stattdessen injiziert die Einstellung `composeEnv`
+      (`KEY=VALUE`, Komma/Zeilen) Variablen in den Stack: `{port}` wird durch
+      einen freien Host-Port ersetzt — auf 127.0.0.1 geprüft, ab
+      `DEFAULT_COMPOSE_PORT_BASE` (8100) um die Karten-Id verschoben, bis ein
+      freier Port gefunden ist — und `{task}` durch die Karten-Id. Der gewählte
+      Port wird **an der Karte gemerkt** (`TaskCompose.env.DSH_COMPOSE_PORT`),
+      ein erneuter Lauf baut den Stack also wieder auf demselben Port auf. Damit
+      bekommt eine Datei mit variablem Port (`${PORT:-8092}`) pro Karte ihren
+      eigenen Port, statt mit dem Stack des Menschen zu kollidieren
+      (`composeEnv: PORT={port}` ist die ganze Konfiguration). Fest verdrahtete
+      Ports kollidieren weiterhin — compose sagt es, die Karte zeigt es.
+    - **Im Prompt angekündigt:** ist die Umgebung hochgefahren, sagt der
+      Implementierungs-Prompt Projektname und veröffentlichte Ports und verlangt,
+      den Stack über `docker compose -p <project> ...` zu benutzen statt eine
+      zweite Instanz zu starten (deren Projektname sonst der des
+      Arbeitsverzeichnisses wäre).
+    - Auf der Karte: ein Abschnitt „Entwicklungsumgebung (Docker Compose)"
+      (`data-dsh-part="compose"`) mit Projekt, Startzeit, Ports bzw. Fehler.
+    - Abgedeckt durch `tests/compose-workflow.spec.ts` (Projektname, Dateisuche,
+      argv und Arbeitsverzeichnis über einen docker-Stub, Port-Parsing, Fehler,
+      Teardown) und `tests/compose-lifecycle.spec.ts` (Hochfahren vor dem Lauf,
+      Erhalt im Review, Abbau bei Rückgabe/Löschen, fehlgeschlagener Start).
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

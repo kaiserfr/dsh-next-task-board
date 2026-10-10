@@ -20,6 +20,10 @@ export interface TaskBoardSettings {
     maxConcurrentRuns?: number;
     /** Done-column limit: on-board Done cards before the oldest is archived (default 20). */
     maxDoneTasks?: number;
+    /** Compose file a card's task environment is brought up from (empty: no task containers). */
+    composeFile?: string;
+    /** Environment of a card's stack, `KEY=VALUE` pairs with `{port}`/`{task}` (e.g. `PORT={port}`). */
+    composeEnv?: string;
     /** The board's state machine: columns, allowed transitions, transition actions. */
     stateMachine?: StateMachineConfig;
 }
@@ -35,6 +39,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
     maxConcurrentRuns: CardFieldState;
     /** Done-column limit draft. */
     maxDoneTasks: CardFieldState;
+    /** Task-environment compose file draft. */
+    composeFile: CardFieldState;
+    /** Task-environment variables draft. */
+    composeEnv: CardFieldState;
     /** State-machine JSON draft. */
     stateMachine: CardFieldState;
 }

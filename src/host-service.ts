@@ -3,6 +3,8 @@ import { nextRunAtMs } from './core/schedule.ts'
 import { reusableSessionId } from './core/session-reuse.ts'
 import { taskLane } from './core/tasks.ts'
 import { HostTaskLedger, type OpenedRun, type OpenExecutionReference, type PausedRun, type ResumedRun } from './host-ledger.ts'
+import type { TaskCompose, TaskRecord as ComposeTaskRecord } from './core/tasks.ts'
+import { ComposeWorkflow, composeDir, composeProject, type TaskComposeController } from './compose-workflow.ts'
 import { HostExecutionRunner, SessionLaunchError, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
 import { GitWorkflow } from './git-workflow.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
@@ -26,6 +28,8 @@ export class TaskBoardHostService {
   readonly power: PowerInhibitor
   /** Shared git integration: branch hooks in the ledger, checkout before a run. */
   readonly git: GitWorkflow
+  /** Task-scoped Docker Compose environments: up before a run, down afterwards. */
+  readonly compose: TaskComposeController
   private readonly listeners = new Set<() => void>()
   private timers: Array<ReturnType<typeof setInterval>> = []
   private lastScheduleTick: number | undefined
@@ -78,6 +82,14 @@ export class TaskBoardHostService {
    */
   private readonly answerWatches = new Map<string, { updatedAt: number; running: boolean; awaiting: boolean }>()
   private lastPowerJson = ''
+  /**
+   * Card environments the board brought up (card id → project), plus the
+   * directory each project lives in. The ledger holds the same record on the
+   * card; this map is what lets the Host tear a project down after the card is
+   * gone (deleted, archived, or dropped from the ledger entirely).
+   */
+  private readonly composeProjects = new Map<string, { project: string; dir: string }>()
+  private composeBusy = false
   private readonly now: () => number
 
   constructor(gateway: TypertGateway, options: {
@@ -88,14 +100,22 @@ export class TaskBoardHostService {
     workspaceRegistry?: TaskBoardWorkspaceRegistry
     sessionDefaultPermission?: TaskPermission
     git?: GitWorkflow
+    /** Docker Compose environments per card; omit for the default workflow. */
+    compose?: TaskComposeController
+    /** Compose file inside the card's worktree (settings `composeFile`). */
+    composeFile?: string
     /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
     stateMachine?: unknown
   } = {}) {
     this.git = options.git ?? new GitWorkflow(options.workspaceRegistry)
+    this.compose = options.compose ?? new ComposeWorkflow({ ...(options.composeFile === undefined ? {} : { file: options.composeFile }) })
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git, stateMachine: options.stateMachine })
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry)
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
+    // Environments survive a Host restart (the review keeps its stack); the
+    // ledger is the record of what is running, so seed the project map from it.
+    this.seedComposeProjects()
     installStreamErrorGuards()
     this.ledger.subscribe(() => {
       this.syncPowerReasons()
@@ -167,6 +187,24 @@ export class TaskBoardHostService {
    * FIFO).
    * @param limit - configured maximum; values below 1 or non-finite keep the default.
    */
+  /**
+   * Point the compose integration at another file (settings `composeFile`); an
+   * empty value disables task environments. Projects already running keep their
+   * file — the setting decides what new runs bring up.
+   */
+  setComposeFile(file: string): void {
+    if ('setFile' in this.compose && typeof this.compose.setFile === 'function') this.compose.setFile(file)
+  }
+
+  /**
+   * Point the compose integration at another environment template (settings
+   * `composeEnv`): `KEY=VALUE` pairs, `{port}` for a free per-card host port and
+   * `{task}` for the card id.
+   */
+  setComposeEnv(env: string): void {
+    if ('setEnv' in this.compose && typeof this.compose.setEnv === 'function') this.compose.setEnv(env)
+  }
+
   setMaxDoneTasks(limit: number): void {
     this.ledger.setMaxDoneTasks(limit)
   }
@@ -282,6 +320,14 @@ export class TaskBoardHostService {
       // branch out while a same-lane run is working would yank that run's
       // worktree out from under it.
       if (!clarification) this.git.useBranch(opened.task)
+      // The card's development environment is part of its run: the stack is up
+      // (and its ports known) before the agent gets its prompt. A clarification
+      // round needs no environment — it implements nothing. A failed start
+      // therefore fails the run, with docker's own output on the card.
+      if (!clarification) await this.ensureCompose(opened.task)
+      // The environment record was written to the ledger above, and the prompt
+      // names it: the run gets the refreshed card, not the pre-launch copy.
+      const launched = this.ledger.state().tasks.find(task => task.id === opened.task.id) ?? opened.task
       // A rework round continues the conversation it corrects, whether or not
       // the card opted into session reuse: the correction was written into that
       // chat, so a fresh session would lose it. There is nothing for the board
@@ -302,7 +348,7 @@ export class TaskBoardHostService {
       // fresh one, or a previous run's conversation) still needs the full prompt.
       const implement = !clarification && reuseSessionId !== undefined && reuseSessionId === opened.task.clarificationSessionId
       const clarificationSessionId = opened.task.clarificationSessionId
-      const sessionId = await this.runner.launch(opened.task, clarification
+      const sessionId = await this.runner.launch(launched, clarification
         ? {
             clarification: true,
             ...(clarificationSessionId === undefined ? {} : { reuseSessionId: clarificationSessionId }),
@@ -394,8 +440,79 @@ export class TaskBoardHostService {
     })().catch(error => { safeConsoleError('[dsh-task-board] resume handling failed', error) })
   }
 
+  /** Re-attach the projects recorded in the ledger (they outlive a Host restart). */
+  private seedComposeProjects(): void {
+    for (const task of this.ledger.state().tasks) {
+      const compose = task.compose
+      if (compose === undefined || compose.startedAt === undefined || compose.error !== undefined) continue
+      const dir = composeDir(task)
+      if (dir !== undefined) this.composeProjects.set(task.id, { project: compose.project, dir })
+    }
+  }
+
+  /**
+   * Bring the card's Docker Compose environment up before its run starts, and
+   * record project, ports and failures on the card. A card whose worktree holds
+   * no compose file has no environment: that is the normal case, not an error.
+   * The failure of a *configured* environment is not swallowed — the run fails,
+   * because implementing against an environment that did not come up is worse
+   * than not starting.
+   */
+  private async ensureCompose(task: ComposeTaskRecord): Promise<void> {
+    if (this.disposed) return
+    const dir = composeDir(task)
+    if (dir === undefined) return
+    // `up -d` is idempotent and cheap on a project that already runs, so it is
+    // simply repeated: that way a stack removed behind the board's back (a
+    // manual `docker compose down`, a Host restart after a prune) is back before
+    // the agent starts, instead of being assumed alive.
+    let compose: TaskCompose | undefined
+    try {
+      compose = await this.compose.up(task)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.ledger.noteCompose(task.id, { project: task.compose?.project ?? composeProject(task), file: task.compose?.file ?? 'docker-compose.yml', error: message, startedAt: this.now() })
+      throw error
+    }
+    if (compose === undefined) return
+    this.composeProjects.set(task.id, { project: compose.project, dir })
+    this.ledger.noteCompose(task.id, compose)
+  }
+
+  /**
+   * Tear down every card environment that is no longer wanted: the stack lives
+   * while the card runs or waits for the review, and stops as soon as it leaves
+   * those columns, is archived, or disappears from the ledger (deleted). The map
+   * is what covers the deleted card — its record is gone, the project name is
+   * not. Nothing here blocks a ledger write: compose runs in the background.
+   */
+  private reconcileCompose(): void {
+    if (this.disposed || this.composeProjects.size === 0) return
+    const keep = new Set<string>()
+    for (const task of this.ledger.state().tasks) {
+      const wanted = task.archivedAt === undefined && (task.status === 'running' || task.status === 'ready_for_test')
+      const record = this.composeProjects.get(task.id)
+      if (record === undefined) continue
+      if (wanted) keep.add(task.id)
+      // A card that is back in a waiting column (or failed) keeps no stack; the
+      // next run brings a fresh one up.
+      else this.ledger.noteCompose(task.id, undefined)
+    }
+    for (const [taskId, entry] of [...this.composeProjects]) {
+      if (keep.has(taskId)) continue
+      this.composeProjects.delete(taskId)
+      void this.compose.down(entry.project, entry.dir).catch(error => {
+        safeConsoleError(`[dsh-task-board] could not stop the environment of task ${taskId}`, error)
+      })
+    }
+  }
+
   private async pollSessions(): Promise<void> {
     if (this.disposed) return
+    // Environments are reconciled on every poll, whether or not the board is
+    // active: a stack whose card left the run/review columns (or is gone) must
+    // not keep running just because the plugin was switched off meanwhile.
+    this.reconcileCompose()
     if (!this.active && this.ledger.runtimeView().openExecutions.length === 0) return
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
@@ -429,6 +546,9 @@ export class TaskBoardHostService {
     await this.refreshAwaitingAnswers(running.items)
     // A settle (or a pause) just released a lane: start whatever is waiting.
     this.pumpLaunchQueue()
+    // A settle may have parked the card (the stack stays) — and a card that left
+    // the review columns is torn down on the next poll.
+    this.reconcileCompose()
   }
 
   /**

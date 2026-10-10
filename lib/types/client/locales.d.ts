@@ -218,6 +218,14 @@ export declare const zh: {
     'settings.maxConcurrentRuns': string;
     'settings.maxConcurrentRunsHint': string;
     'settings.maxDoneTasks': string;
+    'settings.composeFile': string;
+    'settings.composeFileHint': string;
+    'settings.composeEnv': string;
+    'settings.composeEnvHint': string;
+    'detail.compose': string;
+    'detail.composeRunning': string;
+    'detail.composePorts': string;
+    'detail.composeError': string;
     'settings.maxDoneTasksHint': string;
     'settings.stateMachine': string;
     'settings.stateMachineHint': string;

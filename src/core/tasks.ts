@@ -142,6 +142,32 @@ export interface TaskGit {
 }
 
 /**
+ * Docker Compose environment of a card: the task-scoped project the board
+ * brought up in the card's worktree, its published ports, and the last failure
+ * so the reason stays visible on the card. Absent on cards whose worktree holds
+ * no compose file (the feature is discovered, not configured).
+ */
+export interface TaskCompose {
+  /** Compose project name, derived from the card id (`dsh-tb-<id8>`). */
+  project: string
+  /** Absolute compose file the project was brought up with. */
+  file: string
+  /** When the environment was started (ms epoch). */
+  startedAt?: number
+  /** Published host ports, as `service host->container/proto`. */
+  ports?: string[]
+  /**
+   * Environment the stack was brought up with, as `KEY=VALUE`. The assigned
+   * host port (`DSH_COMPOSE_PORT`, substituted into the setting `composeEnv`)
+   * is remembered here, so re-running a card re-creates its stack on the very
+   * port the human already knows instead of probing for a new one.
+   */
+  env?: Record<string, string>
+  /** Why the last start failed (ms epoch of the attempt is `startedAt`). */
+  error?: string
+}
+
+/**
  * Frozen context snapshot carried by a continuation card (issue #4): the
  * goal/progress/next text (already sanitized by the freeze gates) plus the
  * freeze instant and the redaction warning flag.
@@ -375,6 +401,12 @@ export interface TaskRecord {
    * cards whose workspace is not a git worktree.
    */
   git?: TaskGit
+  /**
+   * Task-scoped Docker Compose environment of the card (see {@link TaskCompose}).
+   * Written by the Host service: brought up before an implementation run, torn
+   * down when the card leaves the run/review columns, is deleted or archived.
+   */
+  compose?: TaskCompose
   /**
    * When the task was archived (ms epoch). Archived tasks keep their status
    * and execution history, leave the main board, and cannot run until restored;

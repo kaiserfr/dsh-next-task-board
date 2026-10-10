@@ -1,3 +1,4 @@
+import type { TaskCompose } from './core/tasks.ts';
 import { type ExecutionRecord, type TaskRecord } from './core/tasks.ts';
 import { type StateMachine } from './core/state-machine.ts';
 import { type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts';
@@ -250,6 +251,13 @@ export declare class HostTaskLedger {
     skipMissed(now: number): void;
     setScheduler(patch: Partial<TaskBoardSchedulerSnapshot>): void;
     attachSession(taskId: string, executionId: string, sessionId: string): void;
+    /**
+     * Record the card's Docker Compose environment (or clear it with `undefined`).
+     * Like {@link HostTaskLedger.attachSession} this is a Host-side write, not a
+     * browser action: the service owns the lifecycle, and the record only makes
+     * the state — project, ports, failure — visible on the card.
+     */
+    noteCompose(taskId: string, compose: TaskCompose | undefined): void;
     settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void;
     private apply;
     private repairSchedules;

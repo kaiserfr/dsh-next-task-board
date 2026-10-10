@@ -10,7 +10,7 @@
  * localStorage backend.
  */
 import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
+import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskCompose, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
@@ -181,6 +181,36 @@ function normalizeGit(value: unknown): TaskGit | undefined {
   }
 }
 
+/**
+ * Repair a persisted compose state: without a project and a file there is
+ * nothing to tear down, so the field drops (mirroring the git repair policy).
+ * Ports and the error are sanitized but never required.
+ */
+function normalizeCompose(value: unknown): TaskCompose | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const row = value as Record<string, unknown>
+  const project = typeof row.project === 'string' ? row.project.trim() : ''
+  const file = typeof row.file === 'string' ? row.file.trim() : ''
+  if (project === '' || file === '') return undefined
+  const startedAt = typeof row.startedAt === 'number' && Number.isFinite(row.startedAt) ? row.startedAt : undefined
+  const error = typeof row.error === 'string' && row.error.trim() !== '' ? row.error : undefined
+  const ports = Array.isArray(row.ports)
+    ? [...new Set(row.ports.filter((port): port is string => typeof port === 'string' && port.trim() !== ''))]
+    : undefined
+  const env = typeof row.env === 'object' && row.env !== null && !Array.isArray(row.env)
+    ? Object.fromEntries(Object.entries(row.env as Record<string, unknown>)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : undefined
+  return {
+    project,
+    file,
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(ports === undefined || ports.length === 0 ? {} : { ports }),
+    ...(env === undefined || Object.keys(env).length === 0 ? {} : { env }),
+    ...(error === undefined ? {} : { error }),
+  }
+}
+
 /** Parse + validate a persisted ledger document; invalid rows are dropped. */export function parseLedger(raw: string | null): TaskRecord[] {
   if (raw === null) return []
   let parsed: unknown
@@ -224,6 +254,7 @@ function normalizeGit(value: unknown): TaskGit | undefined {
     task.freeze = normalizeFreeze(row.freeze)
     task.handover = normalizeHandover(row.handover)
     task.git = normalizeGit(row.git)
+    task.compose = normalizeCompose(row.compose)
     // Tags are repaired field by field like the schedule: a malformed entry is
     // dropped, and a list that repairs to nothing clears the field instead of
     // dropping the task row.

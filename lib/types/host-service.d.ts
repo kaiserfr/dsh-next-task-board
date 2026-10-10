@@ -1,5 +1,6 @@
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway';
 import { HostTaskLedger } from './host-ledger.ts';
+import { type TaskComposeController } from './compose-workflow.ts';
 import { HostExecutionRunner, type SessionCommandDispatcher, type TaskBoardWorkspaceRegistry } from './host-runner.ts';
 import { GitWorkflow } from './git-workflow.ts';
 import { PowerInhibitor } from './power-inhibitor.ts';
@@ -11,6 +12,8 @@ export declare class TaskBoardHostService {
     readonly power: PowerInhibitor;
     /** Shared git integration: branch hooks in the ledger, checkout before a run. */
     readonly git: GitWorkflow;
+    /** Task-scoped Docker Compose environments: up before a run, down afterwards. */
+    readonly compose: TaskComposeController;
     private readonly listeners;
     private timers;
     private lastScheduleTick;
@@ -63,6 +66,14 @@ export declare class TaskBoardHostService {
      */
     private readonly answerWatches;
     private lastPowerJson;
+    /**
+     * Card environments the board brought up (card id → project), plus the
+     * directory each project lives in. The ledger holds the same record on the
+     * card; this map is what lets the Host tear a project down after the card is
+     * gone (deleted, archived, or dropped from the ledger entirely).
+     */
+    private readonly composeProjects;
+    private composeBusy;
     private readonly now;
     constructor(gateway: TypertGateway, options?: {
         ledger?: HostTaskLedger;
@@ -72,6 +83,10 @@ export declare class TaskBoardHostService {
         workspaceRegistry?: TaskBoardWorkspaceRegistry;
         sessionDefaultPermission?: TaskPermission;
         git?: GitWorkflow;
+        /** Docker Compose environments per card; omit for the default workflow. */
+        compose?: TaskComposeController;
+        /** Compose file inside the card's worktree (settings `composeFile`). */
+        composeFile?: string;
         /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
         stateMachine?: unknown;
     });
@@ -92,6 +107,18 @@ export declare class TaskBoardHostService {
      * FIFO).
      * @param limit - configured maximum; values below 1 or non-finite keep the default.
      */
+    /**
+     * Point the compose integration at another file (settings `composeFile`); an
+     * empty value disables task environments. Projects already running keep their
+     * file — the setting decides what new runs bring up.
+     */
+    setComposeFile(file: string): void;
+    /**
+     * Point the compose integration at another environment template (settings
+     * `composeEnv`): `KEY=VALUE` pairs, `{port}` for a free per-card host port and
+     * `{task}` for the card id.
+     */
+    setComposeEnv(env: string): void;
     setMaxDoneTasks(limit: number): void;
     /**
      * Apply the board's state machine (settings namespace `task-board`, field
@@ -123,6 +150,25 @@ export declare class TaskBoardHostService {
      * conversation to continue, so it starts like any other run.
      */
     private resumePausedRun;
+    /** Re-attach the projects recorded in the ledger (they outlive a Host restart). */
+    private seedComposeProjects;
+    /**
+     * Bring the card's Docker Compose environment up before its run starts, and
+     * record project, ports and failures on the card. A card whose worktree holds
+     * no compose file has no environment: that is the normal case, not an error.
+     * The failure of a *configured* environment is not swallowed — the run fails,
+     * because implementing against an environment that did not come up is worse
+     * than not starting.
+     */
+    private ensureCompose;
+    /**
+     * Tear down every card environment that is no longer wanted: the stack lives
+     * while the card runs or waits for the review, and stops as soon as it leaves
+     * those columns, is archived, or disappears from the ledger (deleted). The map
+     * is what covers the deleted card — its record is gone, the project name is
+     * not. Nothing here blocks a ledger write: compose runs in the background.
+     */
+    private reconcileCompose;
     private pollSessions;
     /**
      * Recompute which cards wait for the human's answer and publish the change.

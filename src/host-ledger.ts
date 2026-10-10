@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
+import type { TaskCompose } from './core/tasks.ts'
 import { DEFAULT_MAX_DONE_TASKS, hasOpenRun, isReworkReturn, openExecution, requiresSpecApproval, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
@@ -816,6 +817,25 @@ export class HostTaskLedger {
         executions: task.executions.map(entry => entry.id === executionId ? { ...entry, sessionId } : entry),
       }
     })
+    this.commit()
+  }
+
+  /**
+   * Record the card's Docker Compose environment (or clear it with `undefined`).
+   * Like {@link HostTaskLedger.attachSession} this is a Host-side write, not a
+   * browser action: the service owns the lifecycle, and the record only makes
+   * the state — project, ports, failure — visible on the card.
+   */
+  noteCompose(taskId: string, compose: TaskCompose | undefined): void {
+    const now = this.now()
+    const task = this.document.tasks.find(item => item.id === taskId)
+    if (task === undefined) return
+    const current = JSON.stringify(task.compose ?? null)
+    const next = JSON.stringify(compose ?? null)
+    if (current === next) return
+    this.document.tasks = this.document.tasks.map(item => item.id === taskId
+      ? { ...item, compose, updatedAt: now }
+      : item)
     this.commit()
   }
 

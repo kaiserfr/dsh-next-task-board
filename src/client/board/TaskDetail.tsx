@@ -441,6 +441,25 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
             <p className={css.detailMeta}>{t('detail.permissionConfirmed', { time: formatHostTimestamp(current.permissionConfirmedAt, timeZone) })}</p>
           )}
 
+          {current.compose !== undefined && (
+            <section className={css.detailSection} data-dsh-part="compose">
+              <h4>{t('detail.compose')}</h4>
+              {current.compose.error === undefined ? (
+                <p className={css.detailMeta}>
+                  {t('detail.composeRunning', {
+                    project: current.compose.project,
+                    time: current.compose.startedAt === undefined ? '—' : formatHostTimestamp(current.compose.startedAt, timeZone),
+                  })}
+                </p>
+              ) : (
+                <p className={css.formError}>{t('detail.composeError', { error: current.compose.error })}</p>
+              )}
+              {current.compose.ports !== undefined && current.compose.ports.length > 0 && (
+                <p className={css.detailText}>{t('detail.composePorts', { ports: current.compose.ports.join(' · ') })}</p>
+              )}
+            </section>
+          )}
+
           {specPending && (
             <section className={css.detailSection} data-dsh-part="spec-gate">
               <p className={css.formError}>{t('detail.specPending')}</p>

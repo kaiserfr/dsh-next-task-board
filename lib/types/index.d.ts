@@ -65,6 +65,23 @@ export interface Config {
      * limit applies to the `done` column only.
      */
     maxDoneTasks?: Volatile<number>;
+    /**
+     * Compose file a card's task environment is brought up from, relative to the
+     * card's worktree. Absent uses `docker-compose.yml` (with `compose.yaml` and
+     * `docker-compose.yaml` as fallbacks); an empty value turns task containers
+     * off. The project name is derived from the card id, so every card gets its
+     * own stack, its own volumes and — as reported back from compose — its own
+     * published ports.
+     */
+    composeFile?: Volatile<string>;
+    /**
+     * Environment handed to every card's stack, as `KEY=VALUE` pairs (commas or
+     * newlines). `{port}` is replaced by a free host port assigned to the card and
+     * kept for it, `{task}` by its id — the way a compose file that publishes a
+     * fixed port (`${PORT:-8092}`) gets one port per card instead of colliding
+     * with the stack the human runs themselves. Example: `PORT={port}`.
+     */
+    composeEnv?: Volatile<string>;
     /** Canonical reverse-proxy Host authorities admitted with a server-side token. */
     trustedProxyHosts?: string[];
     /** Environment variable whose value the authenticated proxy injects upstream. */
@@ -83,6 +100,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     maxConcurrentRuns: z<number, number, "volatile-defined">;
     stateMachine: z<any, any, "volatile">;
     maxDoneTasks: z<number, number, "volatile-defined">;
+    composeFile: z<string, string, "volatile-defined">;
+    composeEnv: z<string, string, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;
     sessionDefaultPermission: z<"read-only" | "workspace-write" | "danger-full-access", "read-only" | "workspace-write" | "danger-full-access", "defined">;
@@ -93,6 +112,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     maxConcurrentRuns: z<number, number, "volatile-defined">;
     stateMachine: z<any, any, "volatile">;
     maxDoneTasks: z<number, number, "volatile-defined">;
+    composeFile: z<string, string, "volatile-defined">;
+    composeEnv: z<string, string, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;
     sessionDefaultPermission: z<"read-only" | "workspace-write" | "danger-full-access", "read-only" | "workspace-write" | "danger-full-access", "defined">;

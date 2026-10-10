@@ -10,7 +10,7 @@ import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { useEffect, useState } from 'react'
 import type { TaskBoardPowerSnapshot } from '../protocol.ts'
 import { PluginSettingsCard, BooleanField, ValueField } from './PluginSettingsCard.tsx'
-import { CardForm, booleanField, numberField, type CardActions, type CardShell, type FieldSpec, type FieldState as CardFieldState } from './settings-form.ts'
+import { CardForm, booleanField, numberField, textField, type CardActions, type CardShell, type FieldSpec, type FieldState as CardFieldState } from './settings-form.ts'
 import { normalizeStateMachine, type StateMachineConfig } from '../core/state-machine.ts'
 
 /**
@@ -48,6 +48,10 @@ export interface TaskBoardSettings {
   maxConcurrentRuns?: number
   /** Done-column limit: on-board Done cards before the oldest is archived (default 20). */
   maxDoneTasks?: number
+  /** Compose file a card's task environment is brought up from (empty: no task containers). */
+  composeFile?: string
+  /** Environment of a card's stack, `KEY=VALUE` pairs with `{port}`/`{task}` (e.g. `PORT={port}`). */
+  composeEnv?: string
   /** The board's state machine: columns, allowed transitions, transition actions. */
   stateMachine?: StateMachineConfig
 }
@@ -64,6 +68,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
   maxConcurrentRuns: CardFieldState
   /** Done-column limit draft. */
   maxDoneTasks: CardFieldState
+  /** Task-environment compose file draft. */
+  composeFile: CardFieldState
+  /** Task-environment variables draft. */
+  composeEnv: CardFieldState
   /** State-machine JSON draft. */
   stateMachine: CardFieldState
 }
@@ -89,6 +97,8 @@ export class TaskBoardSettingsCardController {
       booleanField('preventIdleSleep'),
       numberField('maxConcurrentRuns', { integer: true, min: 1 }),
       numberField('maxDoneTasks', { integer: true, min: 1 }),
+      textField('composeFile'),
+      textField('composeEnv'),
       jsonField('stateMachine', value => normalizeStateMachine(value).errors),
     ])
     this.store = this.form.bind(() => this.projection())
@@ -102,6 +112,8 @@ export class TaskBoardSettingsCardController {
       preventIdleSleep: this.form.field('preventIdleSleep'),
       maxConcurrentRuns: this.form.field('maxConcurrentRuns'),
       maxDoneTasks: this.form.field('maxDoneTasks'),
+      composeFile: this.form.field('composeFile'),
+      composeEnv: this.form.field('composeEnv'),
       stateMachine: this.form.field('stateMachine'),
     }
   }
@@ -226,6 +238,24 @@ export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
         {...state.maxDoneTasks}
         onEdit={(text) => { props.edit('maxDoneTasks', text) }}
         onReset={() => { props.resetField('maxDoneTasks') }}
+      />
+      <ValueField
+        id="settings-task-board-compose-file"
+        label={t('settings.composeFile')}
+        hint={t('settings.composeFileHint')}
+        {...fieldProps}
+        {...state.composeFile}
+        onEdit={(text) => { props.edit('composeFile', text) }}
+        onReset={() => { props.resetField('composeFile') }}
+      />
+      <ValueField
+        id="settings-task-board-compose-env"
+        label={t('settings.composeEnv')}
+        hint={t('settings.composeEnvHint')}
+        {...fieldProps}
+        {...state.composeEnv}
+        onEdit={(text) => { props.edit('composeEnv', text) }}
+        onReset={() => { props.resetField('composeEnv') }}
       />
       <ValueField
         id="settings-task-board-state-machine"

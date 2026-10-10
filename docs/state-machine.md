@@ -258,6 +258,48 @@ rework round, continues the corrected conversation, and opens with a short
 framing turn instead of the card body (see the README section *Write the
 correction into the card's chat*).
 
+## Task environments (Docker Compose)
+
+A card whose worktree carries a compose file gets **its own stack**, so the
+agent's work runs against a real application without touching the human's own
+containers:
+
+* **Discovery, not configuration**: the board looks for the configured file
+  (`composeFile`, default `docker-compose.yml`) in the card's worktree and falls
+  back to `compose.yaml` / `docker-compose.yaml`. No file means no environment —
+  that is the normal case, not an error. An empty `composeFile` turns the
+  feature off entirely.
+* **Task-scoped project**: every command runs with `-p dsh-tb-<id8>` and
+  `COMPOSE_PROJECT_NAME`, in the card's worktree, so containers, networks and
+  volumes belong to that card alone. The card id also travels in the environment
+  as `DSH_TASK_ID`, so a compose file can key its own variables on it.
+* **Lifecycle**: `docker compose up -d` runs **before the implementation run
+  gets its prompt** (a clarification round needs no environment), and the
+  published host ports are read back with `docker compose ps --format json` and
+  recorded on the card. The stack stays while the card is in `running` or
+  `ready_for_test` — the human tests against it — and is stopped with
+  `docker compose down -v --remove-orphans` as soon as the card leaves those
+  columns, is archived, is deleted, or has vanished from the ledger. A Host
+  restart keeps the stacks (their record is in the ledger) and continues to
+  reconcile them.
+* **Fail closed**: a configured environment that does not come up fails the run
+  before any agent work starts, with docker's own output appended to the run's
+  `error` and kept on the card (`TaskCompose.error`). Implementing against an
+  environment that never started would be worse than not starting.
+* **Ports**: the board never rewrites the compose file's port mappings. What it
+  does is hand the stack an environment of its own (`composeEnv`, `KEY=VALUE`
+  pairs): `{port}` becomes a free host port picked for that card (probed on the
+  loopback interface and **remembered on the card**, so a re-run re-creates the
+  stack on the port the human already knows) and `{task}` the card id. A compose
+  file that publishes a variable port — `ports: ["${PORT:-8092}:${PORT:-8092}"]`
+  — therefore gets one port per card instead of colliding with the stack the
+  human runs themselves; `composeEnv: PORT={port}` is the whole configuration. A
+  file with hard-coded ports still collides, and compose says so on the card.
+* The card's environment is also **announced in the run prompt** (project name
+  and published ports), so the agent works against that stack with
+  `docker compose -p <project> ...` instead of starting a second one under the
+  default project name.
+
 ## Configuration
 
 ```jsonc
@@ -292,6 +334,10 @@ correction into the card's chat*).
   `ready_for_test`: stored configurations are left as they are, and only the
   runner's settle commits independently of the configured transitions.
 * `initial` — where new cards land; required when `backlog` is not a column.
+
+Task environments are not part of the machine: the stack is tied to the *run*
+(not to a transition), because it has to exist before the session starts and
+because a compose file is a property of the workspace, not of a state change.
 
 Invalid configuration never bricks the board: the normalizer refuses the whole
 document with reasons, the machine in force stays, and the settings card marks

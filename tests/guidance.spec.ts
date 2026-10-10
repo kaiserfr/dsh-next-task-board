@@ -13,14 +13,16 @@ describe('task-board model guidance', () => {
     // The rule verbatim — the task system prompt has to carry it.
     expect(TASK_BOARD_GUIDANCE)
       .toContain('Offene Fragen werden immer zuerst geklärt, bevor mit der Implementierung begonnen wird.')
-    // Plus the shape of the step: pulling a card out of the backlog starts a
-    // real run exactly like a drop on the run column (same queue, but WIP-free —
-    // todo counts against no lane limit), only its prompt asks first; pulling
-    // the card on to the run column releases the questions and continues that
-    // same session, and only cron still refuses.
-    expect(TASK_BOARD_GUIDANCE).toContain('Der Übergang von Backlog nach Todo ist der Klärungsschritt')
+    // Plus the shape of the step: pulling a card out of the backlog lands it in
+    // the clarification column and starts a real run exactly like a drop on the
+    // run column (same queue, but WIP-free — that column counts against no lane
+    // limit), only its prompt asks first; the human closes the step by moving
+    // the card to To do and releasing the specification, and the run then
+    // continues that same session.
+    expect(TASK_BOARD_GUIDANCE).toContain('Der Übergang von Backlog nach Clarification ist der Klärungsschritt')
     expect(TASK_BOARD_GUIDANCE).toContain('ohne die WIP-Grenze der Spur')
-    expect(TASK_BOARD_GUIDANCE).toContain('待办列无 WIP 名额')
+    expect(TASK_BOARD_GUIDANCE).toContain('澄清列无 WIP 名额')
+    expect(TASK_BOARD_GUIDANCE).toContain('approve-spec')
     // The rule keys off the run's own addendum, and it has to spell that
     // addendum out: a trigger the prompt does not contain would never fire, so
     // the guidance interpolates the very lines the clarification run sends.
@@ -31,7 +33,8 @@ describe('task-board model guidance', () => {
     expect(TASK_BOARD_GUIDANCE).toContain('gilt in JEDEM Turn')
     expect(TASK_BOARD_GUIDANCE).toContain('auch nicht, nachdem der Nutzer eine oder alle Fragen beantwortet hat')
     expect(TASK_BOARD_GUIDANCE).toContain('Bitte jetzt implementieren.')
-    expect(TASK_BOARD_GUIDANCE).toContain('Ein direktes Ziehen von Backlog nach In Progress ist nicht möglich')
+    expect(TASK_BOARD_GUIDANCE).toContain('Ein direktes Ziehen von Backlog')
+    expect(TASK_BOARD_GUIDANCE).toContain('nach In Progress ist nicht möglich')
   })
 
   it('states the completion rule with the very marker the Host recognizes', () => {
