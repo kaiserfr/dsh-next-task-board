@@ -38,6 +38,13 @@ export interface ReviewWorkflowOptions {
     compose: TaskComposeController;
     /** Registered workspaces: resolves a card without git state to its directory. */
     workspaceRegistry?: TaskBoardWorkspaceRegistry;
+    /**
+     * Repository directory of one workspace directory (the git workflow's
+     * `repoSubpath` resolution). Used for a card without git state: the review then
+     * looks at the repository inside the workspace, exactly like the git flow and
+     * the workspace's configured commands do, instead of at the container folder.
+     */
+    repoDirectory?: (workspacePath: string) => string | undefined;
     /** Editor binary; defaults to `code`. */
     editorCommand?: string;
     /** Base of the per-card port range for configured commands. */
@@ -115,6 +122,7 @@ export declare class ReviewWorkflow {
     private errors;
     private readonly compose;
     private readonly registry;
+    private readonly repoDirectory;
     private editorCommand;
     private readonly portBase;
     private readonly commandTimeoutMs;

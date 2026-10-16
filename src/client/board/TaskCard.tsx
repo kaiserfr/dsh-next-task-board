@@ -18,9 +18,20 @@
 import { memo, type DragEvent, type KeyboardEvent, type MouseEvent } from 'react'
 import type { TaskRecord, WaitingReason } from '../../core/tasks.ts'
 import { isTaskExecuting, isTaskPaused, tagTone } from '../../core/tasks.ts'
-import { t } from '../locales.ts'
+import { mergeStateOf, type MergeState } from '../../core/merge.ts'
+import { t, type TaskBoardKey } from '../locales.ts'
 import { sessionLinkHref } from '../session-link.ts'
 import css from '../board.module.css'
+
+/** Badge wording of one merge state (the card's own one-word verdict). */
+const MERGE_KEY: Record<MergeState, TaskBoardKey> = {
+  merged: 'card.merge.merged',
+  unmerged: 'card.merge.unmerged',
+  released: 'card.merge.released',
+  resolving: 'card.merge.resolving',
+  failed: 'card.merge.failed',
+  'no-branch': 'card.merge.noBranch',
+}
 
 /** Compact relative/absolute time label. */
 export function formatHostTimestamp(ms: number, timeZone?: string): string {
@@ -111,6 +122,10 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingRea
   // named (never a guessed one), so the symbol always lands where the answer
   // belongs.
   const answering = !archived && awaitingAnswerSessionId !== undefined
+  // The card's merge verdict: whether its result is in the base branch. Derived
+  // from the card's own git/merge records, so a card never claims a merge it did
+  // not record; undefined on cards with nothing to say about a merge.
+  const merge = mergeStateOf(task)
 
   return (
     <div className={css.cardBox} data-dsh-part="card-box">
@@ -178,6 +193,22 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingRea
           {!archived && (executing || pending) && <span className={css.cardSpinner} aria-hidden="true" />}
         </span>
         {!archived && pending && <span className={css.cardRunningLabel}>{t('board.pending')}…</span>}
+        {merge !== undefined && (
+          // The merge verdict, in the free bottom-left corner: is this result in
+          // the base branch, still waiting, resolving a conflict, or failed? A
+          // merged card also names when, so the badge carries the fact the human
+          // looks for after releasing.
+          <span
+            className={css.cardMerge}
+            data-merge={merge}
+            data-dsh-part="card-merge"
+            title={merge === 'merged'
+              ? `${t('review.mergeTitle')}: ${t(MERGE_KEY[merge])}${task.merge?.mergedAt === undefined ? '' : ` · ${formatHostTimestamp(task.merge.mergedAt, timeZone)}`}`
+              : t('review.mergeTitle') + ': ' + t(MERGE_KEY[merge])}
+          >
+            {t(MERGE_KEY[merge])}
+          </span>
+        )}
         {executing && <span className={css.cardExecutingBadge}>{t('card.running')}</span>}
         {paused && (
           <span className={css.cardExecutingBadge} data-paused="true" data-dsh-part="card-paused">

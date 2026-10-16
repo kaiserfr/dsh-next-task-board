@@ -127,7 +127,15 @@ export class TaskBoardHostService {
   } = {}) {
     this.git = options.git ?? new GitWorkflow(options.workspaceRegistry)
     this.compose = options.compose ?? new ComposeWorkflow({ ...(options.composeFile === undefined ? {} : { file: options.composeFile }) })
-    this.review = options.review ?? new ReviewWorkflow({ compose: this.compose, ...(options.workspaceRegistry === undefined ? {} : { workspaceRegistry: options.workspaceRegistry }) })
+    this.review = options.review ?? new ReviewWorkflow({
+      compose: this.compose,
+      ...(options.workspaceRegistry === undefined ? {} : { workspaceRegistry: options.workspaceRegistry }),
+      // The review resolves a card without git state through the same repository
+      // discovery the git flow uses (the `repoSubpath` setting), so the worktree
+      // link and the configured commands address the repository, not the folder
+      // that contains it.
+      repoDirectory: workspacePath => this.git.repositoryOf(workspacePath),
+    })
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git, stateMachine: options.stateMachine })
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry)
     this.power = options.power ?? new PowerInhibitor()
@@ -247,6 +255,23 @@ export class TaskBoardHostService {
   /** Point the worktree link at another editor binary (settings `editorCommand`). */
   setEditorCommand(command: string): void {
     this.review.setEditorCommand(command)
+  }
+
+  /**
+   * Apply the `repoSubpath` setting (one entry per workspace directory, naming
+   * the repository inside it) to the git workflow. Invalid entries are reported
+   * as a whole — the entries that parse stay in force — and the review plans are
+   * re-published, because a workspace that just gained a repository must show its
+   * worktree link without a ledger change.
+   * @param value - raw setting (JSON text or the parsed array).
+   * @returns the reasons of every entry that was refused (empty when all parsed).
+   */
+  setRepoSubpaths(value: unknown): string[] {
+    if (!('configure' in this.git) || typeof this.git.configure !== 'function') return []
+    const errors = this.git.configure(value)
+    this.refreshReviewPlans()
+    this.emit()
+    return errors
   }
 
   /**
@@ -499,6 +524,11 @@ export class TaskBoardHostService {
     // and its prompt is the run prompt plus the clarification addendum
     // (composed by the runner).
     const clarification = opened.execution.kind === 'clarify'
+    // The automatic conflict resolution of a merge release is an ordinary run in
+    // every structural respect, but its turn is the merge framing: the card's
+    // feature is finished, and the only job is the conflict the Host left in the
+    // worktree.
+    const mergeRun = opened.execution.kind === 'merge'
     try {
       // Work happens on the card's feature branch: check it out in the pinned
       // workspace worktree before the session starts (no-op without git state).
@@ -532,7 +562,7 @@ export class TaskBoardHostService {
       // holds the card's instruction, its questions and their answers:
       // the run only has to be told to implement now. Any other session (a
       // fresh one, or a previous run's conversation) still needs the full prompt.
-      const implement = !clarification && reuseSessionId !== undefined && reuseSessionId === opened.task.clarificationSessionId
+      const implement = !clarification && !mergeRun && reuseSessionId !== undefined && reuseSessionId === opened.task.clarificationSessionId
       const clarificationSessionId = opened.task.clarificationSessionId
       const sessionId = await this.runner.launch(launched, clarification
         ? {
@@ -543,6 +573,7 @@ export class TaskBoardHostService {
             ...(reuseSessionId === undefined ? {} : { reuseSessionId }),
             ...(rework ? { rework: true } : {}),
             ...(implement ? { implement: true } : {}),
+            ...(mergeRun ? { merge: true } : {}),
           })
       // Paused while the session was being created: stop the turn it may
       // already be running and keep the card paused. The session stays attached

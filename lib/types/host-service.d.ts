@@ -152,6 +152,16 @@ export declare class TaskBoardHostService {
     /** Point the worktree link at another editor binary (settings `editorCommand`). */
     setEditorCommand(command: string): void;
     /**
+     * Apply the `repoSubpath` setting (one entry per workspace directory, naming
+     * the repository inside it) to the git workflow. Invalid entries are reported
+     * as a whole — the entries that parse stay in force — and the review plans are
+     * re-published, because a workspace that just gained a repository must show its
+     * worktree link without a ledger change.
+     * @param value - raw setting (JSON text or the parsed array).
+     * @returns the reasons of every entry that was refused (empty when all parsed).
+     */
+    setRepoSubpaths(value: unknown): string[];
+    /**
      * Recompute the derived review plans: what the review column offers each card
      * (directory, worktree or main-checkout fallback, editor target, whether there
      * is anything to start) plus the action currently in flight. Called on every

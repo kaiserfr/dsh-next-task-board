@@ -13,6 +13,7 @@ import { PluginSettingsCard, BooleanField, ValueField } from './PluginSettingsCa
 import { CardForm, booleanField, numberField, textField, type CardActions, type CardShell, type FieldSpec, type FieldState as CardFieldState } from './settings-form.ts'
 import { normalizeStateMachine, type StateMachineConfig } from '../core/state-machine.ts'
 import { parseReviewEnvironments } from '../core/review-config.ts'
+import { parseRepoSubpaths } from '../core/repo-config.ts'
 
 /**
  * A JSON field: the draft is the pretty-printed document, and a save is
@@ -59,6 +60,12 @@ export interface TaskBoardSettings {
    * compose file in the card's directory wins over these commands.
    */
   reviewEnvironments?: string
+  /**
+   * Repository directory per workspace (JSON): the repository inside a workspace
+   * that is a container folder rather than a repository itself, so the card's
+   * branch, worktree and merge work there too.
+   */
+  repoSubpath?: string
   /** Editor binary the worktree link launches (default `code`). */
   editorCommand?: string
   /** The board's state machine: columns, allowed transitions, transition actions. */
@@ -85,6 +92,8 @@ export interface TaskBoardSettingsCardState extends CardShell {
   stateMachine: CardFieldState
   /** Review-environment JSON draft. */
   reviewEnvironments: CardFieldState
+  /** Repository-location JSON draft. */
+  repoSubpath: CardFieldState
   /** Editor binary draft for the worktree link. */
   editorCommand: CardFieldState
 }
@@ -114,6 +123,7 @@ export class TaskBoardSettingsCardController {
       textField('composeEnv'),
       jsonField('stateMachine', value => normalizeStateMachine(value).errors),
       jsonField('reviewEnvironments', value => parseReviewEnvironments(value).errors),
+      jsonField('repoSubpath', value => parseRepoSubpaths(value).errors),
       textField('editorCommand'),
     ])
     this.store = this.form.bind(() => this.projection())
@@ -131,6 +141,7 @@ export class TaskBoardSettingsCardController {
       composeEnv: this.form.field('composeEnv'),
       stateMachine: this.form.field('stateMachine'),
       reviewEnvironments: this.form.field('reviewEnvironments'),
+      repoSubpath: this.form.field('repoSubpath'),
       editorCommand: this.form.field('editorCommand'),
     }
   }
@@ -291,6 +302,15 @@ export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
         {...state.reviewEnvironments}
         onEdit={(text) => { props.edit('reviewEnvironments', text) }}
         onReset={() => { props.resetField('reviewEnvironments') }}
+      />
+      <ValueField
+        id="settings-task-board-repo-subpath"
+        label={t('settings.repoSubpath')}
+        hint={t('settings.repoSubpathHint')}
+        {...fieldProps}
+        {...state.repoSubpath}
+        onEdit={(text) => { props.edit('repoSubpath', text) }}
+        onReset={() => { props.resetField('repoSubpath') }}
       />
       <ValueField
         id="settings-task-board-editor-command"

@@ -267,15 +267,37 @@ route and system-prompt section).
     branch checked out) and the merged card's worktree is removed afterwards; a
     worktree git refuses to remove (untracked build artifacts) is left alone and
     never fails the accept.
-  - **Ready for test → Done merges exactly that commit** (`--no-ff`) and refuses
-    anything else: a worktree that still holds uncommitted work, a branch that
-    moved past `reviewedCommit`, or a card without a stamp (parked before this
-    gate, or by a custom machine that skips `git.commitBranch`) keeps the card in
-    Ready for test with the Host's reason. The safety-net commit on merge is
-    gone — it was the way unreviewed work could reach the base branch. Parking
-    the card again rebinds the approval to the new head, so reviewing follow-up
-    work is Ready for test → To do, correction in the card's chat, next run, next
-    park. A git failure (e.g. a merge conflict) fails the move the same way.
+  - **Ready for test → Done is the merge release** and merges exactly that
+    commit (`--no-ff`): a worktree that still holds uncommitted work, a branch
+    that moved past `reviewedCommit`, or a card without a stamp (parked before
+    this gate, or by a custom machine that skips `git.commitBranch`) is refused.
+    The safety-net commit on merge is gone — it was the way unreviewed work could
+    reach the base branch. The same release runs from the card's review block
+    ("Release for merge"), and the card states the outcome either way: **merged**
+    (with the instant), **not merged**, **conflict**, **merge failed**, or — for
+    a card without a branch — **no branch** (released without a merge).
+  - **A failed release lands in Failed**, with the Host's reason on the card.
+    Parking the card again (Ready for test → To do, or Failed → To do) rebinds
+    the approval to the new head *and* clears the release record, so reviewing
+    follow-up work is correction in the card's chat, next run, next park, next
+    release.
+  - **A merge conflict is the card's own job**: the Host rolls the half-done
+    merge in the main checkout back (`git merge --abort`) and starts the mirror
+    merge — base branch into the feature branch — **in the card's worktree**,
+    leaving the conflict there for the card's agent. The card moves to In
+    progress on a `merge` run whose turn is the merge framing (resolve, `git
+    add`, `git commit`, change nothing else); that resolution counts as part of
+    the release, so the gate accepts a head the reviewed commit is an ancestor of
+    while the release is open. One resolution run per release: once it settles
+    resolved, the Host retries the merge by itself and parks the card in Done; a
+    second conflict, a failed run, or a run that left unmerged files behind parks
+    the card in Failed.
+  - **A workspace that is only a container folder** (the repository is a
+    directory inside it) reaches its repository through the `repoSubpath`
+    setting: the branch, the worktree and the merge then happen inside that
+    repository, and the review block opens it. Without an entry, such a card
+    keeps working — it simply has no branch, and its release moves it to Done
+    without a merge.
 - Limits: git needs a pinned workspace (without one the board cannot know which
   repository is meant); each workspace uses its own worktree, and the per-lane
   WIP limit keeps two *implementation* runs of the same workspace out of one
@@ -429,6 +451,12 @@ action from any column but the review one:
   output on the card.
 - **What is being reviewed.** Branch, base branch, the reviewed commit the merge
   gate is bound to, and — on demand — `git diff --stat` against the base.
+- **Release for merge.** *Release for merge* asks once and then merges the card's
+  feature branch into its base branch; the card moves on to Done by itself and
+  states the outcome (merged, with the instant; conflict, with the conflict text;
+  failed, with the reason; or "no branch", when there was nothing to merge). A
+  conflict is handed to the card's own agent in its worktree — one automatic
+  resolution run — and the Host retries the merge when that run resolved it.
 
 The environment is disposable and card-scoped: leaving the review column,
 archiving or deleting the card stops it again — but **only a version the board
@@ -459,6 +487,7 @@ The full review flow in `tests/review-workflow.spec.ts`,
 - **Corrections after a test (fork addition)**: a card that did not pass the review goes back to To do on the human's own chat turn. The Host watches the conversation of every card waiting in Ready for test / Failed, sends the card back with an ordinary, machine-validated `move`, and stamps the send-back (`reworkAt`/`reworkCount`, shown in the detail view). There is no correction field: the transcript is the note. The next run is the rework round (`ExecutionRecord.rework`) — it continues that conversation even for a card that never opted into session reuse and opens with the short rework framing instead of the card body; a clarification round does not consume the marker, and a lost or busy conversation falls back to the full prompt with a Host warning. `ready_for_test → running` and `failed → running` (both `run`) also let the card be pulled straight onto the run column.
 - **Specification release gate (fork addition)**: a card is implemented only after a human released its specification in the detail view (*Release specification*, `approve-spec` → `specApprovedAt`). The Host checks the stamp on **every** run path — the drop onto the run column, the Run button, `rerun` — and refuses with `spec-approval-required`; cron skips the card and rolls to the next occurrence, and the clarification round is exempt because asking is what happens before the release. Editing the content (title, description, prompt, parse source) clears the stamp, so an approval never covers text it was not given for. See [Specification release](docs/state-machine.md#specification-release-the-gate-in-front-of-every-run).
 - **The approval is bound to the reviewed commit (fork addition)**: parking a card in Ready for test records the branch head as `reviewedCommit`. Ready for test → Done merges **only** that commit: a dirty worktree, a branch that moved on, or a card without the stamp is refused (the card stays in the review column and the Host names the reason), and the former safety-net commit on merge is gone. Re-parking rebinds the approval to the new head, so a re-review is Ready for test → To do, correction in the card's chat, next run, next park. See [Agentic-programming workflow and git integration](#agentic-programming-workflow-and-git-integration).
+- **The merge release (fork addition)**: *Ready for test → Done* — the drag or the card's *Release for merge* button — merges the feature branch back into its base branch and parks the card in Done. The outcome is written on the card (`merged` / `unmerged` / `resolving` / `failed` / `no-branch`); a refused or failed merge lands in Failed with the reason, and a conflict is resolved once by the card's own agent in its worktree, after which the Host retries the merge by itself. See [Merge release](docs/state-machine.md#merge-release-how-a-card-reaches-done).
 - **Form drafts in the task modals (fork addition)**: an accidental click next to a popup no longer throws the form away. The new-task, duplicate, edit, and label forms hand their field values to a draft seat on the `BoardController` when they unmount, so backdrop click, Escape, and *Cancel* all close the popup while the next open restores exactly what was typed — the pasted "Parse with AI" text included. Drafts are keyed per form (one per card for the edit/label forms), live in memory only, and are forgotten by the explicit *Discard draft* action, by the *+ New task* button's dot resolving (a created or saved task), and by a form nobody touched; a parse still running is cancelled when the popup closes.
 - **Continuation cards (data plane)**: a new task may paste a `<<<FREEZE ... >>>FREEZE` block from a session; it parses into a goal/progress/next snapshot persisted with the task (ledger v3). Cards carry a frozen badge, the detail view shows the full snapshot and freeze time, search covers snapshot text, and archive/restore matches plain tasks. The snapshot reuses the freeze security gate at the protocol layer: sensitive patterns become `[REDACTED]` with a marker, slash-prefixed command lines reject the whole snapshot, and each field is capped at 8 KiB.
 - **Handover bundles and the permission confirmation gate**: a continuation card may attach a handover bundle — the pinned execution triplet (workspace / agent preset / permission) plus doc/script references. The bundle's triplet overrides the plain pin fields at execution, and the references ride the prompt as a handover preamble. A binding whose effective permission is above `sessionDefaultPermission` (default `read-only`) is unconfirmed: manual run refuses, cron skips the card and rolls to the next occurrence, and the confirm button in the task detail resolves the binding; any later permission or bundle change re-arms the gate.
@@ -519,6 +548,7 @@ dsh plugin --profile web add link:$(pwd)
 | `composeEnv` | empty | **Fork addition.** Environment handed to every card's stack, as `KEY=VALUE` pairs; `{port}`, `{port2}` … `{port9}` become distinct free host ports assigned to the card and kept for it, `{task}` its id. With `composeEnv: PORT={port}` a compose file that publishes a variable port (`\${PORT:-8092}`) gives every card its own port instead of colliding with the stack you run yourself. |
 | `composeFile` | `docker-compose.yml` | **Fork addition.** Compose file a card's task environment is brought up from, relative to the card's worktree (`compose.yaml` / `docker-compose.yaml` are probed when it is missing); an empty value turns task containers off. Every card gets its own project `dsh-tb-<card id>`, so containers, networks and volumes are task-scoped; the published host ports are reported back and shown on the card. See [Task environments](#task-environments-docker-compose). |
 | `stateMachine` | the shipped machine | **Fork addition.** The board's state engine as one JSON document: the columns (`states`), the allowed state changes (`transitions`) and the actions a transition fires (`actions`: `git.openBranch`, `git.commitBranch`, `git.mergeBranch`, `run`, `clarify`, `stamp`). The Host refuses any `move` the machine does not list, and hands the resolved machine to the browser in the snapshot, so drag & drop is validated against exactly the same transitions. An invalid config is refused as a whole and the machine in force stays. A custom machine should carry `git.commitBranch` on its own ways into `ready_for_test` (it also stamps the commit the merge gate is bound to); a stored document is left as it is. See [`docs/state-machine.md`](docs/state-machine.md). |
+| `repoSubpath` | empty | **Fork addition.** Repository directory per workspace, as a JSON array for workspaces that are container folders rather than repositories themselves: `[{ "path": "/home/me/proj", "repo": "app" }]`. `repo` is relative to `path` or absolute; the longest matching `path` wins, invalid entries are reported and dropped. The named repository is where the card's branch, worktree and merge live. Without an entry, a workspace outside git has no branch (its cards work, they just never merge). |
 | `reviewEnvironments` | empty | **Fork addition.** The review setups of the workspaces as one JSON array. A card in Ready for test matches the entry whose `path` is its directory or a parent of it (longest match wins; a card in its own worktree is matched through the repository it belongs to). Each entry takes `start`, `stop`, `restart`, `logs`, `env` (`KEY=VALUE` with `{port}`, `{port2}` …, `{task}`), `url` (the app URL template, default `http://127.0.0.1:{port}`) and `dockerContext` (exported as `DOCKER_CONTEXT`). The commands run in the card's directory; a compose file there wins over them. Invalid entries are reported by the settings card and dropped, so one typo never disables the other workspaces. See [Review environment](#review-environment-everything-the-manual-check-needs). |
 | `editorCommand` | `code` | **Fork addition.** Editor binary the review block's worktree link launches (`<editorCommand> -n <directory-or-workspace-file>`), on the Host's machine and only for a loopback request. |
 | `trustedProxyHosts` | `[]` | Canonical `host[:port]` authorities accepted only through the authenticated loopback reverse-proxy path. |

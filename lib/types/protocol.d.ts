@@ -155,6 +155,9 @@ export type TaskBoardAction = {
     kind: 'approve-spec';
     taskId: string;
 } | {
+    kind: 'approve-merge';
+    taskId: string;
+} | {
     kind: 'review-start';
     taskId: string;
 } | {

@@ -102,6 +102,22 @@ export interface Config {
      * configured `stop` — but only one the board itself started.
      */
     reviewEnvironments?: Volatile<string>;
+    /**
+     * Repository directory per workspace, as a JSON array — for workspaces that are
+     * container folders rather than repositories themselves:
+     *
+     * ```json
+     * [{ "path": "/home/me/proj", "repo": "app" }]
+     * ```
+     *
+     * The card's git flow (feature branch, its own worktree, the merge back into
+     * the base branch) needs the repository root; without an entry, a workspace
+     * whose directory is not inside a git work tree stays out of that flow (the
+     * card keeps working, just without a branch). `repo` is relative to `path` or an
+     * absolute directory of its own; the longest matching `path` wins, so a nested
+     * repository can override the workspace above it.
+     */
+    repoSubpath?: Volatile<string>;
     /** Editor binary the worktree link launches (default `code`, opened with `-n`). */
     editorCommand?: Volatile<string>;
     /** Canonical reverse-proxy Host authorities admitted with a server-side token. */
@@ -125,6 +141,7 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     composeFile: z<string, string, "volatile-defined">;
     composeEnv: z<string, string, "volatile-defined">;
     reviewEnvironments: z<string, string, "volatile-defined">;
+    repoSubpath: z<string, string, "volatile-defined">;
     editorCommand: z<string, string, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;
@@ -139,6 +156,7 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     composeFile: z<string, string, "volatile-defined">;
     composeEnv: z<string, string, "volatile-defined">;
     reviewEnvironments: z<string, string, "volatile-defined">;
+    repoSubpath: z<string, string, "volatile-defined">;
     editorCommand: z<string, string, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;

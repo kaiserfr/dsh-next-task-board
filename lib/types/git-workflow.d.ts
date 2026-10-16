@@ -2,6 +2,26 @@ import type { TaskGit, TaskRecord } from './core/tasks.ts';
 import type { TaskBoardWorkspaceRegistry } from './host-runner.ts';
 /** Namespace of the feature branches the board opens. */
 export declare const TASK_BRANCH_PREFIX = "task/";
+/**
+ * A merge that hit conflicts: thrown by {@link GitWorkflow.mergeBranch} after it
+ * rolled the half-done merge back, so the ledger can hand the conflict to the
+ * card's agent instead of failing the release outright. The class is the signal
+ * — a refusal (a dirty worktree, a moved branch) stays an ordinary error and
+ * never starts a run.
+ */
+export declare class MergeConflictError extends Error {
+    readonly files: readonly string[];
+    constructor(message: string, files: readonly string[]);
+}
+/**
+ * What one started conflict-resolution merge did in the card's directory: either
+ * the merge went through on its own (`clean`), or it is left in place with
+ * conflict markers for the agent (`files` names the unmerged paths).
+ */
+export interface MergeResolutionStart {
+    clean: boolean;
+    files: string[];
+}
 /** Feature branch name of a task: `task/<title-slug>-<id8>`. */
 export declare function taskBranch(task: TaskRecord): string;
 /** Options of the git integration. */
@@ -16,8 +36,31 @@ export interface GitWorkflowOptions {
 export declare class GitWorkflow {
     private readonly registry?;
     private readonly worktreesRoot;
+    /** `repoSubpath` entries in force (see {@link configure}). */
+    private repoSubpaths;
+    /** Parse reasons of the last {@link configure}, for the settings card. */
+    private repoSubpathErrors;
     constructor(registry?: TaskBoardWorkspaceRegistry | undefined, options?: GitWorkflowOptions);
+    /**
+     * Apply the `repoSubpath` setting: one entry per workspace directory, naming
+     * the repository inside it. Invalid entries are reported with a reason and
+     * dropped, exactly like `reviewEnvironments`.
+     * @param value - raw setting (JSON text or the parsed array).
+     * @returns the reasons of every entry that was refused (empty when all parsed).
+     */
+    configure(value: unknown): string[];
+    /** Reasons of the last {@link configure} (empty when it parsed). */
+    get configurationErrors(): readonly string[];
     private run;
+    /** Whether `dir` is inside a git work tree. */
+    private isRepository;
+    /**
+     * Repository directory of one workspace: the workspace itself when it is a
+     * repository, otherwise the `repoSubpath` entry that governs it (when one is
+     * configured and really is a repository). Undefined when the workspace has no
+     * repository at all — the git flow is then the historical no-op.
+     */
+    repositoryOf(workspacePath: string): string | undefined;
     /** Worktree of the task's pinned workspace when it is a git repository. */
     repoPath(task: TaskRecord): string | undefined;
     /**
@@ -77,8 +120,9 @@ export declare class GitWorkflow {
     useBranch(task: TaskRecord): void;
     /**
      * Merge the card's feature branch back into the base branch — but only the
-     * exact commit the human reviewed. Called on the `ready_for_test` → `done`
-     * move; an already-merged branch is left alone.
+     * exact commit the human reviewed. Called by the release path (the
+     * `ready_for_test` → `done` move and the card's release action); an
+     * already-merged branch is left alone.
      *
      * The gate (fail-closed, and the whole point of `reviewedCommit`):
      *
@@ -90,13 +134,56 @@ export declare class GitWorkflow {
      * - a branch that moved past the reviewed commit (a commit landed after the
      *   review) is refused: the review has to be redone.
      *
-     * Every refusal is thrown, so the ledger refuses the move and the card stays
-     * in `ready_for_test`.
+     * One deliberate exception: while the card carries an **open release**
+     * (`task.merge` without `mergedAt`/`error`), a head that is a descendant of
+     * the reviewed commit is accepted. That is the conflict-resolution commit the
+     * board's own run created (`beginMergeResolution`) — the human released the
+     * card, the automatic resolution is part of that release, and the release only
+     * ever accepts commits the reviewed one is an ancestor of.
+     *
+     * A conflict is not a refusal: the half-done merge in the main checkout is
+     * rolled back and a {@link MergeConflictError} is thrown, so the caller can
+     * hand the conflict to the card's agent. Every other failure is an ordinary
+     * error.
      * @param task - the card being accepted.
      * @param now - merge instant to stamp on the returned state.
      * @returns the git state stamped with `mergedAt`, or undefined without one.
      */
     mergeBranch(task: TaskRecord, now: number): TaskGit | undefined;
+    /**
+     * Whether an open release lets the merge accept a head past the reviewed
+     * commit: only when the card currently carries a release in progress and the
+     * reviewed commit is still an ancestor of that head (so the release can only
+     * ever add commits on top of what the human reviewed, never rewrite it).
+     */
+    private acceptsResolvedHead;
+    /**
+     * Start the conflict resolution in the card's own directory: merge the base
+     * branch into the feature branch there (`git merge <base>`), which is the
+     * mirror image of the merge that just failed — but in the directory the agent
+     * works in, where the conflict can be resolved and committed without ever
+     * touching the human's checkout.
+     *
+     * A clean merge is committed by git itself and reported as `clean`; a conflict
+     * is deliberately **left in place** (conflict markers, `MERGE_HEAD`) for the
+     * run that follows, so the agent sees exactly the conflicted state.
+     * @param task - the card whose release hit the conflict.
+     * @returns what the started merge did.
+     */
+    beginMergeResolution(task: TaskRecord): MergeResolutionStart;
+    /** Unmerged paths (`git ls-files -u`) of one directory; empty when there are none. */
+    unmergedFiles(dir: string): string[];
+    /** Roll back a half-done merge (conflict) in one directory. */
+    abortMerge(dir: string): void;
+    /** Whether the card's own directory currently holds an unfinished merge. */
+    hasUnresolvedMerge(task: TaskRecord): boolean;
+    /**
+     * Put the card's directory back into a clean state after a failed conflict
+     * resolution: an unfinished merge (`MERGE_HEAD`, conflict markers) is aborted
+     * so the next run does not start on top of a half-done merge. Only a merge
+     * that really is unfinished is touched.
+     */
+    abortUnresolvedMerge(task: TaskRecord): void;
     /**
      * Drop a card's worktree because the card itself is gone (deleted from the
      * board): nothing points at the directory any more, so it is not kept around.

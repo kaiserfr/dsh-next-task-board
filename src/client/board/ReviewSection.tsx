@@ -18,8 +18,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import type { TaskRecord } from '../../core/tasks.ts'
-import { t } from '../locales.ts'
+import { mergeStateOf, type MergeState } from '../../core/merge.ts'
+import { t, type TaskBoardKey } from '../locales.ts'
 import css from '../board.module.css'
+import { ConfirmDialog } from './ConfirmDialog.tsx'
 import { formatHostTimestamp } from './TaskCard.tsx'
 
 /**
@@ -28,6 +30,16 @@ import { formatHostTimestamp } from './TaskCard.tsx'
  * prints whatever it was told to print, so the label is an upper bound for it.
  */
 const REVIEW_LOG_LINES = 200
+
+/** Wording of one merge state inside the review block. */
+const MERGE_KEY: Record<MergeState, TaskBoardKey> = {
+  merged: 'review.merge.merged',
+  unmerged: 'review.merge.unmerged',
+  released: 'review.merge.released',
+  resolving: 'review.merge.resolving',
+  failed: 'review.merge.failed',
+  'no-branch': 'review.merge.noBranch',
+}
 
 function shortCommit(commit: string): string {
   return commit.length > 10 ? commit.slice(0, 10) : commit
@@ -45,6 +57,8 @@ export function ReviewSection({ controller, task, pending, timeZone }: {
   const [logs, setLogs] = useState<{ text?: string; error?: string } | undefined>(undefined)
   const [diff, setDiff] = useState<{ text?: string; error?: string } | undefined>(undefined)
   const [notice, setNotice] = useState<string | undefined>(undefined)
+  /** The release asks before it merges: the card leaves the column for good. */
+  const [confirmRelease, setConfirmRelease] = useState(false)
 
   const plan = snapshot.host?.reviewPlans?.[task.id]
   const canRead = snapshot.canReviewRead === true
@@ -70,11 +84,16 @@ export function ReviewSection({ controller, task, pending, timeZone }: {
     setDiff(result.ok ? { text: result.text ?? '' } : { error: result.error ?? t('review.unknownError') })
   }, [controller, task.id])
 
-  // The review controls exist for the review column only; every other column
-  // (and the archive) renders nothing at all.
-  if (task.status !== 'ready_for_test' || task.archivedAt !== undefined) return null
+  // The environment controls and the release exist for the review column only.
+  // A card whose release failed keeps showing the merge verdict and the reason —
+  // that is what the human writes the correction about — but nothing that the
+  // Host would refuse outside the column.
+  const inReview = task.status === 'ready_for_test' && task.archivedAt === undefined
+  if (!inReview && !(task.status === 'failed' && task.merge !== undefined)) return null
 
   const git = task.git
+  const merge = mergeStateOf(task)
+  const mergeTime = task.merge?.mergedAt ?? git?.mergedAt
   const statusLine = plan?.pending === 'start'
     ? t('review.starting')
     : plan?.pending === 'stop'
@@ -89,9 +108,39 @@ export function ReviewSection({ controller, task, pending, timeZone }: {
 
   return (
     <section className={css.detailSection} data-dsh-part="review">
-      <h4>{t('review.title')}</h4>
+      <h4>{inReview ? t('review.title') : t('review.mergeTitle')}</h4>
 
-      {plan?.dir === undefined ? (
+      {/* The merge verdict and the release: what the whole review is for. Shown
+          for every card in the column — a card without a branch is released the
+          same way (it just has nothing to merge), which the state says. */}
+      <p className={css.detailMeta} data-dsh-part="review-merge" data-merge={merge ?? 'none'}>
+        {merge === undefined ? t('review.merge.unmerged') : t(MERGE_KEY[merge], mergeTime === undefined ? {} : { time: formatHostTimestamp(mergeTime, timeZone) })}
+        {task.merge?.commit !== undefined && ` · ${t('review.merge.commit', { commit: shortCommit(task.merge.commit) })}`}
+        {task.merge !== undefined && ` · ${t('review.merge.releasedAt', { time: formatHostTimestamp(task.merge.releasedAt, timeZone) })}`}
+        {task.merge?.resolvedAt !== undefined && ` · ${t('review.merge.resolvedAt', { time: formatHostTimestamp(task.merge.resolvedAt, timeZone) })}`}
+      </p>
+      {task.merge?.conflict !== undefined && (
+        <p className={css.detailMeta}>{t('review.merge.conflict', { conflict: task.merge.conflict })}</p>
+      )}
+      {task.merge?.error !== undefined && (
+        <p className={css.formError}>{t('review.merge.error', { error: task.merge.error })}</p>
+      )}
+      {inReview && (
+        <div className={css.moveRow}>
+          <button
+            type="button"
+            data-action="release"
+            className={css.primaryButton}
+            disabled={busy || merge === 'resolving'}
+            title={t('review.releaseHint')}
+            onClick={() => { setConfirmRelease(true) }}
+          >
+            {t('review.release')}
+          </button>
+        </div>
+      )}
+
+      {!inReview ? null : plan?.dir === undefined ? (
         <p className={css.detailText}>{t('review.notConfigured')}</p>
       ) : (
         <>
@@ -237,6 +286,18 @@ export function ReviewSection({ controller, task, pending, timeZone }: {
             </footer>
           </div>
         </div>
+      )}
+      {confirmRelease && (
+        <ConfirmDialog
+          title={t('review.releaseTitle')}
+          message={t('review.releaseMessage', { base: git?.base ?? 'main' })}
+          confirmLabel={t('review.releaseConfirm')}
+          onCancel={() => { setConfirmRelease(false) }}
+          onConfirm={() => {
+            setConfirmRelease(false)
+            void controller.approveMerge(task.id)
+          }}
+        />
       )}
     </section>
   )

@@ -256,6 +256,38 @@ describe('parseLedger', () => {
     expect(parseLedger(JSON.stringify([{ ...stored, clarificationSessionId: '' }]))[0].clarificationSessionId).toBeUndefined()
     expect(parseLedger(JSON.stringify([{ ...stored, clarificationSessionId: 7 }]))[0].clarificationSessionId).toBeUndefined()
   })
+
+  it('round-trips a merge release and drops an undatable one', () => {
+    const stored = {
+      ...createTask({ title: 'release', description: '', prompt: '' }, 1, 't-merge'),
+      merge: {
+        releasedAt: 42,
+        commit: ' abcdef ',
+        attempts: 1,
+        conflict: 'main could not be merged',
+        resolvedAt: 43,
+        mergedAt: 44,
+        skipped: false,
+        bogus: 'ignored',
+      },
+    }
+    const parsed = parseLedger(JSON.stringify([stored]))[0]
+    expect(parsed.merge).toEqual({
+      releasedAt: 42,
+      commit: 'abcdef',
+      attempts: 1,
+      conflict: 'main could not be merged',
+      resolvedAt: 43,
+      mergedAt: 44,
+    })
+
+    // Without the release instant there is no release to report: the field (and
+    // with it the card's merge claim) drops instead of dropping the whole row.
+    const undated = parseLedger(JSON.stringify([{ ...stored, merge: { attempts: 2 } }]))[0]
+    expect(undated.merge).toBeUndefined()
+    // A non-object fails the strict row shape, like every other field.
+    expect(parseLedger(JSON.stringify([{ ...stored, merge: 'merged' }]))).toEqual([])
+  })
 })
 
 describe('isTaskRecord', () => {

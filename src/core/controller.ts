@@ -695,6 +695,26 @@ export class BoardController {
   }
 
   /**
+   * Release the card for the merge (the board's "Freigeben (Merge)"): the Host
+   * merges the card's feature branch into its base branch and the card moves on
+   * to `done`. A conflict is not the human's problem — the Host starts that merge
+   * in the card's own worktree and lets the card's agent resolve it — while every
+   * other failure lands in `failed` with the reason.
+   *
+   * Only a card standing in the review column may ask; the Host is the authority
+   * for that and refuses anything else.
+   * @returns whether the Host accepted the action.
+   */
+  async approveMerge(id: string): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') return false
+    if (this.deps.transport === undefined) return false
+    // The release may open the conflict-resolution run, so the asking session
+    // travels with it the way it does for `run`.
+    return await this.commitRemote({ kind: 'approve-merge', taskId: id }, id, currentOf(this.deps.sessions))
+  }
+
+  /**
    * Open the card's version in the configured editor (or the `*.code-workspace`
    * it carries). The Host launches the editor on its own machine, so this is a
    * read-only Host call rather than an action: nothing about the ledger changes.

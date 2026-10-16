@@ -23,17 +23,27 @@
  *   branch back into its base branch, but **only** while the branch still
  *   stands exactly on that reviewed commit and the worktree is clean: work
  *   committed after the review makes the approval stale and the merge refuses
- *   instead of merging something nobody reviewed.
+ *   instead of merging something nobody reviewed. A release that hit a conflict
+ *   is the one deliberate exception: the card's open `merge` record lets the
+ *   merge accept the conflict-resolution commit the board's own run created (see
+ *   {@link GitWorkflow.beginMergeResolution}).
  *
  * The board's WIP limit stays per workspace (WIP lane): one implementation run
  * per workspace. The card's worktree is what makes that limit about *slots*, not
  * about a shared directory — a clarification round of another card of the same
  * workspace no longer has a checkout to fight over.
+ *
+ * A workspace directory that is not itself a repository is resolved through the
+ * `repoSubpath` setting ({@link GitWorkflow.configure}): the entry that governs
+ * the workspace names the repository directory inside it, so a project whose
+ * repository is one subdirectory deep still gets the whole branch/worktree/merge
+ * flow.
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
+import { findRepoSubpath, parseRepoSubpaths, resolveRepoDirectory, type RepoSubpathConfig } from './core/repo-config.ts'
 import type { TaskGit, TaskRecord } from './core/tasks.ts'
 import type { TaskBoardWorkspaceRegistry } from './host-runner.ts'
 
@@ -51,6 +61,30 @@ function slug(value: string): string {
 /** Short form of a commit sha, for messages a human reads on the board. */
 function short(sha: string): string {
   return sha.slice(0, 8)
+}
+
+/**
+ * A merge that hit conflicts: thrown by {@link GitWorkflow.mergeBranch} after it
+ * rolled the half-done merge back, so the ledger can hand the conflict to the
+ * card's agent instead of failing the release outright. The class is the signal
+ * — a refusal (a dirty worktree, a moved branch) stays an ordinary error and
+ * never starts a run.
+ */
+export class MergeConflictError extends Error {
+  constructor(message: string, readonly files: readonly string[]) {
+    super(message)
+    this.name = 'MergeConflictError'
+  }
+}
+
+/**
+ * What one started conflict-resolution merge did in the card's directory: either
+ * the merge went through on its own (`clean`), or it is left in place with
+ * conflict markers for the agent (`files` names the unmerged paths).
+ */
+export interface MergeResolutionStart {
+  clean: boolean
+  files: string[]
 }
 
 /** Feature branch name of a task: `task/<title-slug>-<id8>`. */
@@ -72,9 +106,32 @@ export interface GitWorkflowOptions {
 
 export class GitWorkflow {
   private readonly worktreesRoot: string
+  /** `repoSubpath` entries in force (see {@link configure}). */
+  private repoSubpaths: RepoSubpathConfig[] = []
+  /** Parse reasons of the last {@link configure}, for the settings card. */
+  private repoSubpathErrors: string[] = []
 
   constructor(private readonly registry?: TaskBoardWorkspaceRegistry, options: GitWorkflowOptions = {}) {
     this.worktreesRoot = options.worktreesRoot ?? join(dshHome(), 'task-board', 'worktrees')
+  }
+
+  /**
+   * Apply the `repoSubpath` setting: one entry per workspace directory, naming
+   * the repository inside it. Invalid entries are reported with a reason and
+   * dropped, exactly like `reviewEnvironments`.
+   * @param value - raw setting (JSON text or the parsed array).
+   * @returns the reasons of every entry that was refused (empty when all parsed).
+   */
+  configure(value: unknown): string[] {
+    const parsed = parseRepoSubpaths(value)
+    this.repoSubpaths = parsed.entries
+    this.repoSubpathErrors = parsed.errors
+    return parsed.errors
+  }
+
+  /** Reasons of the last {@link configure} (empty when it parsed). */
+  get configurationErrors(): readonly string[] {
+    return this.repoSubpathErrors
   }
 
   private run(cwd: string, args: readonly string[]): string {
@@ -87,19 +144,37 @@ export class GitWorkflow {
     return result.stdout
   }
 
+  /** Whether `dir` is inside a git work tree. */
+  private isRepository(dir: string): boolean {
+    try {
+      return this.run(dir, ['rev-parse', '--is-inside-work-tree']).trim() === 'true'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Repository directory of one workspace: the workspace itself when it is a
+   * repository, otherwise the `repoSubpath` entry that governs it (when one is
+   * configured and really is a repository). Undefined when the workspace has no
+   * repository at all — the git flow is then the historical no-op.
+   */
+  repositoryOf(workspacePath: string): string | undefined {
+    if (this.isRepository(workspacePath)) return workspacePath
+    const entry = findRepoSubpath(this.repoSubpaths, workspacePath)
+    if (entry === undefined) return undefined
+    const resolved = resolveRepoDirectory(entry)
+    if (!existsSync(resolved) || !this.isRepository(resolved)) return undefined
+    return resolved
+  }
+
   /** Worktree of the task's pinned workspace when it is a git repository. */
   repoPath(task: TaskRecord): string | undefined {
     const workspaceId = task.handover?.workspaceId ?? task.workspaceId
     if (workspaceId === undefined || this.registry === undefined) return undefined
     const workspace = this.registry.list().find(item => item.id === workspaceId)
-    if (workspace === undefined) return undefined
-    try {
-      return this.run(workspace.path, ['rev-parse', '--is-inside-work-tree']).trim() === 'true'
-        ? workspace.path
-        : undefined
-    } catch {
-      return undefined
-    }
+    if (workspace === undefined || typeof workspace.path !== 'string') return undefined
+    return this.repositoryOf(workspace.path)
   }
 
   /**
@@ -203,6 +278,10 @@ export class GitWorkflow {
     // run that skipped the pull may still sit on the base branch. A worktree
     // already stands on that branch.
     if (checkout) this.run(dir, ['checkout', git.branch])
+    // An unfinished conflict resolution is never committed: `git add -A` would
+    // stage the conflict markers as if they were the resolution. The card keeps
+    // its previous review stamp, and the release fails visibly instead.
+    if (this.unmergedFiles(dir).length > 0) return git
     if (!this.isDirty(dir)) return { ...git, reviewedCommit: this.head(dir) }
     this.run(dir, ['add', '-A'])
     this.run(dir, ['commit', '-m', `task: ${task.title}`])
@@ -224,8 +303,9 @@ export class GitWorkflow {
 
   /**
    * Merge the card's feature branch back into the base branch — but only the
-   * exact commit the human reviewed. Called on the `ready_for_test` → `done`
-   * move; an already-merged branch is left alone.
+   * exact commit the human reviewed. Called by the release path (the
+   * `ready_for_test` → `done` move and the card's release action); an
+   * already-merged branch is left alone.
    *
    * The gate (fail-closed, and the whole point of `reviewedCommit`):
    *
@@ -237,8 +317,17 @@ export class GitWorkflow {
    * - a branch that moved past the reviewed commit (a commit landed after the
    *   review) is refused: the review has to be redone.
    *
-   * Every refusal is thrown, so the ledger refuses the move and the card stays
-   * in `ready_for_test`.
+   * One deliberate exception: while the card carries an **open release**
+   * (`task.merge` without `mergedAt`/`error`), a head that is a descendant of
+   * the reviewed commit is accepted. That is the conflict-resolution commit the
+   * board's own run created (`beginMergeResolution`) — the human released the
+   * card, the automatic resolution is part of that release, and the release only
+   * ever accepts commits the reviewed one is an ancestor of.
+   *
+   * A conflict is not a refusal: the half-done merge in the main checkout is
+   * rolled back and a {@link MergeConflictError} is thrown, so the caller can
+   * hand the conflict to the card's agent. Every other failure is an ordinary
+   * error.
    * @param task - the card being accepted.
    * @param now - merge instant to stamp on the returned state.
    * @returns the git state stamped with `mergedAt`, or undefined without one.
@@ -255,15 +344,115 @@ export class GitWorkflow {
     }
     if (checkout) this.run(dir, ['checkout', git.branch])
     const head = this.head(dir)
-    if (head !== git.reviewedCommit) {
+    if (head !== git.reviewedCommit && !this.acceptsResolvedHead(task, git)) {
       throw new Error(`merge refused: ${git.branch} moved from the reviewed commit ${short(git.reviewedCommit)} to ${short(head)}; review the new state (park the card again) before merging`)
     }
     // The merge itself happens in the main checkout, on the base branch: a
     // worktree never has the base checked out.
     this.run(git.repoPath, ['checkout', git.base])
-    this.run(git.repoPath, ['merge', '--no-ff', '-m', `merge ${git.branch} (task board)`, git.branch])
+    try {
+      this.run(git.repoPath, ['merge', '--no-ff', '-m', `merge ${git.branch} (task board)`, git.branch])
+    } catch (error) {
+      const files = this.unmergedFiles(git.repoPath)
+      if (files.length > 0) {
+        // Never leave the human's checkout half-merged: the conflict is handed
+        // to the agent in the card's own worktree instead.
+        this.abortMerge(git.repoPath)
+        throw new MergeConflictError(
+          `${git.base} could not be merged into ${git.branch}: ${files.length} conflicted file(s): ${files.slice(0, 5).join(', ')}${files.length > 5 ? ', …' : ''}`,
+          files,
+        )
+      }
+      throw error
+    }
     this.removeWorktree(git)
     return { ...git, mergedAt: now }
+  }
+
+  /**
+   * Whether an open release lets the merge accept a head past the reviewed
+   * commit: only when the card currently carries a release in progress and the
+   * reviewed commit is still an ancestor of that head (so the release can only
+   * ever add commits on top of what the human reviewed, never rewrite it).
+   */
+  private acceptsResolvedHead(task: TaskRecord, git: TaskGit): boolean {
+    const merge = task.merge
+    if (merge === undefined || merge.mergedAt !== undefined || merge.error !== undefined) return false
+    if (git.reviewedCommit === undefined) return false
+    try {
+      this.run(git.repoPath, ['merge-base', '--is-ancestor', git.reviewedCommit, 'HEAD'])
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Start the conflict resolution in the card's own directory: merge the base
+   * branch into the feature branch there (`git merge <base>`), which is the
+   * mirror image of the merge that just failed — but in the directory the agent
+   * works in, where the conflict can be resolved and committed without ever
+   * touching the human's checkout.
+   *
+   * A clean merge is committed by git itself and reported as `clean`; a conflict
+   * is deliberately **left in place** (conflict markers, `MERGE_HEAD`) for the
+   * run that follows, so the agent sees exactly the conflicted state.
+   * @param task - the card whose release hit the conflict.
+   * @returns what the started merge did.
+   */
+  beginMergeResolution(task: TaskRecord): MergeResolutionStart {
+    const git = task.git
+    if (git === undefined) return { clean: true, files: [] }
+    const { dir, checkout } = this.workDir(git)
+    if (checkout) this.run(dir, ['checkout', git.branch])
+    try {
+      this.run(dir, ['merge', '--no-ff', '-m', `merge ${git.base} into ${git.branch} (task board)`, git.base])
+      return { clean: true, files: [] }
+    } catch (error) {
+      const files = this.unmergedFiles(dir)
+      if (files.length > 0) return { clean: false, files }
+      throw error
+    }
+  }
+
+  /** Unmerged paths (`git ls-files -u`) of one directory; empty when there are none. */
+  unmergedFiles(dir: string): string[] {
+    try {
+      const output = this.run(dir, ['ls-files', '-u', '-z'])
+      return [...new Set(output.split('\0').map(line => line.split('\t')[1] ?? '').filter(line => line !== ''))]
+    } catch {
+      return []
+    }
+  }
+
+  /** Roll back a half-done merge (conflict) in one directory. */
+  abortMerge(dir: string): void {
+    try {
+      this.run(dir, ['merge', '--abort'])
+    } catch {
+      // Nothing in progress (or nothing to abort): the caller's own error text
+      // is what the human reads, so this must not mask it.
+    }
+  }
+
+  /** Whether the card's own directory currently holds an unfinished merge. */
+  hasUnresolvedMerge(task: TaskRecord): boolean {
+    const git = task.git
+    if (git === undefined) return false
+    return this.unmergedFiles(this.workDir(git).dir).length > 0
+  }
+
+  /**
+   * Put the card's directory back into a clean state after a failed conflict
+   * resolution: an unfinished merge (`MERGE_HEAD`, conflict markers) is aborted
+   * so the next run does not start on top of a half-done merge. Only a merge
+   * that really is unfinished is touched.
+   */
+  abortUnresolvedMerge(task: TaskRecord): void {
+    const git = task.git
+    if (git === undefined) return
+    const { dir } = this.workDir(git)
+    if (this.unmergedFiles(dir).length > 0) this.abortMerge(dir)
   }
 
   /**

@@ -5,8 +5,8 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import type { TaskCompose, TaskReview } from './core/tasks.ts'
-import { DEFAULT_MAX_DONE_TASKS, hasOpenRun, isReworkReturn, openExecution, requiresSpecApproval, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import type { TaskCompose, TaskMerge, TaskReview } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, isReworkReturn, openExecution, requiresSpecApproval, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -16,7 +16,7 @@ import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-sc
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
 import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 import { DEFAULT_SESSION_PERMISSION, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
-import type { GitWorkflow } from './git-workflow.ts'
+import { MergeConflictError, type GitWorkflow, type MergeResolutionStart } from './git-workflow.ts'
 
 interface PersistedScheduler extends TaskBoardSchedulerSnapshot {
   importedSources?: string[]
@@ -55,6 +55,18 @@ export interface LedgerState {
 export interface OpenedRun {
   task: TaskRecord
   execution: ExecutionRecord
+}
+
+/**
+ * Outcome of one merge release (the card's "Freigeben (Merge)"): the card as it
+ * stands afterwards — in `done` when the merge went through (or when there was
+ * nothing to merge), in `failed` with the reason when it did not, still in
+ * `ready_for_test` with a `running` execution when the conflict was handed to the
+ * card's agent — plus the run that release started, if any.
+ */
+interface ReleaseResult {
+  task: TaskRecord
+  run?: OpenedRun
 }
 
 /**
@@ -102,7 +114,7 @@ export interface OpenExecutionReference {
   /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
   readonly lane: string
   /** `'clarify'` for the card's clarification round; a real run otherwise. */
-  readonly kind: 'clarify' | undefined
+  readonly kind: 'clarify' | 'merge' | undefined
 }
 
 /**
@@ -679,7 +691,9 @@ export class HostTaskLedger {
     if (transition.git === false) return task
     for (const action of transition.actions ?? []) {
       if (action === 'git.openBranch') return this.withFeatureBranch(task)
-      if (action === 'git.commitBranch') return this.commitWork(task, now)
+      // Parking the card for the review drops the release record of the review
+      // before it: the next release starts from a clean slate.
+      if (action === 'git.commitBranch') return this.clearRelease(this.commitWork(task, now))
       if (action === 'git.mergeBranch') {
         const merged = this.git?.mergeBranch(task, now)
         return merged === undefined ? task : { ...task, git: merged }
@@ -732,6 +746,136 @@ export class HostTaskLedger {
   private commitSettledWork(task: TaskRecord, executionId: string, now: number): TaskRecord {
     const execution = task.executions.find(entry => entry.id === executionId)
     return execution === undefined || execution.kind === 'clarify' ? task : this.commitWork(task, now)
+  }
+
+  /**
+   * Drop the previous release record: the card is back in the review column for
+   * a new review. Called from the park hooks (the `git.commitBranch` action and
+   * a settling run), so the next release starts from a clean slate instead of
+   * showing the state of the review before it.
+   */
+  private clearRelease(task: TaskRecord): TaskRecord {
+    if (task.merge === undefined) return task
+    const { merge: _released, ...rest } = task
+    return rest
+  }
+
+  /**
+   * The merge release of one card: merge its feature branch back into the base
+   * branch, and — when the merge conflicts — hand the conflict to the card's
+   * agent in the card's own worktree. One automatic resolution run per release;
+   * when that does not resolve it, the release fails visibly.
+   *
+   * The decision table (the human's "Freigeben (Merge)"):
+   *
+   * - no branch at all (no repository, or a workspace outside git): the release
+   *   is the plain move to `done`, recorded as {@link TaskMerge.skipped} so the
+   *   card says "no branch" instead of pretending it merged something,
+   * - merge succeeds: `done`, `TaskGit.mergedAt` and {@link TaskMerge.mergedAt}
+   *   stamped,
+   * - merge refused (dirty worktree, moved branch, no reviewed commit) or fails:
+   *   the card goes to `failed` with the reason, which is what the review column
+   *   is for — the human sends it back and re-releases it,
+   * - merge conflicts: the half-done merge in the main checkout is rolled back
+   *   and the base branch is merged into the feature branch **in the card's
+   *   worktree**, where the conflict is left for the agent; the card goes to
+   *   `running` on a `merge` run whose settle retries the release
+   *   ({@link finishMergeRun}).
+   * @param task - the card being released.
+   * @param now - instant the release (or the failure) is stamped with.
+   * @param initiator - session that asked for the release, for the run record.
+   * @returns the card as it stands afterwards, plus the resolution run if one
+   *   was opened.
+   */
+  private releaseCard(task: TaskRecord, now: number, initiator?: string): ReleaseResult {
+    const git = task.git
+    if (git === undefined) {
+      const merge: TaskMerge = { releasedAt: now, attempts: 0, skipped: true }
+      return { task: withStatus({ ...task, merge }, 'done', now) }
+    }
+    const previous = task.merge
+    const base: TaskMerge = {
+      releasedAt: previous?.releasedAt ?? now,
+      ...(git.reviewedCommit === undefined ? {} : { commit: git.reviewedCommit }),
+      attempts: previous?.attempts ?? 0,
+      ...(previous?.conflict === undefined ? {} : { conflict: previous.conflict }),
+      ...(previous?.resolvedAt === undefined ? {} : { resolvedAt: previous.resolvedAt }),
+    }
+    const released: TaskRecord = { ...task, merge: base }
+    try {
+      const merged = this.git?.mergeBranch(released, now)
+      const merge: TaskMerge = { ...base, mergedAt: now }
+      return { task: withStatus({ ...released, git: merged ?? git, merge }, 'done', now) }
+    } catch (error) {
+      if (error instanceof MergeConflictError) return this.resolveConflict(released, base, error, now, initiator)
+      const message = error instanceof Error ? error.message : String(error)
+      return { task: withStatus({ ...released, merge: { ...base, error: message } }, 'failed', now) }
+    }
+  }
+
+  /**
+   * Hand a conflicted merge to the card's agent: start the mirror merge in the
+   * card's own worktree (base → feature) and open a `merge` run on it. The
+   * conflict stays in that directory with its markers, so the run sees exactly
+   * the state that has to be resolved; nothing of it touches the main checkout.
+   *
+   * A merge that the worktree carries out on its own (`clean`) is not a conflict
+   * there: the main checkout's failure was something else, so the release is
+   * simply retried once — with the attempt consumed, because the retry may not
+   * become a loop.
+   */
+  private resolveConflict(task: TaskRecord, merge: TaskMerge, conflict: MergeConflictError, now: number, initiator?: string): ReleaseResult {
+    const conflicted: TaskMerge = { ...merge, conflict: conflict.message }
+    if (merge.attempts >= MERGE_RESOLVE_ATTEMPTS) {
+      return { task: withStatus({ ...task, merge: { ...conflicted, error: conflict.message } }, 'failed', now) }
+    }
+    let started: MergeResolutionStart
+    try {
+      started = this.git?.beginMergeResolution(task) ?? { clean: true, files: [] }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { task: withStatus({ ...task, merge: { ...conflicted, error: message } }, 'failed', now) }
+    }
+    if (started.clean) {
+      return this.releaseCard({ ...task, merge: { ...conflicted, attempts: merge.attempts + 1, resolvedAt: now } }, now, initiator)
+    }
+    const opened = startExecution(
+      { ...task, merge: { ...conflicted, attempts: merge.attempts + 1 } },
+      now,
+      crypto.randomUUID(),
+      initiator,
+      'merge',
+    )
+    return { task: opened.task, run: { task: opened.task, execution: opened.execution } }
+  }
+
+  /**
+   * What the release does once its resolution run settled. A run that did not
+   * succeed (or one that ended with unmerged files still in the worktree) leaves
+   * the conflict unresolved: the worktree is put back into a clean state, the
+   * card says why, and the release ends in `failed` — the second attempt the
+   * decision allows is used up. A run that did resolve it makes the Host retry
+   * the merge, which either finishes the release (`done`) or fails it.
+   */
+  private finishMergeRun(task: TaskRecord, outcome: 'succeeded' | 'failed' | 'cancelled', error: string | undefined, now: number): TaskRecord {
+    const merge = task.merge
+    if (merge === undefined || merge.mergedAt !== undefined) return task
+    if (outcome !== 'succeeded') {
+      this.git?.abortUnresolvedMerge(task)
+      const reason = error !== undefined && error !== '' ? error : outcome === 'cancelled'
+        ? 'the conflict-resolution run was cancelled'
+        : 'the conflict-resolution run failed'
+      return { ...task, merge: { ...merge, error: reason }, updatedAt: now }
+    }
+    if (this.git?.hasUnresolvedMerge(task) === true) {
+      this.git.abortUnresolvedMerge(task)
+      return withStatus(
+        { ...task, merge: { ...merge, error: 'the merge conflict was not resolved: unmerged files are still in the worktree' } },
+        'failed',
+        now,
+      )
+    }
+    return this.releaseCard({ ...task, merge: { ...merge, resolvedAt: now } }, now).task
   }
 
   dispose(): void {
@@ -900,11 +1044,19 @@ export class HostTaskLedger {
       // not park the card in `failed`/`todo`. This also closes the race where an
       // inspection started just before the pause was written.
       if (task.id !== taskId || task.pausedAt !== undefined) return task
+      const execution = task.executions.find(entry => entry.id === executionId)
       const settled = settleExecution(task, executionId, outcome, now, error)
       // The work leaves the worktree the moment the run settles — success parks
       // the card in `ready_for_test` on its committed feature branch, and a
       // failure or cancellation commits just the same so nothing lingers.
-      return settled === task ? task : this.commitSettledWork(settled, executionId, now)
+      if (settled === task) return task
+      const committed = this.commitSettledWork(settled, executionId, now)
+      // A conflict-resolution run is not a review: its settle is what makes the
+      // Host retry the merge the card was released for.
+      if (execution?.kind === 'merge') return this.finishMergeRun(committed, outcome, error, now)
+      // A finished implementation run parks the card for a new review, so the
+      // release record of the review before it is dropped here.
+      return outcome === 'succeeded' ? this.clearRelease(committed) : committed
     })
     this.commit()
   }
@@ -1000,10 +1152,18 @@ export class HostTaskLedger {
         // not keep a card from reaching the review column. `"git": false` on the
         // transition skips the hooks.
         const actions = transition.actions ?? []
-        const gitted = this.transitionGit(task, transition, now)
+        // A move that merges the card back (the shipped machine:
+        // `ready_for_test → done`) is the human's merge release and runs the
+        // whole release path — merge, automatic conflict resolution, failure →
+        // `failed` — so a drag onto "Done" and the card's release button can
+        // never behave differently. Every other move keeps the plain git hooks.
+        const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch')
+        const released = merges ? this.releaseCard(task, now, initiator) : undefined
+        const gitted = merges ? task : this.transitionGit(task, transition, now)
         // The target state over the transition's git hooks: the base the
         // transition's actions build on, in their configured order.
-        let next: TaskRecord = withStatus(gitted, action.status, now)
+        let next: TaskRecord = released?.task ?? withStatus(gitted, action.status, now)
+        if (released?.run !== undefined) run = released.run
         // Leaving the review column (or a failed run) for `todo` is a rework —
         // whether the human dragged the card or the Host noticed a correction in
         // its chat. Only the stamp is written; the correction lives in the card's
@@ -1122,6 +1282,30 @@ export class HostTaskLedger {
         this.document.tasks = this.document.tasks.map(item => item.id === action.taskId
           ? { ...item, specApprovedAt: now, updatedAt: now }
           : item)
+        break
+      }
+      case 'approve-merge': {
+        // The human's release for the merge (the card's "Freigeben (Merge)"
+        // button). Deliberately not a plain `move`: the release merges, may hand
+        // a conflict to the card's agent, and ends in `done` or `failed`, none of
+        // which the browser may decide. The state machine still owns whether this
+        // card may be accepted at all (the shipped machine: `ready_for_test →
+        // done`), so a custom machine can forbid it.
+        const task = this.document.tasks.find(item => item.id === action.taskId)
+        if (task === undefined) throw new Error('task not found')
+        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+        if (task.status === 'running' || hasOpenRun(task)) throw new Error('running task cannot be moved')
+        if (task.status !== 'ready_for_test') throw new Error('merge-requires-ready-for-test')
+        const transition = this.machine.transition(task.status, 'done', 'manual')
+        if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → done`)
+        const released = (transition.git === false || !(transition.actions ?? []).includes('git.mergeBranch'))
+          ? { task: withStatus(task, 'done', now) }
+          : this.releaseCard(task, now, initiator)
+        if (released.run !== undefined) run = released.run
+        const moved = this.document.tasks.map(item => item.id === task.id ? released.task : item)
+        this.document.tasks = released.task.status === 'done'
+          ? [...enforceDoneLimit(moved, this.maxDoneTasks, now).tasks]
+          : moved
         break
       }
       case 'review-start':

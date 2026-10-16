@@ -89,7 +89,10 @@
   - **进入 Ready for test 即提交**：`git.commitBranch` 动作覆盖所有人工进入该列的转移，Runner 自己的结算（`running → ready_for_test`）走同一个 git 助手（结算不触发任何可配置动作）。`git add -A` 把整个工作区提交为 `task: <标题>`（工作区干净则不产生空提交），卡片 git 状态记下 `committedAt`；没有分支的卡片先补开分支。
   - **审阅绑定到它看到的那次提交**：停靠时同时把分支 HEAD 记为卡片的 `reviewedCommit`。
   - **任何运行都不留下未提交的工作**：失败的运行与取消的运行同样提交——包括 Host 重启时对中断启动的取消；澄清运行不实现任何东西、不检出分支，因此**永不**提交。提交被 git 拒绝（如 hook）不会让移动或结算失败：错误追加到最新一次执行的 `error`，在卡片详情页的执行历史里可见（从未运行过的卡片只留 Host 警告）。
-  - **Ready for test → Done 只合并这次提交**（`--no-ff`），否则一律拒绝：工作区仍有未提交改动、分支已经越过 `reviewedCommit`、或卡片根本没有该印记（在这个闸门之前停靠的卡片，或自定义状态机没把 `git.commitBranch` 挂上进入审阅列的转移），卡片都会留在 Ready for test 并显示 Host 给出的原因。合并时的「安全网提交」已删除——它正是未审阅工作进入基线分支的通道。再次停靠会把批准绑定到新的 HEAD，因此复核后续工作的路径是：Ready for test → To do、在卡片聊天里写修正、下一轮运行、再次停靠。那里的 git 失败（如合并冲突）同样让这次移动失败。
+  - **Ready for test → Done 就是合并放行**：只合并 `reviewedCommit` 这次提交（`--no-ff`），否则一律拒绝（工作区仍有未提交改动、分支已越过 `reviewedCommit`、卡片没有该印记）。卡片详情页的验收块里有「放行合并」按钮，与拖到 Done 走同一条 Host 路径；卡片上直接显示合并状态：**已合并**（含时间）/ **未合并** / **正在解冲突** / **合并失败** / **无分支**。
+  - **放行失败进入 Failed**：被拒绝或 git 失败时，卡片带着原因进入「已失败」；再把卡片停靠一次（Ready for test → To do，或 Failed → To do）会重新绑定批准并清掉这次的放行记录，下一轮运行后可以再次放行。
+  - **合并冲突由卡片自己解决一次**：Host 先在主检出上回滚半完成的合并（`git merge --abort`），再在**卡片自己的 worktree** 里把基线分支合并进 feature 分支，把冲突原样留给卡片的 agent：卡片进入「进行中」，同一个会话收到合并说明（解决冲突、`git add`、`git commit`，不改别的东西）。这次解决属于人工放行的一部分，因此放行期间合并闸门接受「以验收提交为祖先」的 HEAD。每次放行最多自动解决一次：解决成功（且没有残留未合并文件）后 Host 自动重试合并并进入 Done，否则（再次冲突、运行失败、或「成功」但仍有未合并文件）进入 Failed。
+  - **工作区目录本身不是 git 仓库**（仓库是它的子目录）时，用设置 `repoSubpath` 指定仓库目录：分支、worktree 与合并都在该仓库里进行，验收块也指向它；没有条目时这类卡片照常工作，只是没有分支，放行即直接进入 Done（注明未合并）。
 - 边界：git 需要钉住工作区（没有 pin 就无法知道指哪个仓库）；每个工作区各有自己的 worktree，且按 lane 计数的 WIP 上限保证同一工作区的两个**实现**运行不会共用检出——不同工作区并行是安全的。澄清运行可以与工作中的运行同时进行，但它不检出任何分支、也不实现任何东西，检出始终归那条运行所有。
 
 ### 澄清列（Clarification）
@@ -193,6 +196,7 @@ dsh plugin --profile web add link:$(pwd)
 | `maxConcurrentRuns` | `1` | **本分支新增。** 按工作区计的 WIP 并发上限：同一工作区同一时间允许持有会话的任务运行数。该工作区超出的运行进入 FIFO 队列，在某个运行结算、名额空出后自动启动；其他工作区并行不受影响。Todo 里的澄清运行不计入该上限——即使工作区正在工作，它也无需名额、立即启动。排队中的卡片已显示为运行中（尚无 session），若 Host 在其启动前重启则该执行记为 `cancelled`。 |
 | `maxDoneTasks` | `9` | **本分支新增。** Done 列上限（N）：移入 Done 后若会超过 N 张，则按进入 Done 的时间归档最早的卡片（FIFO），只归档到刚好满足上限为止；不删除，可在归档视图找回。Host 启动或设置变更时应用上限会立即收敛已超限的列。只作用于 `done` 列。 |
 | `stateMachine` | 内置状态机 | **本分支新增。** 看板状态引擎，一份 JSON：列（`states`）、允许的状态转移（`transitions`）以及转移触发的动作（`actions`：`git.openBranch`、`git.commitBranch`、`git.mergeBranch`、`run`、`clarify`、`stamp`）。未声明的 `move` 一律被 Host 拒绝；Host 把自己解析出的状态机随快照下发给浏览器，因此拖放校验与实际执行的所有转移完全一致。配置无效时整份拒绝，继续沿用当前状态机。自定义状态机应把 `git.commitBranch` 挂到自己进入 Ready for test 的转移上（已存配置不改动）。详见 [`docs/state-machine.md`](docs/state-machine.md)。 |
+| `repoSubpath` | 空 | **本分支新增。** 按工作区指定仓库目录的 JSON 数组，用于「工作区目录本身不是 git 仓库」的情况：`[{"path":"/home/me/proj","repo":"app"}]`。`repo` 相对 `path` 或绝对路径；最长路径前缀匹配，非法条目会被报告并丢弃。被指定的仓库就是卡片分支、worktree 与合并发生的地方；没有条目时这类工作区没有分支（卡片照常工作，只是不合并）。 |
 | `trustedProxyHosts` | `[]` | 仅通过已认证 loopback 反向代理路径接受的规范 `host[:port]` authority 白名单。 |
 | `proxyTokenEnv` | `DSH_TASK_BOARD_PROXY_TOKEN` | 保存反向代理 token 的环境变量名；token 本身不会写入插件配置。 |
 | `sessionDefaultPermission` | `read-only` | 部署的会话默认权限。卡片有效权限（交接包或钉住字段）高于该值时，运行前必须经人工确认；cron 拒绝调度待确认卡片。 |

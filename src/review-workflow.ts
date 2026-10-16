@@ -76,6 +76,13 @@ export interface ReviewWorkflowOptions {
   compose: TaskComposeController
   /** Registered workspaces: resolves a card without git state to its directory. */
   workspaceRegistry?: TaskBoardWorkspaceRegistry
+  /**
+   * Repository directory of one workspace directory (the git workflow's
+   * `repoSubpath` resolution). Used for a card without git state: the review then
+   * looks at the repository inside the workspace, exactly like the git flow and
+   * the workspace's configured commands do, instead of at the container folder.
+   */
+  repoDirectory?: (workspacePath: string) => string | undefined
   /** Editor binary; defaults to `code`. */
   editorCommand?: string
   /** Base of the per-card port range for configured commands. */
@@ -291,6 +298,7 @@ export class ReviewWorkflow {
   private errors: string[] = []
   private readonly compose: TaskComposeController
   private readonly registry: TaskBoardWorkspaceRegistry | undefined
+  private readonly repoDirectory: ((workspacePath: string) => string | undefined) | undefined
   private editorCommand: string
   private readonly portBase: number
   private readonly commandTimeoutMs: number
@@ -303,6 +311,7 @@ export class ReviewWorkflow {
   constructor(options: ReviewWorkflowOptions) {
     this.compose = options.compose
     this.registry = options.workspaceRegistry
+    this.repoDirectory = options.repoDirectory
     this.editorCommand = options.editorCommand ?? DEFAULT_EDITOR_COMMAND
     this.portBase = options.portBase ?? DEFAULT_COMPOSE_PORT_BASE
     this.commandTimeoutMs = options.commandTimeoutMs ?? REVIEW_COMMAND_TIMEOUT_MS
@@ -359,7 +368,10 @@ export class ReviewWorkflow {
     if (workspaceId === undefined || this.registry === undefined) return undefined
     const workspace = this.registry.list().find(item => item.id === workspaceId)
     if (workspace === undefined || typeof workspace.path !== 'string' || !existsSync(workspace.path)) return undefined
-    return workspace.path
+    // A workspace that only contains the repository (the `repoSubpath` case):
+    // what the card changed lives in the repository, not in the folder around it.
+    const repository = this.repoDirectory?.(workspace.path)
+    return repository !== undefined && existsSync(repository) ? repository : workspace.path
   }
 
   /**

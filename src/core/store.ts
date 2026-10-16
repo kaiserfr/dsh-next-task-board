@@ -10,7 +10,7 @@
  * localStorage backend.
  */
 import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskCompose, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskReview, type TaskStatus } from './tasks.ts'
+import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskCompose, type TaskFreeze, type TaskGit, type TaskMerge, type TaskRecord, type TaskPermission, type TaskReview, type TaskStatus } from './tasks.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
@@ -70,6 +70,7 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
   if (record.git !== undefined && (typeof record.git !== 'object' || record.git === null)) return false
   if (record.compose !== undefined && (typeof record.compose !== 'object' || record.compose === null)) return false
   if (record.review !== undefined && (typeof record.review !== 'object' || record.review === null)) return false
+  if (record.merge !== undefined && (typeof record.merge !== 'object' || record.merge === null)) return false
   if (!Array.isArray(record.executions)) return false
   for (const execution of record.executions) {
     if (typeof execution !== 'object' || execution === null) return false
@@ -180,6 +181,37 @@ function normalizeGit(value: unknown): TaskGit | undefined {
     ...(mergedAt === undefined ? {} : { mergedAt }),
     ...(reviewedCommit === '' ? {} : { reviewedCommit }),
     ...(worktreePath === '' ? {} : { worktreePath }),
+  }
+}
+
+/**
+ * Repair a persisted merge release: without its release instant there is no
+ * release to report, so the field drops (mirroring the git repair policy) and
+ * the card reads as "not merged" instead of claiming a merge it cannot date.
+ * The stamps and the texts are sanitized but never required.
+ */
+function normalizeMerge(value: unknown): TaskMerge | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const row = value as Record<string, unknown>
+  const releasedAt = typeof row.releasedAt === 'number' && Number.isFinite(row.releasedAt) ? row.releasedAt : undefined
+  if (releasedAt === undefined) return undefined
+  const attempts = typeof row.attempts === 'number' && Number.isFinite(row.attempts) && row.attempts > 0
+    ? Math.floor(row.attempts)
+    : 0
+  const commit = typeof row.commit === 'string' ? row.commit.trim() : ''
+  const conflict = typeof row.conflict === 'string' && row.conflict.trim() !== '' ? row.conflict : undefined
+  const error = typeof row.error === 'string' && row.error.trim() !== '' ? row.error : undefined
+  const resolvedAt = typeof row.resolvedAt === 'number' && Number.isFinite(row.resolvedAt) ? row.resolvedAt : undefined
+  const mergedAt = typeof row.mergedAt === 'number' && Number.isFinite(row.mergedAt) ? row.mergedAt : undefined
+  return {
+    releasedAt,
+    attempts,
+    ...(commit === '' ? {} : { commit }),
+    ...(conflict === undefined ? {} : { conflict }),
+    ...(error === undefined ? {} : { error }),
+    ...(resolvedAt === undefined ? {} : { resolvedAt }),
+    ...(mergedAt === undefined ? {} : { mergedAt }),
+    ...(row.skipped === true ? { skipped: true } : {}),
   }
 }
 
@@ -335,10 +367,13 @@ function normalizeReview(value: unknown): TaskReview | undefined {
     // only ever suppresses the card move, never the execution itself.
     task.executions = row.executions.map((execution) => {
       const rework = execution.rework === true ? true : undefined
-      const kind = execution.kind === 'clarify' ? 'clarify' as const : undefined
+      const kind = execution.kind === 'clarify'
+        ? 'clarify' as const
+        : execution.kind === 'merge' ? 'merge' as const : undefined
       if (rework === execution.rework && kind === execution.kind) return execution
       return { ...execution, rework, kind }
     })
+    task.merge = normalizeMerge(row.merge)
     tasks.push(task)
   }
   return tasks

@@ -101,6 +101,14 @@ export interface PromptTextOptions {
      * only needs the go-ahead to implement.
      */
     implement?: boolean;
+    /**
+     * This run is the automatic conflict resolution of a merge release: the base
+     * branch could not be merged into the card's feature branch, and the board
+     * started the mirror merge in the card's own worktree so the agent resolves
+     * what is left there. The turn replaces the card body — the card's feature is
+     * finished; the only job is the conflict.
+     */
+    merge?: boolean;
 }
 /**
  * The clarification addendum: what the `backlog → todo` run tells the agent to
@@ -182,7 +190,8 @@ export declare class HostExecutionRunner {
      *   with the rework framing instead of the whole card body),
      *   `clarification: true` to open the card's
      *   clarification run instead of a run prompt, `implement: true` to send only
-     *   the go-ahead into the clarification conversation this run continues, or
+     *   the go-ahead into the clarification conversation this run continues,
+     *   `merge: true` to open the conflict-resolution turn of a merge release, or
      *   `resume: true` to write the "continue" turn of a resumed pause into the
      *   continued session.
      * @returns the session id the execution runs in.
@@ -192,6 +201,7 @@ export declare class HostExecutionRunner {
         rework?: boolean;
         clarification?: boolean;
         implement?: boolean;
+        merge?: boolean;
         resume?: boolean;
     }): Promise<string>;
     /**

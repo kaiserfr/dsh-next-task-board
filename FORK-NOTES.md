@@ -45,6 +45,8 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 25 | **Mehr können** | **Eigene Container pro Karte (Docker Compose)**: liegt im Worktree der Karte eine Compose-Datei (Einstellung `composeFile`, Default `docker-compose.yml`, leer = aus), bringt der Host vor jedem Implementierungslauf eine **eigene Stack-Instanz** hoch — Projektname `dsh-tb-<Karten-Id>`, alles im Worktree der Karte, Ports werden aus `docker compose ps` zurückgelesen und auf der Karte angezeigt. Die Umgebung lebt, solange die Karte läuft oder im Review steht, und wird beim Verlassen dieser Spalten, beim Löschen und beim Archivieren mit `docker compose down -v` gestoppt; ein fehlgeschlagener Start lässt den Lauf scheitern und zeigt dockers Ausgabe auf der Karte |
 
 | 26 | **Mehr können** | **Prüf-Block auf „Ready for test"-Karten**: die Karte nennt ihr eigenes Verzeichnis (Worktree, sonst gekennzeichnet das Haupt-Checkout) und öffnet es per Klick in VS Code (`code -n`, bevorzugt die `.code-workspace`), zeigt die URLs der laufenden Version (Template `url` + karten-eigene Ports, plus je veröffentlichter Compose-Port) und bietet Start/Stop/Restart/Logs für **genau diese Karte** — Compose-Projekt `dsh-tb-<Id>` wenn vorhanden, sonst die pro Workspace konfigurierten Befehle (`reviewEnvironments`). Kein Auto-Start; beim Verlassen der Spalte wird nur gestoppt, was das Board selbst gestartet hat. Andere Spalten zeigen nichts. |
+| 27 | **Mehr können** | **Merge-Freigabe je Karte (Release)**: `ready_for_test → done` ist die Freigabe und läuft für den Zug auf Done und den neuen Knopf „Freigeben (Merge)" (Host-Aktion `approve-merge`) durch dieselbe Routine. Ohne Branch wird die Karte ohne Merge nach Done verschoben und das als `skipped` vermerkt; ein erfolgreicher Merge stempelt `TaskGit.mergedAt` und `TaskMerge.mergedAt`; eine Verweigerung (schmutziger Worktree, Branch über den Prüf-Commit hinaus, kein Prüf-Commit) oder ein git-Fehler schickt die Karte nach `failed` mit dem Grund auf `TaskMerge.error`. Ein **Konflikt** wird nicht dem Menschen zugemutet: der Host rollt den halben Merge im Haupt-Checkout zurück (`git merge --abort`), merged den Basis-Branch **im Worktree der Karte** und lässt den Konflikt dort stehen — die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git commit`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): löst er den Konflikt, merged der Host von selbst nach und die Karte geht nach Done; sonst (zweiter Konflikt, fehlgeschlagener Lauf, oder erfolgreich mit noch ungemergten Dateien) nach `failed`. Der Freigabe-Stempel erlaubt dabei einen HEAD, dessen Vorfahre der Prüf-Commit ist. Die Karte zeigt den Merge-Zustand (`src/core/merge.ts`: merged / unmerged / released / resolving / failed / no-branch) als Badge, der Prüf-Block nennt Commit, Zeitpunkt, Konflikt und Fehler |
+| 28 | **Mehr können** | **`repoSubpath`: Repository-Erkennung je Workspace**: eine Einstellung (JSON-Array `[{ "path": …, "repo": … }]`, längster Präfix gewinnt, relative oder absolute `repo`) nennt das Repository innerhalb eines Workspace-Ordners, der selbst kein Repository ist. Branch, Worktree, Commit und Merge laufen dann dort, und der Prüf-Block fällt für Karten ohne Git-Zustand auf dasselbe Verzeichnis zurück. Geparst/validiert mit `core/repo-config.ts` — dieselbe Funktion für Browser-Feld und Host |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -921,6 +923,73 @@ Die englische Fassung dieser Übersicht steht im README unter
       `tests/review-workflow.spec.ts`, `tests/host-review.spec.ts`,
       `tests/host-routes.spec.ts` (Loopback-Fence) und
       `tests/review-ui.spec.tsx` (nur in der Prüfspalte, Buttons je Karte).
+
+27. **Merge-Freigabe je Karte (Release)** — „Ready for test" hatte bisher genau
+    einen Weg nach Done: den Zug auf die Done-Spalte, der still merged. Diese
+    Runde macht daraus eine ausdrückliche, sichtbare Freigabe mit ehrlichem
+    Ergebnis:
+
+    - **Ein Weg, zwei Auslöser.** Der Zug nach Done und der Knopf „Freigeben
+      (Merge)" im Prüf-Block (`data-action="release"`, mit Bestätigungsdialog)
+      laufen im Ledger durch dieselbe Routine (`releaseCard`), deshalb kann ein
+      Drag nie etwas anderes tun als der Knopf. Die Host-Aktion heißt
+      `approve-merge` und ist auf Karten in der Prüfspalte beschränkt
+      (`merge-requires-ready-for-test`).
+    - **Kein Branch, nichts zu mergen.** Eine Karte ohne Repository (oder ein
+      Workspace außerhalb von git, siehe `repoSubpath`) wird wie bisher nach Done
+      verschoben; `TaskMerge.skipped` hält fest, dass nicht gemergt wurde, und
+      die Karte sagt „kein Branch" statt einen Merge zu behaupten.
+    - **Erfolg** stempelt `TaskGit.mergedAt` und `TaskMerge.mergedAt`, entfernt
+      den Wegwerf-Worktree (wie bisher) und die Karte steht in Done.
+    - **Verweigerung oder Fehler** (schmutziger Worktree, Branch über den
+      Prüf-Commit hinaus, fehlender Prüf-Commit, git-Fehler) schickt die Karte
+      nach `failed` und schreibt den Grund auf `TaskMerge.error`. Von dort greift
+      der normale Weg zurück: Chat-Korrektur → `failed → todo` → nächster Lauf →
+      erneutes Parken (das die alte Freigabe verwirft) → erneute Freigabe.
+    - **Konflikt: die Karte löst ihn selbst.** Der Host bricht den halben Merge
+      im Haupt-Checkout ab (`git merge --abort`, der Checkout des Menschen bleibt
+      sauber) und startet den Spiegel-Merge — Basis-Branch in den
+      Feature-Branch — **im Worktree der Karte**; der Konflikt bleibt mit Markern
+      liegen. Die Karte geht nach `running` mit einer Ausführung `kind: 'merge'`,
+      deren Prompt (`mergePrompt()`) genau das verlangt: Konflikt auflösen,
+      `git add`, `git commit` — und sonst nichts. Diese Auflösung gehört zur
+      Freigabe, deshalb akzeptiert `mergeBranch` während einer offenen Freigabe
+      einen HEAD, von dem der Prüf-Commit ein Vorfahre ist
+      (`merge-base --is-ancestor`).
+    - **Genau ein Versuch** (`MERGE_RESOLVE_ATTEMPTS = 1`): `finishMergeRun`
+      entscheidet, was der aufgelöste Lauf bedeutet — ein `succeeded` mit noch
+      ungemergten Dateien wird **nicht** geglaubt (`git ls-files -u` wird
+      geprüft, der halbe Merge abgebrochen), ein fehlgeschlagener oder
+      abgebrochener Lauf beendet die Freigabe ebenfalls. Nur ein wirklich
+      aufgelöster Lauf lässt den Host den Merge erneut versuchen; konfliktet der
+      wieder, geht die Karte nach `failed`. Ein Commit-Hook committet nie einen
+      unfertigen Merge: `commitBranch` überspringt das Staging, solange
+      ungemergte Dateien existieren.
+    - **Sichtbar auf der Karte.** `core/merge.ts` leitet den Zustand ab
+      (merged / unmerged / released / resolving / failed / no-branch); die Karte
+      trägt ihn als Badge (`data-dsh-part="card-merge"`), der Prüf-Block
+      (`data-dsh-part="review-merge"`) nennt zusätzlich Prüf-Commit,
+      Freigabezeit, Auflösungszeit, Konflikttext und Fehler. Karten ohne jeden
+      Merge-Bezug (Backlog, die vielen Alt-Karten in Done) tragen kein Badge.
+    - **Abgedeckt** durch `tests/git-workflow.spec.ts` (Konflikt → Worktree,
+      Auflösung → Done, ungelöst → failed, fehlgeschlagener Lauf → failed,
+      kein Branch → skipped, Verweigerung → failed, erneutes Parken rebindet),
+      `tests/host-merge.spec.ts` (Freigabe über den Dienst: `merge: true` beim
+      Start, `mergePrompt`), `tests/merge-state.spec.ts`,
+      `tests/merge-ui.spec.tsx`, `tests/store.spec.ts` (Persistenz des
+      Freigabe-Records) und `tests/protocol.spec.ts` (Aktion `approve-merge`).
+
+28. **`repoSubpath`: Repository-Erkennung für Container-Workspaces** — ein
+    Workspace ist oft nur ein Ordner (`app/`, `infra/`, Doku) und *selbst* kein
+    Repository; der Git-Flow braucht aber die Repo-Wurzel. Die Einstellung
+    `repoSubpath` (JSON-Array `[{ "path": …, "repo": … }]`, längster Präfix
+    gewinnt, relative oder absolute `repo`) nennt je Workspace das Repository in
+    ihm. `GitWorkflow.repositoryOf()` löst sie auf, `repoPath()` benutzt sie für
+    Branch, Worktree, Commit und Merge, und der Prüf-Block fällt für Karten ohne
+    Git-Zustand auf dasselbe Verzeichnis zurück (`review-workflow.ts`). Geparst
+    und validiert wird mit `core/repo-config.ts` — dieselbe Funktion für das
+    Einstellungsfeld im Browser und die Ausführung im Host. Abgedeckt durch
+    `tests/repo-config.spec.ts` und `tests/repo-subpath.spec.ts`.
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

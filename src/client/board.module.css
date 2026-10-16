@@ -560,6 +560,36 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   color: var(--dsw-alias-state-warn-primary);
 }
 
+/* Merge verdict of the card: a small chip in the card's own flow, so it never
+   covers the title or the tags. The tone carries the answer — merged is the
+   quiet success colour, an unresolved conflict and a failure are loud. */
+.cardMerge {
+  align-self: flex-start;
+  padding: 1px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.cardMerge[data-merge='merged'] {
+  border-color: var(--dsw-alias-state-success-primary, var(--dsw-alias-border-l2));
+  color: var(--dsw-alias-state-success-primary, var(--dsw-alias-label-secondary));
+}
+
+.cardMerge[data-merge='failed'],
+.cardMerge[data-merge='resolving'] {
+  border-color: var(--dsw-alias-state-warn-primary);
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.cardMerge[data-merge='released'] {
+  border-style: dashed;
+}
+
 /* "Running now" tag of the executing card: a light chip on the warn-tinted
    surface, label colour kept on the theme's primary label so the text stays
    readable on every skin (same reasoning as the tag badges). The paused variant

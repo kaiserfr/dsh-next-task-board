@@ -59,9 +59,14 @@ export interface ExecutionRecord {
    * clarification run — a real execution (it holds the card's session, the board
    * shows Running/Queued and links it) that settles **without moving the card**:
    * it still sits in `todo` so the human can pull it on to the run column, which
-   * continues the very same session.
+   * continues the very same session. `'merge'` marks the automatic
+   * conflict-resolution run of a merge release: the Host started the merge of
+   * the base branch into the card's feature branch and left the conflict in the
+   * worktree, so this run's whole job is to resolve it and commit — it is an
+   * ordinary run in every other respect (it moves the card like one, and its
+   * settle is what makes the Host retry the merge).
    */
-  kind?: 'clarify'
+  kind?: 'clarify' | 'merge'
 }
 
 /**
@@ -140,6 +145,51 @@ export interface TaskGit {
   /** When the feature branch was merged back into `base` (ms epoch). */
   mergedAt?: number
 }
+
+/**
+ * Merge release of a card: the human released the card for the merge (the
+ * board's "Freigeben (Merge)"), and this record is what the release did, is
+ * doing, or failed at. It is the durable half of the release — the in-flight
+ * half lives in the Host service — so the card can always say whether its
+ * result is merged, still unmerged, or failed to merge.
+ *
+ * The release is bound to the commit the human reviewed ({@link TaskGit.reviewedCommit})
+ * like the merge gate itself: a release records that binding, and one automatic
+ * conflict-resolution run may move the branch past it — that resolution counts
+ * as part of the release, which is why the record names both instants.
+ */
+export interface TaskMerge {
+  /** When the human released the card for the merge (ms epoch). */
+  releasedAt: number
+  /** Commit the release was bound to (`TaskGit.reviewedCommit` at that instant). */
+  commit?: string
+  /**
+   * Automatic conflict-resolution runs started for this release. At most one is
+   * ever started: a second conflict fails the release.
+   */
+  attempts: number
+  /** The conflict that needed the agent, as text (files included). */
+  conflict?: string
+  /** Why the release ended in `failed` (the card's column says the rest). */
+  error?: string
+  /** When the automatic resolution finished (ms epoch). */
+  resolvedAt?: number
+  /**
+   * When the merge went through (ms epoch). Kept next to
+   * {@link TaskGit.mergedAt} so the card's merge state survives a `git` record
+   * that a later run rewrote.
+   */
+  mergedAt?: number
+  /**
+   * The card was released although it has no branch to merge (no repository, or
+   * a workspace outside git): it moved on to `done` without a merge, which the
+   * card states instead of pretending it was merged.
+   */
+  skipped?: boolean
+}
+
+/** How many automatic conflict-resolution runs one release may start. */
+export const MERGE_RESOLVE_ATTEMPTS = 1
 
 /**
  * Docker Compose environment of a card: the task-scoped project the board
@@ -448,6 +498,13 @@ export interface TaskRecord {
    * cards whose workspace is not a git worktree.
    */
   git?: TaskGit
+  /**
+   * Merge release of the card (see {@link TaskMerge}): written by the Host when
+   * the human releases the card for the merge, and the record the card's merge
+   * state is read from. Cleared by the next park in the review column, so a
+   * re-reviewed card starts its next release from a clean slate.
+   */
+  merge?: TaskMerge
   /**
    * Task-scoped Docker Compose environment of the card (see {@link TaskCompose}).
    * Written by the Host service: brought up before an implementation run, torn
@@ -772,7 +829,7 @@ export function startExecution(
   now: number,
   executionId: string,
   initiatedBy?: string,
-  kind?: 'clarify',
+  kind?: 'clarify' | 'merge',
 ): { task: TaskRecord; execution: ExecutionRecord } {
   const clarification = kind === 'clarify'
   const execution: ExecutionRecord = {
@@ -782,13 +839,14 @@ export function startExecution(
     endedAt: undefined,
     result: undefined,
     error: undefined,
-    ...(clarification ? { kind: 'clarify' as const } : {}),
+    ...(kind === undefined ? {} : { kind }),
     ...(initiatedBy === undefined || initiatedBy === '' ? {} : { initiatedBy }),
     // The run records how it was started: a run that works off a send-back
     // continues the corrected conversation and opens with the rework framing.
-    // A clarification is not that round: it must not consume the marker the
-    // implementation run still has to honour.
-    ...(clarification || !pendingRework(task) ? {} : { rework: true }),
+    // A clarification is not that round (it must not consume the marker the
+    // implementation run still has to honour), and a conflict-resolution run is
+    // not one either — it opens with its own merge framing.
+    ...(kind !== undefined || !pendingRework(task) ? {} : { rework: true }),
     // Capture the card's freeze provenance on the execution record so the
     // audit trail stays queryable even if the snapshot is replaced later.
     ...(task.freeze === undefined ? {} : {

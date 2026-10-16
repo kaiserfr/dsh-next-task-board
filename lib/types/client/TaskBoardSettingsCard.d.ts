@@ -30,6 +30,12 @@ export interface TaskBoardSettings {
      * compose file in the card's directory wins over these commands.
      */
     reviewEnvironments?: string;
+    /**
+     * Repository directory per workspace (JSON): the repository inside a workspace
+     * that is a container folder rather than a repository itself, so the card's
+     * branch, worktree and merge work there too.
+     */
+    repoSubpath?: string;
     /** Editor binary the worktree link launches (default `code`). */
     editorCommand?: string;
     /** The board's state machine: columns, allowed transitions, transition actions. */
@@ -55,6 +61,8 @@ export interface TaskBoardSettingsCardState extends CardShell {
     stateMachine: CardFieldState;
     /** Review-environment JSON draft. */
     reviewEnvironments: CardFieldState;
+    /** Repository-location JSON draft. */
+    repoSubpath: CardFieldState;
     /** Editor binary draft for the worktree link. */
     editorCommand: CardFieldState;
 }

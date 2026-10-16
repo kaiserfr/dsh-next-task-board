@@ -189,6 +189,16 @@ describe('task-board group move action (move-many)', () => {
   })
 })
 
+describe('task-board merge release action', () => {
+  it('accepts the one-card release and rejects extra fields or a missing card', () => {
+    expect(parseActionEnvelope({ requestId: 'release-a', action: { kind: 'approve-merge', taskId: 'card-1' } })?.action)
+      .toEqual({ kind: 'approve-merge', taskId: 'card-1' })
+    expect(parseActionEnvelope({ requestId: 'release-b', action: { kind: 'approve-merge', taskId: 'card-1', status: 'done' } })).toBeUndefined()
+    expect(parseActionEnvelope({ requestId: 'release-c', action: { kind: 'approve-merge', taskId: '' } })).toBeUndefined()
+    expect(parseActionEnvelope({ requestId: 'release-d', action: { kind: 'approve-merge' } })).toBeUndefined()
+  })
+})
+
 describe('task-board pause/resume actions', () => {
   it('accepts a card list and dedupes it', () => {
     expect(parseActionEnvelope({ requestId: 'pause-a', action: { kind: 'pause', taskIds: ['a', 'b', 'a'] } })?.action)

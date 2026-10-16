@@ -127,7 +127,7 @@ every card — the column is where the agent asks before anything is implemented
 |---------------------|------------------------------------------------------------------------|
 | `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch **and its own worktree** under `$DSH_HOME/task-board/worktrees/<id>`: the run session is created on that directory, so the main checkout keeps the branch the human left it on. A branch that already exists is re-attached; where `git worktree` refuses, the historical shared checkout is used instead. No-op without a git repository. |
 | `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp) and stamps the resulting head as `reviewedCommit` — the commit the review column shows, cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
-| `git.mergeBranch`   | Merges the feature branch back into its base branch — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused, so the card stays in `ready_for_test` (see *Review gate*). |
+| `git.mergeBranch`   | Merges the feature branch back into its base branch — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused. On the release into `done` this is the merge release: a refusal or a failure parks the card in `failed` with the reason, and a **conflict** is resolved by the card's own agent instead (see *Merge release*). |
 | `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start releases the clarification gate and continues the card's clarification session; only cron refuses an unresolved card. **Every** `run` (this move, the detail Run button, `rerun`, cron) is refused while the card has no released specification (see *Specification release*). |
 | `clarify`           | Opens the card's clarification run: the same execution as `run` (same queue, but WIP-free — the clarification column starts without waiting for a lane slot), its prompt asks the agent's open questions in the card's chat and stops, it checks no branch out, and settling it leaves the card in its column. |
 | `{ kind: "stamp", field: "doneAt" }` | Writes a timestamp into a task field.                    |
@@ -240,11 +240,85 @@ and `git.mergeBranch` (the way into `done`) merges **exactly** it:
   review column and back in stamps the commit; a custom machine should carry
   `git.commitBranch` on every way into `ready_for_test` (it already should, for
   the commit policy above).
-* The refusal is an error on the `move`, not a card field: the browser shows the
-  Host's reason and the card keeps its column.
+* The refusal is recorded on the card and the card goes to `failed` (see *Merge
+  release*), so the reason stays readable until the card is sent back and
+  re-released.
 
 `reviewedCommit` is only a bind — the merge target, the commit that reaches
 `done`, is the one the human saw in the review column.
+
+## Merge release: how a card reaches `done`
+
+`ready_for_test → done` is not a status move that happens to run git: it is the
+card's **merge release**, and both ways of asking for it — dragging the card on
+to Done and the *Release for merge* button in the card's review block (`approve-merge`
+Host action) — go through the same Host routine, so the two can never disagree.
+
+* **No branch, nothing to merge.** A card whose workspace has no repository (or
+  a workspace outside git, without a `repoSubpath` entry — see below) is released
+  like before: it moves to `done`, and the release is recorded as skipped
+  (`TaskMerge.skipped`) so the card says "no branch" instead of pretending it
+  merged something.
+* **The merge succeeds.** The feature branch lands on the base branch
+  (`--no-ff`), the card moves to `done`, and both `TaskGit.mergedAt` and
+  `TaskMerge.mergedAt` name the instant. The disposable worktree is removed; the
+  branch, the commits and the review stamp survive in the repository.
+* **The merge is refused or fails** (dirty worktree, a branch past the reviewed
+  commit, no reviewed commit, git's own error): the card goes to `failed` with
+  the Host's reason on its `merge` record. From there the ordinary rework path
+  applies — the human writes the correction into the card's chat, the card
+  returns to `todo`, the next park rebinds the approval and clears the release
+  record, and the next release tries again.
+* **The merge conflicts.** The half-done merge in the main checkout is rolled
+  back (`git merge --abort`), so the human's checkout is never left half-merged.
+  The Host then starts the *mirror* merge in the card's own worktree — base
+  branch into the feature branch — and **leaves the conflict there**, markers and
+  all, for the card's agent: the card moves to `running` on a `merge` execution
+  whose turn is the merge framing (resolve the conflict, `git add`, `git commit`,
+  change nothing else). That resolution is part of the release the human asked
+  for, which is why the merge gate accepts a head that is a descendant of the
+  reviewed commit while the release is open.
+* **One attempt.** A release starts at most one resolution run
+  (`MERGE_RESOLVE_ATTEMPTS`). When it settles `succeeded` and no unmerged file is
+  left, the Host retries the merge by itself: success parks the card in `done`,
+  and a second conflict (or a run that failed, was cancelled, or "succeeded"
+  without resolving anything — unmerged files are checked, never trusted) parks
+  the card in `failed` with the reason. A failed resolution aborts the unfinished
+  merge in the worktree, so the next run does not start on top of it.
+* **Visible on the card.** The card's merge state is derived
+  (`core/merge.ts`): `merged`, `unmerged`, `released`, `resolving`, `failed` or
+  `no-branch`. The card carries it as a badge, and the review block names the
+  released commit, the release instant, the conflict and the error. A card whose
+  release failed keeps that merge section — the reason is what the correction is
+  written about — while the column's controls (release, start/stop) are gone with
+  the column.
+* **Group drops stay strict.** `move-many` never starts runs (nor resolution
+  runs), so a batch onto Done keeps the plain merge hook: a card that cannot be
+  merged aborts the whole drop and nothing moves. The release with its automatic
+  resolution is the single-card path.
+
+
+## Repository discovery: `repoSubpath`
+
+The git flow needs the repository root: it cuts the card's branch there, creates
+the card's worktree there and merges back there. A workspace whose directory is a
+container folder (`app/`, `infra/`, docs) is therefore not a repository itself,
+and its cards would silently have no branch at all.
+
+The setting `repoSubpath` names the repository per workspace:
+
+```json
+[{ "path": "/home/me/proj", "repo": "app" }]
+```
+
+`repo` is relative to `path` (or an absolute directory of its own), the longest
+matching `path` wins, and the document is validated by the same parser the Host
+executes (`core/repo-config.ts`). The repository it names is what the card's
+`TaskGit.repoPath` becomes — so the branch, the worktree, the commit on the park
+and the merge all work exactly as they do for a workspace that *is* a repository
+— and the review block falls back to it for a card that has no git state at all.
+An entry that names a directory that is not a repository changes nothing: the
+card keeps working without a branch.
 
 ## Rework: back to `todo` from the review
 

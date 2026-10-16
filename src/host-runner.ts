@@ -199,6 +199,14 @@ export interface PromptTextOptions {
    * only needs the go-ahead to implement.
    */
   implement?: boolean
+  /**
+   * This run is the automatic conflict resolution of a merge release: the base
+   * branch could not be merged into the card's feature branch, and the board
+   * started the mirror merge in the card's own worktree so the agent resolves
+   * what is left there. The turn replaces the card body — the card's feature is
+   * finished; the only job is the conflict.
+   */
+  merge?: boolean
 }
 
 /**
@@ -219,6 +227,29 @@ function resumePrompt(): string {
  */
 function reworkPrompt(): string {
   return '返工要求（任务看板卡片经人工复核未通过验收；修改意见已由人工在本对话中给出）。请按本对话中的意见修正，完成后重新报告结束。'
+}
+
+/**
+ * The conflict-resolution turn of a merge release: the human released the card
+ * for the merge, the merge of the base branch conflicted, and the board started
+ * that very merge in the card's own worktree so the conflict sits in front of the
+ * agent. The turn therefore says exactly what to do — and, just as importantly,
+ * what *not* to do: this is not a round for new feature work, and a resolution
+ * the agent cannot make must be reported rather than forced.
+ */
+function mergePrompt(task: TaskRecord): string {
+  const base = task.git?.base ?? 'main'
+  const branch = task.git?.branch ?? 'the feature branch'
+  return [
+    'MERGE-KONFLIKT (Aufgabe des Taskboards — keine neue Feature-Arbeit):',
+    `Der Basis-Branch „${base}" ließ sich nicht in den Feature-Branch „${branch}" mergen.`,
+    'Der Merge wurde in deinem Arbeitsverzeichnis bereits gestartet; die Konfliktdateien liegen dort mit Markern (<<<<<<<, =======, >>>>>>>) vor.',
+    'Deine Aufgabe:',
+    `1. Den Konflikt auflösen — beide Seiten inhaltlich zusammenführen, nichts wegwerfen.`,
+    '2. Die aufgelösten Dateien stagen und den Merge abschließen: `git add <datei>` und danach `git commit` (das schließt den Merge-Commit ab).',
+    '3. Sonst nichts ändern: keine neuen Features, kein Rebase, kein Zurücksetzen des Branches.',
+    'Wenn die Auflösung fachlich nicht möglich ist, brich den Merge mit `git merge --abort` ab und melde im Chat, was fehlt.',
+  ].join('\n')
 }
 
 /**
@@ -347,6 +378,7 @@ function environmentNote(task: TaskRecord): string | undefined {
  * @param options - continuation flag plus the round's rework mark.
  */
 function implementationTurn(task: TaskRecord, options: PromptTextOptions): string {
+  if (options.merge === true) return mergePrompt(task)
   if (options.implement === true) return implementPrompt()
   if (options.resume === true) return resumePrompt()
   // Only the framing when the corrected conversation continues: repeating the
@@ -479,12 +511,13 @@ export class HostExecutionRunner {
    *   with the rework framing instead of the whole card body),
    *   `clarification: true` to open the card's
    *   clarification run instead of a run prompt, `implement: true` to send only
-   *   the go-ahead into the clarification conversation this run continues, or
+   *   the go-ahead into the clarification conversation this run continues,
+   *   `merge: true` to open the conflict-resolution turn of a merge release, or
    *   `resume: true` to write the "continue" turn of a resumed pause into the
    *   continued session.
    * @returns the session id the execution runs in.
    */
-  async launch(task: TaskRecord, options: { reuseSessionId?: string; rework?: boolean; clarification?: boolean; implement?: boolean; resume?: boolean } = {}): Promise<string> {
+  async launch(task: TaskRecord, options: { reuseSessionId?: string; rework?: boolean; clarification?: boolean; implement?: boolean; merge?: boolean; resume?: boolean } = {}): Promise<string> {
     // A handover bundle overrides the legacy pin fields: the bundle is the
     // authoritative execution triplet for a continuation card (issue #5).
     const workspaceId = task.handover?.workspaceId ?? task.workspaceId
@@ -510,6 +543,7 @@ export class HostExecutionRunner {
       ...(options.rework === true ? { rework: true } : {}),
       ...(options.clarification === true ? { clarification: true } : {}),
       ...(options.implement === true ? { implement: true } : {}),
+      ...(options.merge === true ? { merge: true } : {}),
       ...(options.resume === true ? { resume: true } : {}),
     })
     if (reused !== undefined) {

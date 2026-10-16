@@ -3,7 +3,7 @@ import { type ExecutionRecord, type TaskRecord } from './core/tasks.ts';
 import { type StateMachine } from './core/state-machine.ts';
 import { type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts';
 import { type TaskPermission } from './core/handover.ts';
-import type { GitWorkflow } from './git-workflow.ts';
+import { type GitWorkflow } from './git-workflow.ts';
 export interface LedgerState {
     revision: number;
     tasks: TaskRecord[];
@@ -63,7 +63,7 @@ export interface OpenExecutionReference {
     /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
     readonly lane: string;
     /** `'clarify'` for the card's clarification round; a real run otherwise. */
-    readonly kind: 'clarify' | undefined;
+    readonly kind: 'clarify' | 'merge' | undefined;
 }
 /**
  * One card the rework watch follows (see {@link HostTaskLedger.reworkWatch}): a
@@ -266,6 +266,62 @@ export declare class HostTaskLedger {
      * never mints a commit of whatever the worktree happens to hold.
      */
     private commitSettledWork;
+    /**
+     * Drop the previous release record: the card is back in the review column for
+     * a new review. Called from the park hooks (the `git.commitBranch` action and
+     * a settling run), so the next release starts from a clean slate instead of
+     * showing the state of the review before it.
+     */
+    private clearRelease;
+    /**
+     * The merge release of one card: merge its feature branch back into the base
+     * branch, and — when the merge conflicts — hand the conflict to the card's
+     * agent in the card's own worktree. One automatic resolution run per release;
+     * when that does not resolve it, the release fails visibly.
+     *
+     * The decision table (the human's "Freigeben (Merge)"):
+     *
+     * - no branch at all (no repository, or a workspace outside git): the release
+     *   is the plain move to `done`, recorded as {@link TaskMerge.skipped} so the
+     *   card says "no branch" instead of pretending it merged something,
+     * - merge succeeds: `done`, `TaskGit.mergedAt` and {@link TaskMerge.mergedAt}
+     *   stamped,
+     * - merge refused (dirty worktree, moved branch, no reviewed commit) or fails:
+     *   the card goes to `failed` with the reason, which is what the review column
+     *   is for — the human sends it back and re-releases it,
+     * - merge conflicts: the half-done merge in the main checkout is rolled back
+     *   and the base branch is merged into the feature branch **in the card's
+     *   worktree**, where the conflict is left for the agent; the card goes to
+     *   `running` on a `merge` run whose settle retries the release
+     *   ({@link finishMergeRun}).
+     * @param task - the card being released.
+     * @param now - instant the release (or the failure) is stamped with.
+     * @param initiator - session that asked for the release, for the run record.
+     * @returns the card as it stands afterwards, plus the resolution run if one
+     *   was opened.
+     */
+    private releaseCard;
+    /**
+     * Hand a conflicted merge to the card's agent: start the mirror merge in the
+     * card's own worktree (base → feature) and open a `merge` run on it. The
+     * conflict stays in that directory with its markers, so the run sees exactly
+     * the state that has to be resolved; nothing of it touches the main checkout.
+     *
+     * A merge that the worktree carries out on its own (`clean`) is not a conflict
+     * there: the main checkout's failure was something else, so the release is
+     * simply retried once — with the attempt consumed, because the retry may not
+     * become a loop.
+     */
+    private resolveConflict;
+    /**
+     * What the release does once its resolution run settled. A run that did not
+     * succeed (or one that ended with unmerged files still in the worktree) leaves
+     * the conflict unresolved: the worktree is put back into a clean state, the
+     * card says why, and the release ends in `failed` — the second attempt the
+     * decision allows is used up. A run that did resolve it makes the Host retry
+     * the merge, which either finishes the release (`done`) or fails it.
+     */
+    private finishMergeRun;
     dispose(): void;
     applyRequest(requestId: string, action: TaskBoardAction, initiator?: string): {
         state: LedgerState;
