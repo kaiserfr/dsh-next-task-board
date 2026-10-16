@@ -274,10 +274,11 @@ export declare class HostTaskLedger {
      */
     private clearRelease;
     /**
-     * The merge release of one card: merge its feature branch back into the base
-     * branch, and — when the merge conflicts — hand the conflict to the card's
-     * agent in the card's own worktree. One automatic resolution run per release;
-     * when that does not resolve it, the release fails visibly.
+     * The merge release of one card: replay its feature branch onto the base
+     * branch as that stands now (other cards may have merged meanwhile) and merge
+     * it back into the base — and, when that replay conflicts, hand the conflict
+     * to the card's agent in the card's own worktree. One automatic resolution run
+     * per release; when that does not resolve it, the release fails visibly.
      *
      * The decision table (the human's "Freigeben (Merge)"):
      *
@@ -289,10 +290,9 @@ export declare class HostTaskLedger {
      * - merge refused (dirty worktree, moved branch, no reviewed commit) or fails:
      *   the card goes to `failed` with the reason, which is what the review column
      *   is for — the human sends it back and re-releases it,
-     * - merge conflicts: the half-done merge in the main checkout is rolled back
-     *   and the base branch is merged into the feature branch **in the card's
-     *   worktree**, where the conflict is left for the agent; the card goes to
-     *   `running` on a `merge` run whose settle retries the release
+     * - the replay onto the base conflicts: the half-done rebase is left in the
+     *   card's own worktree, where the conflict is in front of the agent; the card
+     *   goes to `running` on a `merge` run whose settle retries the release
      *   ({@link finishMergeRun}).
      * @param task - the card being released.
      * @param now - instant the release (or the failure) is stamped with.
@@ -302,24 +302,24 @@ export declare class HostTaskLedger {
      */
     private releaseCard;
     /**
-     * Hand a conflicted merge to the card's agent: start the mirror merge in the
-     * card's own worktree (base → feature) and open a `merge` run on it. The
-     * conflict stays in that directory with its markers, so the run sees exactly
-     * the state that has to be resolved; nothing of it touches the main checkout.
+     * Hand the release's conflict to the card's agent. The replay onto the base is
+     * already sitting in the card's own worktree — conflict markers, a rebase
+     * waiting for `git rebase --continue` — so nothing has to be started here: the
+     * run sees exactly that state and finishes it.
      *
-     * A merge that the worktree carries out on its own (`clean`) is not a conflict
-     * there: the main checkout's failure was something else, so the release is
-     * simply retried once — with the attempt consumed, because the retry may not
-     * become a loop.
+     * Exactly one resolution run per release (`MERGE_RESOLVE_ATTEMPTS`): a second
+     * conflict aborts the half-done replay and fails the release, so the release
+     * can never become a loop. Aborting puts the branch back onto the commit the
+     * human reviewed, which is what a later release starts from again.
      */
     private resolveConflict;
     /**
      * What the release does once its resolution run settled. A run that did not
-     * succeed (or one that ended with unmerged files still in the worktree) leaves
-     * the conflict unresolved: the worktree is put back into a clean state, the
-     * card says why, and the release ends in `failed` — the second attempt the
-     * decision allows is used up. A run that did resolve it makes the Host retry
-     * the merge, which either finishes the release (`done`) or fails it.
+     * succeed (or one that ended with the replay still unfinished) leaves the
+     * conflict unresolved: the worktree is put back into a clean state, the card
+     * says why, and the release ends in `failed` — the second attempt the decision
+     * allows is used up. A run that did resolve it makes the Host retry the merge,
+     * which either finishes the release (`done`) or fails it.
      */
     private finishMergeRun;
     dispose(): void;

@@ -110,7 +110,10 @@ describe('merge release on the Host service', () => {
       const prompt = promptText(task, { merge: true })
       expect(prompt).toContain('main')
       expect(prompt).toContain(task.git!.branch)
-      expect(prompt).toContain('git merge --abort')
+      // The replay is already running in the card's worktree: the turn tells the
+      // agent how to finish it, and how to get out of it.
+      expect(prompt).toContain('rebase --continue')
+      expect(prompt).toContain('git rebase --abort')
       expect(prompt).toMatch(/FERTIG:/)
     } finally {
       service.dispose()

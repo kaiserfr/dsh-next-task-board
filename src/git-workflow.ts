@@ -19,14 +19,14 @@
  *   branch (`git.commitBranch`, and the runner's own settle), so no run's work
  *   ever waits uncommitted in the worktree, and stamps the resulting head as the
  *   card's `reviewedCommit` — the commit the human reviews,
- * - `ready_for_test` → `done` (a human accepts the work) merges the feature
- *   branch back into its base branch, but **only** while the branch still
- *   stands exactly on that reviewed commit and the worktree is clean: work
- *   committed after the review makes the approval stale and the merge refuses
- *   instead of merging something nobody reviewed. A release that hit a conflict
- *   is the one deliberate exception: the card's open `merge` record lets the
- *   merge accept the conflict-resolution commit the board's own run created (see
- *   {@link GitWorkflow.beginMergeResolution}).
+ * - `ready_for_test` → `done` (a human accepts the work) **replays** the feature
+ *   branch onto its base branch as that stands *now* (`git rebase` — other cards
+ *   may have merged into it since this card was cut) and then merges the branch
+ *   back, but **only** while the branch still stands exactly on that reviewed
+ *   commit and the worktree is clean: work committed after the review makes the
+ *   approval stale and the release refuses instead of replaying something nobody
+ *   reviewed. A replay that conflicts is left in the card's own worktree for the
+ *   card's agent ({@link GitWorkflow.mergeBranch}).
  *
  * The board's WIP limit stays per workspace (WIP lane): one implementation run
  * per workspace. The card's worktree is what makes that limit about *slots*, not
@@ -64,27 +64,19 @@ function short(sha: string): string {
 }
 
 /**
- * A merge that hit conflicts: thrown by {@link GitWorkflow.mergeBranch} after it
- * rolled the half-done merge back, so the ledger can hand the conflict to the
- * card's agent instead of failing the release outright. The class is the signal
- * — a refusal (a dirty worktree, a moved branch) stays an ordinary error and
- * never starts a run.
+ * A conflict the release ran into: thrown by {@link GitWorkflow.mergeBranch}
+ * when the replay of the card's branch onto the base branch conflicts. The
+ * replay is deliberately left in place in the card's own directory (conflict
+ * markers, a rebase waiting to be continued), so the ledger can hand the
+ * conflict to the card's agent instead of failing the release outright. The
+ * class is the signal — a refusal (a dirty worktree, a moved branch) stays an
+ * ordinary error and never starts a run.
  */
 export class MergeConflictError extends Error {
   constructor(message: string, readonly files: readonly string[]) {
     super(message)
     this.name = 'MergeConflictError'
   }
-}
-
-/**
- * What one started conflict-resolution merge did in the card's directory: either
- * the merge went through on its own (`clean`), or it is left in place with
- * conflict markers for the agent (`files` names the unmerged paths).
- */
-export interface MergeResolutionStart {
-  clean: boolean
-  files: string[]
 }
 
 /** Feature branch name of a task: `task/<title-slug>-<id8>`. */
@@ -279,9 +271,10 @@ export class GitWorkflow {
     // already stands on that branch.
     if (checkout) this.run(dir, ['checkout', git.branch])
     // An unfinished conflict resolution is never committed: `git add -A` would
-    // stage the conflict markers as if they were the resolution. The card keeps
-    // its previous review stamp, and the release fails visibly instead.
-    if (this.unmergedFiles(dir).length > 0) return git
+    // stage the conflict markers as if they were the resolution, and a commit
+    // inside a running rebase would derail it. The card keeps its previous
+    // review stamp, and the release fails visibly instead.
+    if (this.unmergedFiles(dir).length > 0 || this.rebaseInProgress(dir)) return git
     if (!this.isDirty(dir)) return { ...git, reviewedCommit: this.head(dir) }
     this.run(dir, ['add', '-A'])
     this.run(dir, ['commit', '-m', `task: ${task.title}`])
@@ -307,6 +300,13 @@ export class GitWorkflow {
    * `ready_for_test` → `done` move and the card's release action); an
    * already-merged branch is left alone.
    *
+   * Before anything is merged, the branch is **replayed onto the base as it
+   * stands now** (`git rebase`, see {@link GitWorkflow.rebaseOnto}): this card
+   * was cut from the base when it was pulled in, and other cards may have merged
+   * into that base since. Without the replay the reviewed work would meet the
+   * current base only inside the final merge commit — a clean text merge that
+   * nobody ever built or ran against the new base.
+   *
    * The gate (fail-closed, and the whole point of `reviewedCommit`):
    *
    * - a worktree that still holds uncommitted work is refused instead of being
@@ -315,19 +315,18 @@ export class GitWorkflow {
    *   a custom machine that skips `git.commitBranch`) is refused: the human has
    *   to park it again, which binds the approval to a concrete commit,
    * - a branch that moved past the reviewed commit (a commit landed after the
-   *   review) is refused: the review has to be redone.
+   *   review) is refused: the review has to be redone,
    *
-   * One deliberate exception: while the card carries an **open release**
-   * (`task.merge` without `mergedAt`/`error`), a head that is a descendant of
-   * the reviewed commit is accepted. That is the conflict-resolution commit the
-   * board's own run created (`beginMergeResolution`) — the human released the
-   * card, the automatic resolution is part of that release, and the release only
-   * ever accepts commits the reviewed one is an ancestor of.
+   * The gate is deliberately checked *before* the replay: it is the state the
+   * human reviewed that goes onto the base, never one a replay already rewrote.
+   * The replay itself is part of the release, so the resolution run it may open
+   * commits on top of the reviewed commit and the next attempt finds a clean
+   * worktree bound to the replayed head (the run's settle commits and re-stamps
+   * it, see `HostTaskLedger.settle`).
    *
-   * A conflict is not a refusal: the half-done merge in the main checkout is
-   * rolled back and a {@link MergeConflictError} is thrown, so the caller can
-   * hand the conflict to the card's agent. Every other failure is an ordinary
-   * error.
+   * A conflict during the replay is not a refusal: it stays where the agent can
+   * reach it — in the card's own worktree — and is reported as a
+   * {@link MergeConflictError}. Every other failure is an ordinary error.
    * @param task - the card being accepted.
    * @param now - merge instant to stamp on the returned state.
    * @returns the git state stamped with `mergedAt`, or undefined without one.
@@ -344,25 +343,20 @@ export class GitWorkflow {
     }
     if (checkout) this.run(dir, ['checkout', git.branch])
     const head = this.head(dir)
-    if (head !== git.reviewedCommit && !this.acceptsResolvedHead(task, git)) {
+    if (head !== git.reviewedCommit) {
       throw new Error(`merge refused: ${git.branch} moved from the reviewed commit ${short(git.reviewedCommit)} to ${short(head)}; review the new state (park the card again) before merging`)
     }
+    this.rebaseOnto(dir, git)
     // The merge itself happens in the main checkout, on the base branch: a
-    // worktree never has the base checked out.
+    // worktree never has the base checked out. The branch now lies on top of
+    // that base, so this merge cannot conflict — whatever fails here is a
+    // refusal (a base that moved in between, a checkout the human is using),
+    // and it aborts rather than leaving the human's checkout half-merged.
     this.run(git.repoPath, ['checkout', git.base])
     try {
       this.run(git.repoPath, ['merge', '--no-ff', '-m', `merge ${git.branch} (task board)`, git.branch])
     } catch (error) {
-      const files = this.unmergedFiles(git.repoPath)
-      if (files.length > 0) {
-        // Never leave the human's checkout half-merged: the conflict is handed
-        // to the agent in the card's own worktree instead.
-        this.abortMerge(git.repoPath)
-        throw new MergeConflictError(
-          `${git.base} could not be merged into ${git.branch}: ${files.length} conflicted file(s): ${files.slice(0, 5).join(', ')}${files.length > 5 ? ', …' : ''}`,
-          files,
-        )
-      }
+      if (this.unmergedFiles(git.repoPath).length > 0) this.abortMerge(git.repoPath)
       throw error
     }
     this.removeWorktree(git)
@@ -370,47 +364,28 @@ export class GitWorkflow {
   }
 
   /**
-   * Whether an open release lets the merge accept a head past the reviewed
-   * commit: only when the card currently carries a release in progress and the
-   * reviewed commit is still an ancestor of that head (so the release can only
-   * ever add commits on top of what the human reviewed, never rewrite it).
-   */
-  private acceptsResolvedHead(task: TaskRecord, git: TaskGit): boolean {
-    const merge = task.merge
-    if (merge === undefined || merge.mergedAt !== undefined || merge.error !== undefined) return false
-    if (git.reviewedCommit === undefined) return false
-    try {
-      this.run(git.repoPath, ['merge-base', '--is-ancestor', git.reviewedCommit, 'HEAD'])
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * Start the conflict resolution in the card's own directory: merge the base
-   * branch into the feature branch there (`git merge <base>`), which is the
-   * mirror image of the merge that just failed — but in the directory the agent
-   * works in, where the conflict can be resolved and committed without ever
-   * touching the human's checkout.
+   * Replay the card's branch onto the base branch as it stands right now. A
+   * branch that already lies on the base is left alone (`git rebase` is then a
+   * no-op), so this is what every release does.
    *
-   * A clean merge is committed by git itself and reported as `clean`; a conflict
-   * is deliberately **left in place** (conflict markers, `MERGE_HEAD`) for the
-   * run that follows, so the agent sees exactly the conflicted state.
-   * @param task - the card whose release hit the conflict.
-   * @returns what the started merge did.
+   * A conflict is deliberately **left in place** in `dir` (conflict markers, a
+   * rebase in progress, nothing staged by us) for the run that follows, so the
+   * agent sees exactly the conflicted state and finishes the replay itself with
+   * `git add` + `git rebase --continue`.
+   * @param dir - the card's own directory (its worktree, or the main checkout).
+   * @param git - the card's git state, for the base branch to replay onto.
    */
-  beginMergeResolution(task: TaskRecord): MergeResolutionStart {
-    const git = task.git
-    if (git === undefined) return { clean: true, files: [] }
-    const { dir, checkout } = this.workDir(git)
-    if (checkout) this.run(dir, ['checkout', git.branch])
+  private rebaseOnto(dir: string, git: TaskGit): void {
     try {
-      this.run(dir, ['merge', '--no-ff', '-m', `merge ${git.base} into ${git.branch} (task board)`, git.base])
-      return { clean: true, files: [] }
+      this.run(dir, ['rebase', git.base])
     } catch (error) {
       const files = this.unmergedFiles(dir)
-      if (files.length > 0) return { clean: false, files }
+      if (files.length > 0) {
+        throw new MergeConflictError(
+          `${git.branch} could not be replayed onto ${git.base}: ${files.length} conflicted file(s): ${files.slice(0, 5).join(', ')}${files.length > 5 ? ', …' : ''}`,
+          files,
+        )
+      }
       throw error
     }
   }
@@ -435,23 +410,54 @@ export class GitWorkflow {
     }
   }
 
-  /** Whether the card's own directory currently holds an unfinished merge. */
+  /** Roll back an unfinished rebase in one directory. */
+  private abortRebase(dir: string): void {
+    try {
+      this.run(dir, ['rebase', '--abort'])
+    } catch {
+      // Nothing in progress (or nothing to abort): the caller's own error text
+      // is what the human reads, so this must not mask it.
+    }
+  }
+
+  /**
+   * Whether one directory currently holds an unfinished rebase. Asked of git
+   * itself (`rev-parse --git-path`), so it answers for the card's own worktree
+   * and for the main checkout alike — and only for *this* directory's state.
+   */
+  private rebaseInProgress(dir: string): boolean {
+    for (const name of ['rebase-merge', 'rebase-apply']) {
+      try {
+        if (existsSync(this.run(dir, ['rev-parse', '--git-path', name]).trim())) return true
+      } catch {
+        // Not a repository (or no git at all): nothing is in progress there.
+      }
+    }
+    return false
+  }
+
+  /** Whether the card's own directory currently holds an unfinished conflict. */
   hasUnresolvedMerge(task: TaskRecord): boolean {
     const git = task.git
     if (git === undefined) return false
-    return this.unmergedFiles(this.workDir(git).dir).length > 0
+    const { dir } = this.workDir(git)
+    return this.unmergedFiles(dir).length > 0 || this.rebaseInProgress(dir)
   }
 
   /**
    * Put the card's directory back into a clean state after a failed conflict
-   * resolution: an unfinished merge (`MERGE_HEAD`, conflict markers) is aborted
-   * so the next run does not start on top of a half-done merge. Only a merge
-   * that really is unfinished is touched.
+   * resolution: an unfinished rebase or merge (`MERGE_HEAD`, conflict markers)
+   * is aborted so the next run does not start on top of a half-done one. Only a
+   * conflict that really is unfinished is touched.
    */
   abortUnresolvedMerge(task: TaskRecord): void {
     const git = task.git
     if (git === undefined) return
     const { dir } = this.workDir(git)
+    if (this.rebaseInProgress(dir)) {
+      this.abortRebase(dir)
+      return
+    }
     if (this.unmergedFiles(dir).length > 0) this.abortMerge(dir)
   }
 

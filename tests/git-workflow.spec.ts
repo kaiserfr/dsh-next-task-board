@@ -7,7 +7,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { GitWorkflow, TASK_BRANCH_PREFIX, taskBranch } from '../src/git-workflow.ts'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
@@ -185,6 +185,34 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe(`merge ${state.branch} (task board)`)
     // Already merged: a second accept is a no-op.
     expect(workflow.mergeBranch({ ...task, git: merged! }, NOW + 1)).toBeUndefined()
+  })
+
+  it('replays the branch onto the base as it stands now before it merges', () => {
+    const repo = createRepo()
+    const workflow = workflowFor(repo)
+    const task = boardTask()
+    const state = workflow.openBranch(task)!
+    writeFileSync(join(state.worktreePath!, 'feature.txt'), 'card work\n')
+    const parked = workflow.commitBranch({ ...task, git: state }, NOW)!
+    // Another card merged into the base while this one was under review: the
+    // branch was cut from the base as it was *before* that.
+    writeFileSync(join(repo, 'other.txt'), 'other card\n')
+    git(repo, ['add', '-A'])
+    git(repo, ['commit', '-qm', 'other card merged'])
+    const base = git(repo, ['rev-parse', 'main'])
+
+    const merged = workflow.mergeBranch({ ...task, git: parked }, NOW)!
+    expect(merged.mergedAt).toBe(NOW)
+    // The card's commit now stands on the base as it is, not on the base as it
+    // was when the branch was cut.
+    expect(git(repo, ['rev-parse', `${state.branch}^`])).toBe(base)
+    // Both sides are on the base branch, and the merge keeps its marker.
+    expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
+    expect(existsSync(join(repo, 'other.txt'))).toBe(true)
+    expect(git(repo, ['rev-parse', 'HEAD^1'])).toBe(base)
+    expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe(`merge ${state.branch} (task board)`)
+    // Already merged: a second accept is a no-op.
+    expect(workflow.mergeBranch({ ...task, git: merged }, NOW + 1)).toBeUndefined()
   })
 
   it('refuses to merge what the review did not see', () => {
@@ -500,7 +528,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('hands a conflicted merge to the card\'s own worktree instead of merging', () => {
+  it('leaves a conflicting replay onto the base in the card\'s own worktree', () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflow })
@@ -512,7 +540,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       })
       ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
-      // The same file changed on both sides: the release conflicts.
+      // The same file changed on both sides: the replay onto the base conflicts.
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -529,13 +557,18 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(task.status).toBe('running')
       expect(task.executions.at(-1)?.kind).toBe('merge')
       expect(task.merge?.attempts).toBe(1)
+      expect(task.merge?.conflict).toMatch(/could not be replayed onto main/)
       expect(task.merge?.conflict).toMatch(/conflicted file/)
       expect(task.merge?.error).toBeUndefined()
       expect(task.git?.mergedAt).toBeUndefined()
-      // The human's checkout was never left half-merged.
+      // The human's checkout was never touched — the replay runs in the card's
+      // own directory.
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
       expect(existsSync(join(repo, '.git', 'MERGE_HEAD'))).toBe(false)
-      // The conflict is in front of the agent, in the card's own worktree.
+      // The conflict is in front of the agent, in the card's own worktree: an
+      // unfinished rebase with the conflicted file in it.
+      const rebaseDir = git(dir, ['rev-parse', '--git-path', 'rebase-merge'])
+      expect(existsSync(resolve(dir, rebaseDir))).toBe(true)
       expect(git(dir, ['diff', '--name-only', '--diff-filter=U'])).toContain('feature.txt')
     } finally {
       ledger.dispose()
@@ -564,10 +597,11 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
       const run = ledger.state().tasks[0].executions.at(-1)!
 
-      // The agent resolves the conflict and commits the merge.
+      // The agent resolves the conflict and finishes the replay, exactly the way
+      // the merge prompt tells it to.
       writeFileSync(join(dir, 'feature.txt'), 'resolved\n')
       git(dir, ['add', 'feature.txt'])
-      git(dir, ['commit', '-qm', 'merge main into branch'])
+      git(dir, ['-c', 'core.editor=true', 'rebase', '--continue'])
       ledger.settle('card-1', run.id, 'succeeded')
 
       const task = ledger.state().tasks[0]
@@ -612,7 +646,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
 
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('failed')
-      expect(task.merge?.error).toMatch(/unmerged files/)
+      expect(task.merge?.error).toMatch(/unfinished conflict/)
       expect(task.git?.mergedAt).toBeUndefined()
       // Nothing of the conflicted work reached the base branch ...
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')

@@ -231,24 +231,25 @@ function reworkPrompt(): string {
 
 /**
  * The conflict-resolution turn of a merge release: the human released the card
- * for the merge, the merge of the base branch conflicted, and the board started
- * that very merge in the card's own worktree so the conflict sits in front of the
- * agent. The turn therefore says exactly what to do — and, just as importantly,
- * what *not* to do: this is not a round for new feature work, and a resolution
- * the agent cannot make must be reported rather than forced.
+ * for the merge, the base branch had moved on (other cards merged in the
+ * meantime), the board replayed the card's branch onto that base, and the replay
+ * conflicted — it sits in the card's own worktree in front of the agent. The turn
+ * therefore says exactly what to do — and, just as importantly, what *not* to do:
+ * this is not a round for new feature work, and a resolution the agent cannot
+ * make must be reported rather than forced.
  */
 function mergePrompt(task: TaskRecord): string {
   const base = task.git?.base ?? 'main'
   const branch = task.git?.branch ?? 'the feature branch'
   return [
     'MERGE-KONFLIKT (Aufgabe des Taskboards — keine neue Feature-Arbeit):',
-    `Der Basis-Branch „${base}" ließ sich nicht in den Feature-Branch „${branch}" mergen.`,
-    'Der Merge wurde in deinem Arbeitsverzeichnis bereits gestartet; die Konfliktdateien liegen dort mit Markern (<<<<<<<, =======, >>>>>>>) vor.',
+    `Der Basis-Branch „${base}" ist weitergezogen (in der Zwischenzeit wurden andere Branches gemergt). Dein Feature-Branch „${branch}" wurde deshalb auf den aktuellen Stand von „${base}" neu aufgesetzt (Rebase) — dabei ist ein Konflikt entstanden.`,
+    'Der Rebase läuft in deinem Arbeitsverzeichnis bereits; die Konfliktdateien liegen dort mit Markern (<<<<<<<, =======, >>>>>>>) vor.',
     'Deine Aufgabe:',
-    `1. Den Konflikt auflösen — beide Seiten inhaltlich zusammenführen, nichts wegwerfen.`,
-    '2. Die aufgelösten Dateien stagen und den Merge abschließen: `git add <datei>` und danach `git commit` (das schließt den Merge-Commit ab).',
-    '3. Sonst nichts ändern: keine neuen Features, kein Rebase, kein Zurücksetzen des Branches.',
-    'Wenn die Auflösung fachlich nicht möglich ist, brich den Merge mit `git merge --abort` ab und melde im Chat, was fehlt.',
+    `1. Den Konflikt auflösen — beide Seiten inhaltlich zusammenführen, nichts wegwerfen. Die Arbeit dieser Karte muss auf dem neuen Stand von „${base}" genauso funktionieren.`,
+    '2. Die aufgelösten Dateien stagen und den Rebase fortsetzen: `git add <datei>` und danach `git -c core.editor=true rebase --continue` (so bleibt die ursprüngliche Commit-Nachricht erhalten, ohne dass ein Editor aufgeht). Weitere Konflikte im selben Rebase genauso auflösen, bis er durchgelaufen ist.',
+    '3. Sonst nichts ändern: keine neuen Features, kein Merge-Commit, kein Zurücksetzen des Branches.',
+    'Wenn die Auflösung fachlich nicht möglich ist, brich den Rebase mit `git rebase --abort` ab und melde im Chat, was fehlt.',
   ].join('\n')
 }
 

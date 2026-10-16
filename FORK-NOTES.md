@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **zweiundzwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24 und 25) plus drei
+Kurzfassung: **sechsundzwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 und 29) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -45,8 +45,9 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 25 | **Mehr können** | **Eigene Container pro Karte (Docker Compose)**: liegt im Worktree der Karte eine Compose-Datei (Einstellung `composeFile`, Default `docker-compose.yml`, leer = aus), bringt der Host vor jedem Implementierungslauf eine **eigene Stack-Instanz** hoch — Projektname `dsh-tb-<Karten-Id>`, alles im Worktree der Karte, Ports werden aus `docker compose ps` zurückgelesen und auf der Karte angezeigt. Die Umgebung lebt, solange die Karte läuft oder im Review steht, und wird beim Verlassen dieser Spalten, beim Löschen und beim Archivieren mit `docker compose down -v` gestoppt; ein fehlgeschlagener Start lässt den Lauf scheitern und zeigt dockers Ausgabe auf der Karte |
 
 | 26 | **Mehr können** | **Prüf-Block auf „Ready for test"-Karten**: die Karte nennt ihr eigenes Verzeichnis (Worktree, sonst gekennzeichnet das Haupt-Checkout) und öffnet es per Klick in VS Code (`code -n`, bevorzugt die `.code-workspace`), zeigt die URLs der laufenden Version (Template `url` + karten-eigene Ports, plus je veröffentlichter Compose-Port) und bietet Start/Stop/Restart/Logs für **genau diese Karte** — Compose-Projekt `dsh-tb-<Id>` wenn vorhanden, sonst die pro Workspace konfigurierten Befehle (`reviewEnvironments`). Kein Auto-Start; beim Verlassen der Spalte wird nur gestoppt, was das Board selbst gestartet hat. Andere Spalten zeigen nichts. |
-| 27 | **Mehr können** | **Merge-Freigabe je Karte (Release)**: `ready_for_test → done` ist die Freigabe und läuft für den Zug auf Done und den neuen Knopf „Freigeben (Merge)" (Host-Aktion `approve-merge`) durch dieselbe Routine. Ohne Branch wird die Karte ohne Merge nach Done verschoben und das als `skipped` vermerkt; ein erfolgreicher Merge stempelt `TaskGit.mergedAt` und `TaskMerge.mergedAt`; eine Verweigerung (schmutziger Worktree, Branch über den Prüf-Commit hinaus, kein Prüf-Commit) oder ein git-Fehler schickt die Karte nach `failed` mit dem Grund auf `TaskMerge.error`. Ein **Konflikt** wird nicht dem Menschen zugemutet: der Host rollt den halben Merge im Haupt-Checkout zurück (`git merge --abort`), merged den Basis-Branch **im Worktree der Karte** und lässt den Konflikt dort stehen — die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git commit`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): löst er den Konflikt, merged der Host von selbst nach und die Karte geht nach Done; sonst (zweiter Konflikt, fehlgeschlagener Lauf, oder erfolgreich mit noch ungemergten Dateien) nach `failed`. Der Freigabe-Stempel erlaubt dabei einen HEAD, dessen Vorfahre der Prüf-Commit ist. Die Karte zeigt den Merge-Zustand (`src/core/merge.ts`: merged / unmerged / released / resolving / failed / no-branch) als Badge, der Prüf-Block nennt Commit, Zeitpunkt, Konflikt und Fehler |
+| 27 | **Mehr können** | **Merge-Freigabe je Karte (Release)**: `ready_for_test → done` ist die Freigabe und läuft für den Zug auf Done und den neuen Knopf „Freigeben (Merge)" (Host-Aktion `approve-merge`) durch dieselbe Routine. Ohne Branch wird die Karte ohne Merge nach Done verschoben und das als `skipped` vermerkt; ein erfolgreicher Merge stempelt `TaskGit.mergedAt` und `TaskMerge.mergedAt`; eine Verweigerung (schmutziger Worktree, Branch über den Prüf-Commit hinaus, kein Prüf-Commit) oder ein git-Fehler schickt die Karte nach `failed` mit dem Grund auf `TaskMerge.error`. Ein **Konflikt** wird nicht dem Menschen zugemutet: der Host rollt den halben Merge im Haupt-Checkout zurück (`git merge --abort`), merged den Basis-Branch **im Worktree der Karte** und lässt den Konflikt dort stehen — die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git commit`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): löst er den Konflikt, merged der Host von selbst nach und die Karte geht nach Done; sonst (zweiter Konflikt, fehlgeschlagener Lauf, oder erfolgreich mit noch ungemergten Dateien) nach `failed`. Der Freigabe-Stempel erlaubt dabei einen HEAD, dessen Vorfahre der Prüf-Commit ist. *Der Konflikt-Weg ist seit 29 ein Rebase auf die aktuelle Basis: die Spiegel-Merge-Maschinerie und die Vorfahren-Ausnahme des Gates sind entfallen.* Die Karte zeigt den Merge-Zustand (`src/core/merge.ts`: merged / unmerged / released / resolving / failed / no-branch) als Badge, der Prüf-Block nennt Commit, Zeitpunkt, Konflikt und Fehler |
 | 28 | **Mehr können** | **`repoSubpath`: Repository-Erkennung je Workspace**: eine Einstellung (JSON-Array `[{ "path": …, "repo": … }]`, längster Präfix gewinnt, relative oder absolute `repo`) nennt das Repository innerhalb eines Workspace-Ordners, der selbst kein Repository ist. Branch, Worktree, Commit und Merge laufen dann dort, und der Prüf-Block fällt für Karten ohne Git-Zustand auf dasselbe Verzeichnis zurück. Geparst/validiert mit `core/repo-config.ts` — dieselbe Funktion für Browser-Feld und Host |
+| 29 | **Mehr können** | **Merge-Freigabe setzt den Branch erst auf die aktuelle Basis neu auf (Rebase)**: `git.mergeBranch` prüft weiterhin das Gate (sauberer Worktree, HEAD exakt `reviewedCommit`) und **rebased den Feature-Branch dann auf den Basis-Branch, wie er jetzt steht** — in der Zwischenzeit können andere Karten in die Basis gemergt worden sein, und ohne diesen Schritt träfe die geprüfte Arbeit die neue Basis erst im Merge-Commit, den nie jemand auf ihr gebaut oder getestet hat. Ein Konflikt wird nicht dem Menschen zugemutet: der halb fertige Rebase bleibt **im Worktree der Karte** stehen (Marker, `rebase-merge`), der Haupt-Checkout wird nie angefasst, und die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git -c core.editor=true rebase --continue`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): danach stempelt der Settle des Laufs den rebasten HEAD als Prüf-Commit und der Host merged von selbst nach; ein zweiter Konflikt, ein fehlgeschlagener Lauf oder ein danach noch offener Rebase bricht ihn ab (der Branch steht wieder auf dem geprüften Commit) und schickt die Karte nach `failed`. Die alte Spiegel-Merge-Maschinerie (`beginMergeResolution`, `MergeResolutionStart`, Gate-Ausnahme „Prüf-Commit ist Vorfahre") ist entfallen; `commitBranch`, `hasUnresolvedMerge` und `abortUnresolvedMerge` kennen den unfertigen Rebase |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -990,6 +991,55 @@ Die englische Fassung dieser Übersicht steht im README unter
     und validiert wird mit `core/repo-config.ts` — dieselbe Funktion für das
     Einstellungsfeld im Browser und die Ausführung im Host. Abgedeckt durch
     `tests/repo-config.spec.ts` und `tests/repo-subpath.spec.ts`.
+
+29. **Merge-Freigabe: erst auf die aktuelle Basis rebasen, dann mergen** — die
+    Freigabe prüfte bisher nur `reviewedCommit` und mergte den Branch mit
+    `--no-ff` in die Basis. Waren in der Zwischenzeit andere Karten in die Basis
+    gemergt worden, trafen beide Seiten einander **erst im Merge-Commit**: ein
+    textuell sauberer Merge, den niemand auf der neuen Basis gebaut oder getestet
+    hatte.
+
+    - **Replay vor dem Merge.** `git.mergeBranch` prüft weiterhin zuerst das Gate
+      (sauberer Worktree, HEAD exakt `reviewedCommit`) und setzt den Branch dann
+      in seinem eigenen Verzeichnis auf die Basis neu auf (`git rebase <base>`,
+      `GitWorkflow.rebaseOnto`) — auf einem Branch, der schon auf der Basis
+      liegt, ist das ein No-op. Erst danach läuft im Haupt-Checkout
+      `git merge --no-ff`; da die Basis jetzt ein Vorfahre des Branches ist, kann
+      dieser Merge nicht mehr konfliktieren. Scheitert er trotzdem (die Basis ist
+      dazwischen weitergelaufen, oder der Mensch arbeitet gerade in seinem
+      Checkout), bricht der Host einen halb fertigen Merge dort ab und die Karte
+      geht mit git's Fehler nach `failed`.
+    - **Der Konflikt bleibt beim Agenten.** Ein Konflikt im Rebase wird **nicht**
+      zurückgerollt: er bleibt mit Markern im Worktree der Karte stehen
+      (`rebase-merge`), `MergeConflictError` meldet ihn dem Ledger, und
+      `releaseCard` öffnet genau eine `merge`-Ausführung
+      (`MERGE_RESOLVE_ATTEMPTS = 1`), deren Prompt jetzt den Rebase beschreibt
+      (`mergePrompt()`: Konflikt lösen, `git add`,
+      `git -c core.editor=true rebase --continue`, sonst nichts ändern; Abbruch
+      mit `git rebase --abort`). Die alte Spiegel-Merge-Maschinerie
+      (`beginMergeResolution`, `MergeResolutionStart` und die Gate-Ausnahme „der
+      Prüf-Commit ist ein Vorfahre des HEAD") ist damit entfallen — der
+      Haupt-Checkout des Menschen wird von einem Konflikt gar nicht mehr berührt.
+    - **Wiederaufnahme ohne Sonderregel.** Der Settle des Auflösungslaufs
+      committet wie jeder Lauf (`commitBranch`) und stempelt damit den rebasten
+      HEAD als neuen `reviewedCommit`; der erneute `releaseCard`-Lauf findet ein
+      sauberes Gate vor, der Rebase ist No-op und der Merge läuft durch. Genau
+      ein Auflösungslauf: konfliktet es erneut, schlägt der Lauf fehl oder ist der
+      Rebase danach noch offen (ungemergte Dateien **oder** laufender Rebase),
+      bricht der Host den Rebase ab — der Branch steht wieder auf dem geprüften
+      Commit — und die Karte geht nach `failed`.
+    - **Unfertiges wird nie committet.** `commitBranch` überspringt das Commit
+      nicht mehr nur bei ungemergten Dateien, sondern auch bei einem laufenden
+      Rebase (`GitWorkflow.rebaseInProgress`, ermittelt über
+      `git rev-parse --git-path rebase-merge|rebase-apply`, damit auch im
+      Karten-Worktree korrekt); `hasUnresolvedMerge` und `abortUnresolvedMerge`
+      kennen beide Zustände und brechen mit `git rebase --abort` bzw.
+      `git merge --abort` ab.
+    - **Abgedeckt** durch `tests/git-workflow.spec.ts` (Replay auf die
+      weitergezogene Basis vor dem Merge, Konflikt bleibt im Worktree,
+      `rebase --continue` → Done, unfertiger Rebase → failed, fehlgeschlagener
+      Lauf → failed, unveränderte Verweigerungen) und `tests/host-merge.spec.ts`
+      (der Prompt nennt `rebase --continue` und `git rebase --abort`).
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

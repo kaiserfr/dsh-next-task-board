@@ -60,11 +60,11 @@ export interface ExecutionRecord {
    * shows Running/Queued and links it) that settles **without moving the card**:
    * it still sits in `todo` so the human can pull it on to the run column, which
    * continues the very same session. `'merge'` marks the automatic
-   * conflict-resolution run of a merge release: the Host started the merge of
-   * the base branch into the card's feature branch and left the conflict in the
-   * worktree, so this run's whole job is to resolve it and commit — it is an
-   * ordinary run in every other respect (it moves the card like one, and its
-   * settle is what makes the Host retry the merge).
+   * conflict-resolution run of a merge release: the base branch had moved on, the
+   * Host replayed the card's feature branch onto it and left the conflict in the
+   * worktree, so this run's whole job is to resolve it and finish the replay — it
+   * is an ordinary run in every other respect (it moves the card like one, and
+   * its settle is what makes the Host retry the merge).
    */
   kind?: 'clarify' | 'merge'
 }
@@ -139,7 +139,9 @@ export interface TaskGit {
    * one commit: `git.mergeBranch` refuses unless the branch still stands exactly
    * here and the worktree is clean, so committing after the review invalidates
    * it instead of slipping unreviewed work into the base branch. Re-parking the
-   * card (every way back into `ready_for_test` commits) stamps the new head.
+   * card (every way back into `ready_for_test` commits) stamps the new head, and
+   * so does the settle of a conflict-resolution run, whose commit lands on top of
+   * this one.
    */
   reviewedCommit?: string
   /** When the feature branch was merged back into `base` (ms epoch). */
@@ -154,9 +156,10 @@ export interface TaskGit {
  * result is merged, still unmerged, or failed to merge.
  *
  * The release is bound to the commit the human reviewed ({@link TaskGit.reviewedCommit})
- * like the merge gate itself: a release records that binding, and one automatic
- * conflict-resolution run may move the branch past it — that resolution counts
- * as part of the release, which is why the record names both instants.
+ * like the merge gate itself: a release records that binding, and the replay of
+ * that commit onto the base branch — plus one automatic conflict-resolution run
+ * on top of it — may move the branch past it. Both count as part of the release,
+ * which is why the record names the instants.
  */
 export interface TaskMerge {
   /** When the human released the card for the merge (ms epoch). */

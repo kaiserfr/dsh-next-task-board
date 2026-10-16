@@ -14,7 +14,8 @@ import type { TaskRecord } from './tasks.ts';
  * What the card says about its merge:
  *
  * - `merged` — the result is in the base branch (and `mergedAt` names when),
- * - `resolving` — the merge conflicted and a resolution run is working on it,
+ * - `resolving` — the replay onto the base conflicted and a resolution run is
+ *   working on it,
  * - `released` — the human released the card and the Host is merging,
  * - `failed` — the release failed; the card carries the reason,
  * - `unmerged` — the card has a branch but was not merged (yet),
