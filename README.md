@@ -44,6 +44,7 @@ route and system-prompt section).
 | **Git integration** | None. | When the card's pinned workspace is a local git repository, the board **opens `task/<slug>-<id8>` plus the card's own worktree when the card enters Clarification, runs the session in that worktree, commits the work the moment the card reaches Ready for test (every run settle) and records that commit as the reviewed one, and merges exactly that commit back into the base branch when the card reaches Done** — so the worktree never keeps uncommitted card work, and committing after the review invalidates the approval instead of merging unreviewed work (no-op without a repository). |
 | **Editing task content** | Content (title, description, prompt) locks after the first run, so a card that failed and was dragged back stays read-only forever. | **Content stays editable while the card waits in Backlog/To do** — whatever ran before; `running` and the settled columns (`ready_for_test`/`done`/`failed`) stay read-only, where *Edit as New Copy* is the way forward. The **"Parse with AI" source text is stored on the card**, so the edit form offers the same text again and *Parse and fill* can be re-run; when that text is gone the box opens on the card's title, description, and prompt. |
 | **Closing a task popup** | The form state lives in the popup component, and the backdrop closes it on mouse-down: one accidental click next to the popup throws the typed title, description, prompt, and — worst of all — the pasted "Parse with AI" text away, and no task is created because only the submit button talks to the Host. | **Closing keeps the form as a draft.** Clicking next to the popup, Escape, and *Cancel* all behave the same: the whole form (parse text, labels, workspace/mode/permission/model, schedule, freeze, handover) moves into a draft seat on the `BoardController` (in memory, so a page reload starts fresh) and comes back when the modal is opened again. Every modal has its own key — blank new task, duplicate (per source card), edit, labels (per card) — so a draft never surfaces on another card. A restored form shows *Restored what you had typed* with a **Discard draft** action, and the *+ New task* button carries a dot (`data-draft="true"`) while its draft waits. A form nobody touched leaves nothing, a created/saved task spends its draft (even when the Host confirms after the popup was closed), and a running AI parse is cancelled on close — the pasted text stays in the draft. |
+| **Manual review before the merge** | "Ready for test" is a column like any other: finding the worktree, the running version and its containers is the human's own business. | **A review block on every Ready-for-test card**: the card's own worktree (or its main checkout, labelled) opens in VS Code, the running version answers at the card's own URLs, and Start/Stop/Restart/Logs drive exactly this card — its Compose file when it has one, else the workspace's configured commands. Every other column renders nothing, and leaving the column stops what the board itself started. See [Review environment](#review-environment-everything-the-manual-check-needs). |
 | **Telemetry** | The client sends one anonymous install heartbeat per UTC day to `dsh-market.com`. | **Removed.** No heartbeat is sent at mount; `src/client/telemetry.ts` stays on disk for a possible own endpoint but is not imported. |
 | **Distribution** | Part of the `dsh-web` monorepo, installed from npm or the `web-ui-all` aggregate. | **Standalone repo**: `lib/` is committed, so `dsh plugin --profile web add github:kaiserfr/dsh-next-task-board` installs without a build step and without an `allowBuilds` approval. |
 | **Agent announcement** | Names `dsh-task-board` and the upstream aggregate package. | Names this fork and spells out the WIP queue semantics to the agent. |
@@ -397,6 +398,52 @@ route and system-prompt section).
   anything, the distinction needs no flag — the round simply never settles into
   Ready for test.
 
+### Review environment: everything the manual check needs
+
+A card in **Ready for test** shows its own review block in the detail view
+(`data-dsh-part="review"`); every other column renders nothing. Everything in it
+addresses **that one card** — its directory, its compose project, its configured
+command environment — never a global instance, and the Host refuses a review
+action from any column but the review one:
+
+- **Worktree link.** The block names the directory the version lives in — the
+  card's own worktree, or its **main checkout** when the card has none (labelled,
+  because the fallback is a different thing to review). *Open in VS Code* runs
+  `code -n <directory>` on the Host's machine, preferring the
+  `*.code-workspace` the directory carries (its relative `"."` folder entry
+  points at the worktree). The launch is fenced tighter than the rest of the API:
+  only a **loopback** request may trigger it, never an authenticated proxy or a
+  LAN caller.
+- **App link.** A running version publishes the URLs it answers at, derived from
+  the workspace's `url` template (`http://127.0.0.1:{port}` by default) and the
+  ports assigned to that card, plus one link per published compose port. Ports
+  are remembered on the card, so a re-start re-creates the environment on the URL
+  the human already has open. No link is offered for a stopped version.
+- **Controls.** *Start*, *Stop*, *Restart* and *Logs* — nothing starts by itself.
+  When the card's directory holds a compose file, the compose project wins
+  (card-scoped `dsh-tb-<card id>`, its own ports and volumes); otherwise the
+  workspace's configured commands run in the card's directory with the assigned
+  ports and the configured docker context. *Logs* opens a snapshot of the last
+  200 lines in a modal (compose's container logs, or the configured `logs`
+  command), with a refresh button. A start that fails leaves the command's own
+  output on the card.
+- **What is being reviewed.** Branch, base branch, the reviewed commit the merge
+  gate is bound to, and — on demand — `git diff --stat` against the base.
+
+The environment is disposable and card-scoped: leaving the review column,
+archiving or deleting the card stops it again — but **only a version the board
+started** (a stack the human brought up by hand is not the board's to kill).
+A stop that fails stays visible on the card and is not retried every poll.
+Nothing about an in-flight action is written to the ledger, so a Host restart can
+never leave a card claiming a start it never finished; the buttons are simply
+enabled again. The in-flight marker and the derived plan (directory, editor
+target, whether anything is startable, whether logs are readable) travel with the
+snapshot and the SSE frame, never through the ledger.
+
+The full review flow in `tests/review-workflow.spec.ts`,
+`tests/host-review.spec.ts`, `tests/host-routes.spec.ts` and
+`tests/review-ui.spec.tsx`.
+
 ## Features
 
 - **A container stack per card (fork addition)**: a card whose worktree carries a compose file runs its own stack — project `dsh-tb-<card id>`, cut in the card's worktree, brought up **before** the implementation run gets its prompt and stopped with `docker compose down -v` as soon as the card leaves the run/review columns, is deleted or archived. The published host ports are read from `docker compose ps` and shown in the card's detail view; a stack that does not come up fails the run, with docker's own output on the card. See [Task environments](docs/state-machine.md#task-environments-docker-compose).
@@ -472,6 +519,8 @@ dsh plugin --profile web add link:$(pwd)
 | `composeEnv` | empty | **Fork addition.** Environment handed to every card's stack, as `KEY=VALUE` pairs; `{port}`, `{port2}` … `{port9}` become distinct free host ports assigned to the card and kept for it, `{task}` its id. With `composeEnv: PORT={port}` a compose file that publishes a variable port (`\${PORT:-8092}`) gives every card its own port instead of colliding with the stack you run yourself. |
 | `composeFile` | `docker-compose.yml` | **Fork addition.** Compose file a card's task environment is brought up from, relative to the card's worktree (`compose.yaml` / `docker-compose.yaml` are probed when it is missing); an empty value turns task containers off. Every card gets its own project `dsh-tb-<card id>`, so containers, networks and volumes are task-scoped; the published host ports are reported back and shown on the card. See [Task environments](#task-environments-docker-compose). |
 | `stateMachine` | the shipped machine | **Fork addition.** The board's state engine as one JSON document: the columns (`states`), the allowed state changes (`transitions`) and the actions a transition fires (`actions`: `git.openBranch`, `git.commitBranch`, `git.mergeBranch`, `run`, `clarify`, `stamp`). The Host refuses any `move` the machine does not list, and hands the resolved machine to the browser in the snapshot, so drag & drop is validated against exactly the same transitions. An invalid config is refused as a whole and the machine in force stays. A custom machine should carry `git.commitBranch` on its own ways into `ready_for_test` (it also stamps the commit the merge gate is bound to); a stored document is left as it is. See [`docs/state-machine.md`](docs/state-machine.md). |
+| `reviewEnvironments` | empty | **Fork addition.** The review setups of the workspaces as one JSON array. A card in Ready for test matches the entry whose `path` is its directory or a parent of it (longest match wins; a card in its own worktree is matched through the repository it belongs to). Each entry takes `start`, `stop`, `restart`, `logs`, `env` (`KEY=VALUE` with `{port}`, `{port2}` …, `{task}`), `url` (the app URL template, default `http://127.0.0.1:{port}`) and `dockerContext` (exported as `DOCKER_CONTEXT`). The commands run in the card's directory; a compose file there wins over them. Invalid entries are reported by the settings card and dropped, so one typo never disables the other workspaces. See [Review environment](#review-environment-everything-the-manual-check-needs). |
+| `editorCommand` | `code` | **Fork addition.** Editor binary the review block's worktree link launches (`<editorCommand> -n <directory-or-workspace-file>`), on the Host's machine and only for a loopback request. |
 | `trustedProxyHosts` | `[]` | Canonical `host[:port]` authorities accepted only through the authenticated loopback reverse-proxy path. |
 | `proxyTokenEnv` | `DSH_TASK_BOARD_PROXY_TOKEN` | Environment variable containing the reverse-proxy token; the token itself is never stored in plugin config. |
 | `sessionDefaultPermission` | `read-only` | The deployment's session-default permission. A card whose effective permission (handover bundle or pin) is above this value requires a human confirmation before it may run; cron refuses unconfirmed cards. |

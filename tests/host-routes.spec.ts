@@ -283,3 +283,100 @@ describe('task-board parse route (#1540)', () => {
   })
 })
 
+
+/**
+ * The review reads: card-scoped, read-only, and answering a sentence instead of
+ * a status. Opening the worktree in the editor is the one operation that starts
+ * a program on the Host's machine, so it is fenced to the machine itself —
+ * through an authenticated proxy (the LAN case) it stays refused.
+ */
+describe('task-board review route', () => {
+  let server: Server
+  let base: string
+  let reviewOperation: ReturnType<typeof vi.fn>
+
+  async function start(options: { proxy?: boolean } = {}): Promise<void> {
+    reviewOperation = vi.fn(async () => ({ ok: true, text: '/tmp/worktree' }))
+    const service = {
+      snapshot: () => snapshot,
+      apply: vi.fn(() => snapshot),
+      subscribe: () => () => undefined,
+      reviewOperation,
+    } as unknown as TaskBoardHostService
+    const routes = makeTaskBoardRoutes(service, options.proxy === true
+      ? { trustedProxyHosts: ['board.example'], proxyToken: 'proxy-secret' }
+      : {})
+    server = createServer((req, res) => {
+      const route = routes.find(candidate => candidate.path === new URL(req.url ?? '/', 'http://local').pathname)
+      if (route === undefined) { res.writeHead(404); res.end(); return }
+      void route.handler(req, res)
+    })
+    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve) })
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('test server did not bind')
+    base = `http://127.0.0.1:${address.port}`
+  }
+
+  afterEach(async () => {
+    if (server === undefined) return
+    await new Promise<void>((resolve, reject) => { server.close(error => { if (error) reject(error); else resolve() }) })
+  })
+
+  async function post(kind: string, headers: Record<string, string> = {}): Promise<Response> {
+    return await fetch(`${base}/api/task-board/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', ...headers },
+      body: JSON.stringify({ kind, taskId: 'task-a' }),
+    })
+  }
+
+  it('answers card-scoped reads over the loopback fence', async () => {
+    await start()
+    const response = await post('logs')
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ ok: true, text: '/tmp/worktree' })
+    expect(reviewOperation).toHaveBeenCalledWith({ kind: 'logs', taskId: 'task-a' })
+    expect(response.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('lets an authenticated proxy read logs but never start the editor', async () => {
+    // Node's fetch owns the Host header, so the proxied request is sent as a
+    // raw one — exactly how the allowlisted reverse proxy reaches the Host.
+    await start({ proxy: true })
+    const headers = {
+      host: 'board.example',
+      origin: 'http://board.example',
+      'content-type': 'application/json',
+      'sec-fetch-site': 'same-origin',
+      'x-dsh-task-board-proxy-token': 'proxy-secret',
+    }
+    const send = async (kind: string): Promise<number> => await new Promise<number>((resolve, reject) => {
+      const outgoing = request(`${base}/api/task-board/review`, { method: 'POST', headers }, (response) => {
+        response.resume()
+        response.once('end', () => { resolve(response.statusCode ?? 0) })
+      })
+      outgoing.once('error', reject)
+      outgoing.end(JSON.stringify({ kind, taskId: 'task-a' }))
+    })
+    expect(await send('logs')).toBe(200)
+    expect(await send('open')).toBe(403)
+    expect(reviewOperation).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a malformed body and a non-JSON content type', async () => {
+    await start()
+    const invalid = await fetch(`${base}/api/task-board/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
+      body: JSON.stringify({ kind: 'wipe', taskId: 'task-a' }),
+    })
+    expect(invalid.status).toBe(400)
+    const notJson = await fetch(`${base}/api/task-board/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain', 'sec-fetch-site': 'same-origin' },
+      body: 'kind=logs',
+    })
+    expect(notJson.status).toBe(415)
+    expect(reviewOperation).not.toHaveBeenCalled()
+  })
+})

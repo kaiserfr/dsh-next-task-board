@@ -12,6 +12,7 @@ import type { TaskBoardPowerSnapshot } from '../protocol.ts'
 import { PluginSettingsCard, BooleanField, ValueField } from './PluginSettingsCard.tsx'
 import { CardForm, booleanField, numberField, textField, type CardActions, type CardShell, type FieldSpec, type FieldState as CardFieldState } from './settings-form.ts'
 import { normalizeStateMachine, type StateMachineConfig } from '../core/state-machine.ts'
+import { parseReviewEnvironments } from '../core/review-config.ts'
 
 /**
  * A JSON field: the draft is the pretty-printed document, and a save is
@@ -52,6 +53,14 @@ export interface TaskBoardSettings {
   composeFile?: string
   /** Environment of a card's stack, `KEY=VALUE` pairs with `{port}`/`{task}` (e.g. `PORT={port}`). */
   composeEnv?: string
+  /**
+   * Review setups per workspace (JSON): the commands that start, stop, restart
+   * and log the card's version, its URL template, docker context and env. A
+   * compose file in the card's directory wins over these commands.
+   */
+  reviewEnvironments?: string
+  /** Editor binary the worktree link launches (default `code`). */
+  editorCommand?: string
   /** The board's state machine: columns, allowed transitions, transition actions. */
   stateMachine?: StateMachineConfig
 }
@@ -74,6 +83,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
   composeEnv: CardFieldState
   /** State-machine JSON draft. */
   stateMachine: CardFieldState
+  /** Review-environment JSON draft. */
+  reviewEnvironments: CardFieldState
+  /** Editor binary draft for the worktree link. */
+  editorCommand: CardFieldState
 }
 
 /** The registration-side face the card's slot entry injects. */
@@ -100,6 +113,8 @@ export class TaskBoardSettingsCardController {
       textField('composeFile'),
       textField('composeEnv'),
       jsonField('stateMachine', value => normalizeStateMachine(value).errors),
+      jsonField('reviewEnvironments', value => parseReviewEnvironments(value).errors),
+      textField('editorCommand'),
     ])
     this.store = this.form.bind(() => this.projection())
   }
@@ -115,6 +130,8 @@ export class TaskBoardSettingsCardController {
       composeFile: this.form.field('composeFile'),
       composeEnv: this.form.field('composeEnv'),
       stateMachine: this.form.field('stateMachine'),
+      reviewEnvironments: this.form.field('reviewEnvironments'),
+      editorCommand: this.form.field('editorCommand'),
     }
   }
 
@@ -265,6 +282,24 @@ export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
         {...state.stateMachine}
         onEdit={(text) => { props.edit('stateMachine', text) }}
         onReset={() => { props.resetField('stateMachine') }}
+      />
+      <ValueField
+        id="settings-task-board-review-environments"
+        label={t('settings.reviewEnvironments')}
+        hint={t('settings.reviewEnvironmentsHint')}
+        {...fieldProps}
+        {...state.reviewEnvironments}
+        onEdit={(text) => { props.edit('reviewEnvironments', text) }}
+        onReset={() => { props.resetField('reviewEnvironments') }}
+      />
+      <ValueField
+        id="settings-task-board-editor-command"
+        label={t('settings.editorCommand')}
+        hint={t('settings.editorCommandHint')}
+        {...fieldProps}
+        {...state.editorCommand}
+        onEdit={(text) => { props.edit('editorCommand', text) }}
+        onReset={() => { props.resetField('editorCommand') }}
       />
       <p>
         {t('settings.powerStatus', {

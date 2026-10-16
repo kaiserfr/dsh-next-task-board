@@ -82,6 +82,28 @@ export interface Config {
      * with the stack the human runs themselves. Example: `PORT={port}`.
      */
     composeEnv?: Volatile<string>;
+    /**
+     * Review setups per workspace, as a JSON array. A card in `ready for test`
+     * shows the controls of the entry whose `path` is the card's directory or a
+     * parent of it (longest match wins):
+     *
+     * ```json
+     * [{ "path": "/home/me/proj", "env": "PORT={port}",
+     *    "start": "./start.sh", "stop": "./start.sh --stop",
+     *    "logs": "tail -n 200 data/server.log",
+     *    "url": "http://127.0.0.1:{port}", "dockerContext": "default" }]
+     * ```
+     *
+     * `{port}`, `{port2}` … become free host ports assigned to the card and kept
+     * for it, `{task}` is its id. The commands run in the card's directory (its
+     * worktree, else its main checkout) with the configured `env` and
+     * `DOCKER_CONTEXT`; a compose file in that directory wins over the configured
+     * commands. Leaving the review column stops the version again through the
+     * configured `stop` — but only one the board itself started.
+     */
+    reviewEnvironments?: Volatile<string>;
+    /** Editor binary the worktree link launches (default `code`, opened with `-n`). */
+    editorCommand?: Volatile<string>;
     /** Canonical reverse-proxy Host authorities admitted with a server-side token. */
     trustedProxyHosts?: string[];
     /** Environment variable whose value the authenticated proxy injects upstream. */
@@ -102,6 +124,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     maxDoneTasks: z<number, number, "volatile-defined">;
     composeFile: z<string, string, "volatile-defined">;
     composeEnv: z<string, string, "volatile-defined">;
+    reviewEnvironments: z<string, string, "volatile-defined">;
+    editorCommand: z<string, string, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;
     sessionDefaultPermission: z<"read-only" | "workspace-write" | "danger-full-access", "read-only" | "workspace-write" | "danger-full-access", "defined">;
@@ -114,6 +138,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     maxDoneTasks: z<number, number, "volatile-defined">;
     composeFile: z<string, string, "volatile-defined">;
     composeEnv: z<string, string, "volatile-defined">;
+    reviewEnvironments: z<string, string, "volatile-defined">;
+    editorCommand: z<string, string, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;
     sessionDefaultPermission: z<"read-only" | "workspace-write" | "danger-full-access", "read-only" | "workspace-write" | "danger-full-access", "defined">;

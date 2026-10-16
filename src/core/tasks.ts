@@ -168,6 +168,53 @@ export interface TaskCompose {
 }
 
 /**
+ * Review environment of a card: the version the human inspects before the
+ * merge, started on demand from the review column and stopped again as soon as
+ * the card leaves it. Unlike {@link TaskCompose} (the stack a *run* works
+ * against, brought up before the agent gets its prompt), this record belongs to
+ * the review step: it says how the environment is managed — the card's compose
+ * file when it has one, the workspace's configured commands otherwise — where
+ * it runs, which URLs answer, and what the last action reported. Absent while
+ * nothing was ever started for the card.
+ */
+export interface TaskReview {
+  /**
+   * How the card's version is managed: `compose` reuses the card's own compose
+   * project, `command` runs the workspace's configured start/stop commands.
+   */
+  mode: 'compose' | 'command'
+  /**
+   * What identifies the environment: the compose project name (`compose`), or
+   * the configured workspace path the commands came from (`command`).
+   */
+  source: string
+  /**
+   * Absolute directory the version runs in: the card's own worktree, else its
+   * main checkout (the fallback is labelled on the card).
+   */
+  dir: string
+  /** Docker context the stack was brought up on (`compose` mode). */
+  context?: string
+  /** Running since (ms epoch); absent while the environment is stopped. */
+  startedAt?: number
+  /** When it was last stopped (ms epoch). */
+  stoppedAt?: number
+  /** Published host ports (`compose` mode), as `service host->container/proto`. */
+  ports?: string[]
+  /**
+   * Environment the start ran with, as `KEY=VALUE`: the assigned host ports
+   * (`DSH_COMPOSE_PORT`, `DSH_COMPOSE_PORT2`, …) are remembered here, so a
+   * re-start re-creates the environment on the very port the human already has
+   * open instead of probing for a new one.
+   */
+  env?: Record<string, string>
+  /** URLs the running version answers at (derived from the URL template). */
+  links?: string[]
+  /** Why the last action failed. */
+  error?: string
+}
+
+/**
  * Frozen context snapshot carried by a continuation card (issue #4): the
  * goal/progress/next text (already sanitized by the freeze gates) plus the
  * freeze instant and the redaction warning flag.
@@ -407,6 +454,13 @@ export interface TaskRecord {
    * down when the card leaves the run/review columns, is deleted or archived.
    */
   compose?: TaskCompose
+  /**
+   * Review environment of the card (see {@link TaskReview}): what the human
+   * starts, looks at and stops in the review column. Written by the Host
+   * service from the card's own actions and never by the browser, and dropped
+   * again as soon as the card leaves the review column.
+   */
+  review?: TaskReview
   /**
    * When the task was archived (ms epoch). Archived tasks keep their status
    * and execution history, leave the main board, and cannot run until restored;

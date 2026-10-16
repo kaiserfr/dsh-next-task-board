@@ -8,6 +8,8 @@ import {
   type TaskBoardEventPayload,
   type TaskBoardParseDraft,
   type TaskBoardParseRequest,
+  type TaskBoardReviewRequest,
+  type TaskBoardReviewResponse,
   type TaskBoardSnapshot,
 } from '../protocol.ts'
 
@@ -87,6 +89,8 @@ export interface TaskBoardHostTransport {
   subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void
   /** One-shot model parse of pasted text (issue #1540). */
   parseDraft(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>
+  /** One review read: open the worktree, snapshot logs, diff the reviewed commit. */
+  reviewOp(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>
 }
 
 export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
@@ -190,6 +194,47 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     if (code === 'timeout') throw new HostApiError('timeout', t('new.aiParseTimeout', { seconds: String(TASK_PARSE_TIMEOUT_SECONDS) }), response.status)
     const detail = typeof record?.error === 'string' && record.error !== '' ? record.error : String(response.status)
     throw new HostApiError('rejected', t('new.aiParseFailed', { error: detail }), response.status)
+  }
+
+  /**
+   * One review read. The Host answers every one of them with `{ ok, text?,
+   * error? }` — including its own refusals — so a failed read stays a sentence
+   * in the panel instead of a transport error. Only a Host that never mounted
+   * the route (404) and an authentication refusal are reported as such, because
+   * those are not about the card.
+   */
+  async reviewOp(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse> {
+    let response: Response
+    try {
+      response = await fetch(`${TASK_BOARD_API_PREFIX}/review`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+      })
+    } catch {
+      throw new HostApiError('unreachable', t('board.hostError.unreachable'))
+    }
+    const text = await response.text()
+    let parsed: unknown
+    try {
+      parsed = text.trim() === '' ? undefined : JSON.parse(text) as unknown
+    } catch {
+      parsed = undefined
+    }
+    const record = typeof parsed === 'object' && parsed !== null ? parsed as Partial<TaskBoardReviewResponse> : undefined
+    if (response.ok) {
+      if (record === undefined || typeof record.ok !== 'boolean') {
+        throw new HostApiError('unexpected', t('board.hostError.unexpected', { status: String(response.status) }), response.status)
+      }
+      return {
+        ok: record.ok,
+        ...(typeof record.text === 'string' ? { text: record.text } : {}),
+        ...(typeof record.error === 'string' ? { error: record.error } : {}),
+      }
+    }
+    if (response.status === 404) throw new HostApiError('not-mounted', t('review.unavailable'), 404)
+    if (response.status === 401 || response.status === 403) throw new HostApiError('unauthorized', t('board.hostError.unauthorized'), response.status)
+    throw new HostApiError('rejected', typeof record?.error === 'string' && record.error !== '' ? record.error : String(response.status), response.status)
   }
 
   subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void {

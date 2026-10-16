@@ -17,6 +17,7 @@ import css from '../board.module.css'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
 import { EditTaskModal, EditTagsModal } from './EditTaskModal.tsx'
 import { NewTaskModal } from './NewTaskModal.tsx'
+import { ReviewSection } from './ReviewSection.tsx'
 import { formatHostTimestamp, formatTime } from './TaskCard.tsx'
 import { STATUS_KEY } from './status-key.ts'
 
@@ -459,6 +460,11 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
               )}
             </section>
           )}
+
+          {/* The manual check of the new version: worktree, editor, app links and
+              the container controls, for cards in the review column only (the
+              component itself decides that, so no other column ever renders it). */}
+          <ReviewSection controller={controller} task={current} pending={pending} timeZone={timeZone} />
 
           {specPending && (
             <section className={css.detailSection} data-dsh-part="spec-gate">

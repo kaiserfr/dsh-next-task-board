@@ -23,6 +23,8 @@ import type {
   TaskBoardEventPayload,
   TaskBoardParseDraft,
   TaskBoardParseRequest,
+  TaskBoardReviewRequest,
+  TaskBoardReviewResponse,
   TaskBoardSnapshot,
 } from '../protocol.ts'
 
@@ -40,6 +42,13 @@ export interface TaskBoardTransport {
    * that cannot parse simply omits it, and the form hides the section.
    */
   parseDraft?(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>
+  /**
+   * One review read (open the worktree, snapshot the logs, diff the reviewed
+   * commit). Optional like {@link TaskBoardTransport.parseDraft}: a Host that
+   * predates the review block omits it, and the panel then only shows what it
+   * can derive from the snapshot itself.
+   */
+  reviewOp?(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>
 }
 
 /** The sessions face the controller needs for navigation awareness. */
@@ -132,8 +141,12 @@ export interface ControllerSnapshot {
   formDrafts?: readonly string[]
   /** Whether the board may offer "register a new project" (issue #1536). */
   canCreateWorkspace?: boolean
-  /** Whether this deployment can parse pasted text into task fields (issue #1540). */
+  /**
+   * Whether this deployment can parse pasted text into task fields (issue #1540).
+   */
   canParseTask?: boolean
+  /** Whether this deployment serves the review reads (worktree, logs, diff). */
+  canReviewRead?: boolean
   transportError?: string
   /**
    * A session jump that failed because the runtime does not know the id even
@@ -141,7 +154,7 @@ export interface ControllerSnapshot {
    * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
    */
   sessionOpenError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer'>
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -197,7 +210,7 @@ export class BoardController {
   private readonly formDrafts = new Map<string, unknown>()
   private transportError: string | undefined
   private sessionOpenError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer'> | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans'> | undefined
   private remoteSubscribed = false
   private remoteInitialization: Promise<boolean> | undefined
 
@@ -247,6 +260,7 @@ export class BoardController {
       ...(this.formDrafts.size === 0 ? {} : { formDrafts: this.formDraftKeys() }),
       ...(this.workspaceCreator === undefined ? {} : { canCreateWorkspace: true }),
       ...(typeof this.deps.transport?.parseDraft === 'function' ? { canParseTask: true } : {}),
+      ...(typeof this.deps.transport?.reviewOp === 'function' ? { canReviewRead: true } : {}),
       ...(this.transportError === undefined ? {} : { transportError: this.transportError }),
       ...(this.sessionOpenError === undefined ? {} : { sessionOpenError: this.sessionOpenError }),
       ...(this.hostState === undefined ? {} : { host: this.hostState }),
@@ -647,6 +661,72 @@ export class BoardController {
     await this.commitRemote({ kind: 'rerun', taskId: id }, id, currentOf(this.deps.sessions))
   }
 
+  // --- review environments -------------------------------------------------------
+
+  /**
+   * Start the card's version for the manual review. Only a card standing in the
+   * review column may ask: the Host refuses anything else, and the board hides
+   * the controls everywhere else anyway.
+   * @returns whether the Host accepted the action.
+   */
+  async reviewStart(id: string): Promise<boolean> {
+    return await this.reviewAction('review-start', id)
+  }
+
+  /** Stop the card's review version again (compose project or configured command). */
+  async reviewStop(id: string): Promise<boolean> {
+    return await this.reviewAction('review-stop', id)
+  }
+
+  /**
+   * Restart the card's review version: the Host stops a running environment
+   * first and starts it again, so a rebuilt image or a changed config takes
+   * effect without two clicks.
+   */
+  async reviewRestart(id: string): Promise<boolean> {
+    return await this.reviewAction('review-restart', id)
+  }
+
+  private async reviewAction(kind: 'review-start' | 'review-stop' | 'review-restart', id: string): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') return false
+    if (this.deps.transport === undefined) return false
+    return await this.commitRemote({ kind, taskId: id }, id)
+  }
+
+  /**
+   * Open the card's version in the configured editor (or the `*.code-workspace`
+   * it carries). The Host launches the editor on its own machine, so this is a
+   * read-only Host call rather than an action: nothing about the ledger changes.
+   */
+  async openWorktree(id: string): Promise<TaskBoardReviewResponse> {
+    return await this.reviewRead({ kind: 'open', taskId: id })
+  }
+
+  /** Snapshot of the card's container/application logs, for the detail modal. */
+  async loadReviewLogs(id: string): Promise<TaskBoardReviewResponse> {
+    return await this.reviewRead({ kind: 'logs', taskId: id })
+  }
+
+  /** `git diff --stat` of the reviewed commit against the card's base branch. */
+  async loadReviewDiff(id: string): Promise<TaskBoardReviewResponse> {
+    return await this.reviewRead({ kind: 'diff', taskId: id })
+  }
+
+  /**
+   * One review read against the Host. A deployment without that route answers
+   * with its reason instead of throwing, so the panel can show what happened.
+   */
+  private async reviewRead(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse> {
+    const reviewOp = this.deps.transport?.reviewOp
+    if (reviewOp === undefined) return { ok: false, error: 'this Host serves no review operations' }
+    try {
+      return await reviewOp.call(this.deps.transport, request)
+    } catch (error) {
+      return { ok: false, error: messageOf(error) }
+    }
+  }
+
   /**
    * Pause the in-progress runs of `ids` in one Host action: each card keeps its
    * column and its execution record, the Host stops the run's session. The
@@ -778,6 +858,7 @@ export class BoardController {
         ...(event.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: event.maxConcurrentRuns }),
         ...(event.maxDoneTasks === undefined ? {} : { maxDoneTasks: event.maxDoneTasks }),
         ...(event.awaitingAnswer === undefined ? {} : { awaitingAnswer: event.awaitingAnswer }),
+        ...(event.reviewPlans === undefined ? {} : { reviewPlans: event.reviewPlans }),
       }
       this.notify()
       return
@@ -823,6 +904,9 @@ export class BoardController {
       // Waiting questions: an older Host sends none, and the board keeps what it
       // has; the current Host always sends the map, so an empty one clears it.
       ...(snapshot.awaitingAnswer === undefined ? {} : { awaitingAnswer: snapshot.awaitingAnswer }),
+      // The review plans are derived per read like the waiting questions: an
+      // older Host sends none, and the board then simply offers no review block.
+      ...(snapshot.reviewPlans === undefined ? {} : { reviewPlans: snapshot.reviewPlans }),
     }
     this.transportError = undefined
     if (this.selectedTaskId !== undefined && !this.tasks.some(task => task.id === this.selectedTaskId)) {

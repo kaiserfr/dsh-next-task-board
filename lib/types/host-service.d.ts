@@ -1,10 +1,11 @@
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway';
 import { HostTaskLedger } from './host-ledger.ts';
 import { type TaskComposeController } from './compose-workflow.ts';
+import { ReviewWorkflow } from './review-workflow.ts';
 import { HostExecutionRunner, type SessionCommandDispatcher, type TaskBoardWorkspaceRegistry } from './host-runner.ts';
 import { GitWorkflow } from './git-workflow.ts';
 import { PowerInhibitor } from './power-inhibitor.ts';
-import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts';
+import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts';
 import type { TaskPermission } from './core/handover.ts';
 export declare class TaskBoardHostService {
     readonly ledger: HostTaskLedger;
@@ -14,6 +15,8 @@ export declare class TaskBoardHostService {
     readonly git: GitWorkflow;
     /** Task-scoped Docker Compose environments: up before a run, down afterwards. */
     readonly compose: TaskComposeController;
+    /** Review environments: the card's version, started and stopped from the review column. */
+    readonly review: ReviewWorkflow;
     private readonly listeners;
     private timers;
     private lastScheduleTick;
@@ -74,6 +77,19 @@ export declare class TaskBoardHostService {
      */
     private readonly composeProjects;
     private composeBusy;
+    /**
+     * Review environments the board started (card id → its record), plus the
+     * action currently in flight per card. The map is what survives a card's
+     * deletion — the record is gone, the environment it started is not — and it is
+     * the only marker of "the board started this one", which is exactly what the
+     * automatic cleanup is allowed to stop. The in-flight marker is deliberately
+     * in memory: a Host restart must not leave a card claiming a start it never
+     * finished, and the buttons are then simply enabled again.
+     */
+    private readonly reviewEnvs;
+    private readonly reviewBusy;
+    /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
+    private reviewPlans;
     private readonly now;
     constructor(gateway: TypertGateway, options?: {
         ledger?: HostTaskLedger;
@@ -87,6 +103,8 @@ export declare class TaskBoardHostService {
         compose?: TaskComposeController;
         /** Compose file inside the card's worktree (settings `composeFile`). */
         composeFile?: string;
+        /** Review environments of the cards; omit for the default workflow. */
+        review?: ReviewWorkflow;
         /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
         stateMachine?: unknown;
     });
@@ -119,6 +137,35 @@ export declare class TaskBoardHostService {
      * `{task}` for the card id.
      */
     setComposeEnv(env: string): void;
+    /**
+     * Apply the review setups (settings `reviewEnvironments`): one entry per
+     * workspace directory, with the start/stop/restart/logs commands, the optional
+     * URL template, docker context and environment. An invalid document is
+     * reported as a whole — the entries that parse stay in force, so one typo does
+     * not silently disable every other workspace — and the derived plans are
+     * re-published, because a workspace that just gained a start command must show
+     * its buttons without a ledger change.
+     * @param value - raw setting (JSON text or the parsed array).
+     * @returns the reasons of every entry that was refused (empty when all parsed).
+     */
+    setReviewEnvironments(value: unknown): string[];
+    /** Point the worktree link at another editor binary (settings `editorCommand`). */
+    setEditorCommand(command: string): void;
+    /**
+     * Recompute the derived review plans: what the review column offers each card
+     * (directory, worktree or main-checkout fallback, editor target, whether there
+     * is anything to start) plus the action currently in flight. Called on every
+     * ledger change and on every settings change, and never persisted — the plan
+     * is a projection of the filesystem and the settings, not of the ledger.
+     */
+    private refreshReviewPlans;
+    /**
+     * Seed the review bookkeeping from the ledger: a record with a `startedAt`
+     * stamp is a version the board started, so a Host restart re-attaches it
+     * (the very thing the automatic cleanup has to be able to stop later) instead
+     * of forgetting an environment the human can still see on the card.
+     */
+    private seedReviewEnvironments;
     setMaxDoneTasks(limit: number): void;
     /**
      * Apply the board's state machine (settings namespace `task-board`, field
@@ -129,10 +176,43 @@ export declare class TaskBoardHostService {
      */
     setStateMachine(config: unknown): string[];
     snapshot(): TaskBoardSnapshot;
+    /**
+     * Build the wire snapshot from an already-read ledger state, so a caller that
+     * has one (the action path) never pays for a second whole-ledger clone.
+     */
+    private snapshotWith;
     /** SSE frame payload; deliberately skips the tasks deep-clone of {@link snapshot}. */
     eventPayload(): TaskBoardEventPayload;
     subscribe(listener: () => void): () => void;
     apply(requestId: string, action: TaskBoardAction, initiator?: string): TaskBoardSnapshot;
+    /**
+     * The branch of {@link TaskBoardHostService.apply} that answers a review
+     * action: the ledger already validated it, so this only starts the work and
+     * marks the card as busy.
+     */
+    private scheduleReview;
+    /**
+     * Carry out one review action and write its outcome back to the card. The
+     * record is always written — a failure keeps the environment's identity and
+     * the reason, so the card can explain itself instead of silently doing
+     * nothing. `restart` is a stop (when something runs) followed by a start;
+     * `stop` on a card that never started is a no-op the Host still reports as
+     * stopped.
+     */
+    private runReviewIntent;
+    /**
+     * Drop the run environment's record when it names the very project the review
+     * just took down: the stack is gone, and the card must not keep showing "up
+     * since …" for it.
+     */
+    private forgetComposeRecord;
+    /**
+     * Read-only review work the browser asks for (open the worktree, read logs,
+     * diff the reviewed commit). Every one of them is scoped to the named card —
+     * its own directory, its own project — and every one answers with text or a
+     * reason, so the panel never renders a raw exception.
+     */
+    reviewOperation(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>;
     dispose(): void;
     private launch;
     /**
@@ -169,6 +249,19 @@ export declare class TaskBoardHostService {
      * not. Nothing here blocks a ledger write: compose runs in the background.
      */
     private reconcileCompose;
+    /**
+     * Tear down the review environments whose card left the review column, was
+     * archived or disappeared from the ledger — but only what the board itself
+     * started: a version the human brought up by hand is not the board's to kill,
+     * which is why the record's `startedAt` (and this map) is the marker. The card
+     * keeps its record, marked stopped, so a re-parked card starts its next review
+     * on the very port the human already knows.
+     *
+     * A stop that fails stays visible on the card instead of being retried every
+     * five seconds: the environment may still be running, and hammering a broken
+     * stop command would not help.
+     */
+    private reconcileReview;
     private pollSessions;
     /**
      * Recompute which cards wait for the human's answer and publish the change.

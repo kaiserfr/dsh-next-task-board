@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import type { TaskCompose } from './core/tasks.ts'
+import type { TaskCompose, TaskReview } from './core/tasks.ts'
 import { DEFAULT_MAX_DONE_TASKS, hasOpenRun, isReworkReturn, openExecution, requiresSpecApproval, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
@@ -76,6 +76,21 @@ export interface PausedRun {
 export interface ResumedRun {
   task: TaskRecord
   execution: ExecutionRecord
+}
+
+/**
+ * A review action the Host service has to carry out: the ledger validates it
+ * (the card exists, is not archived and stands in the review column) and hands
+ * the intent back instead of doing the work itself. Starting or stopping a
+ * version can take minutes — compose builds images, a start script runs — so the
+ * service runs it off the ledger write and writes the outcome back with
+ * {@link HostTaskLedger.noteReview}; nothing about the in-flight action is
+ * persisted, which is exactly why a Host restart cannot leave a card claiming a
+ * start it never finished.
+ */
+export interface ReviewIntent {
+  taskId: string
+  intent: 'start' | 'stop' | 'restart'
 }
 
 /** Minimal value copy used by the Host session monitor. */
@@ -429,6 +444,25 @@ export class HostTaskLedger {
   }
 
   /**
+   * One card as a live ledger reference (no clone), for Host-side bookkeeping
+   * that must not pay for a whole-ledger copy — a review action resolving its
+   * card, or a cleanup notice after the card is gone.
+   */
+  task(taskId: string): TaskRecord | undefined {
+    return this.document.tasks.find(item => item.id === taskId)
+  }
+
+  /**
+   * Cheap projection for the review plan map: the cards standing in the review
+   * column. The derived plans are recomputed on every ledger change, so this
+   * path must not clone the ledger ({@link HostTaskLedger.state}); the planner
+   * only reads each card and the filesystem behind it.
+   */
+  reviewCandidates(): readonly TaskRecord[] {
+    return this.document.tasks.filter(task => task.archivedAt === undefined && task.status === 'ready_for_test')
+  }
+
+  /**
    * The state machine currently in force, i.e. what the Host validates moves
    * against and what the browser renders its columns and drop targets from.
    */
@@ -717,7 +751,7 @@ export class HostTaskLedger {
     requestId: string,
     action: TaskBoardAction,
     initiator?: string,
-  ): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[] } {
+  ): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[]; review?: ReviewIntent[] } {
     const fingerprint = createHash('sha256').update(JSON.stringify(action)).digest('hex')
     const cached = this.requestCache.get(requestId)
     if (cached !== undefined) {
@@ -839,6 +873,26 @@ export class HostTaskLedger {
     this.commit()
   }
 
+  /**
+   * Record the card's review environment (or clear it with `undefined`). Like
+   * {@link HostTaskLedger.noteCompose} this is a Host-side write, not a browser
+   * action: the service owns the lifecycle, and the record only makes the state
+   * — how it runs, where, which URLs answer, what failed — visible on the card.
+   * A card that left the review column in the meantime keeps no record.
+   */
+  noteReview(taskId: string, review: TaskReview | undefined): void {
+    const now = this.now()
+    const task = this.document.tasks.find(item => item.id === taskId)
+    if (task === undefined) return
+    const current = JSON.stringify(task.review ?? null)
+    const next = JSON.stringify(review ?? null)
+    if (current === next) return
+    this.document.tasks = this.document.tasks.map(item => item.id === taskId
+      ? { ...item, review, updatedAt: now }
+      : item)
+    this.commit()
+  }
+
   settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void {
     const now = this.now()
     this.document.tasks = this.document.tasks.map(task => {
@@ -855,12 +909,13 @@ export class HostTaskLedger {
     this.commit()
   }
 
-  private apply(action: TaskBoardAction, initiator?: string): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[] } {
+  private apply(action: TaskBoardAction, initiator?: string): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[]; review?: ReviewIntent[] } {
     const now = this.now()
     let run: OpenedRun | undefined
     let clarification: OpenedRun | undefined
     let paused: PausedRun[] | undefined
     let resumed: ResumedRun[] | undefined
+    let review: ReviewIntent[] | undefined
     switch (action.kind) {
       case 'import': {
         const sources = new Set(this.document.scheduler.importedSources ?? [])
@@ -1069,6 +1124,22 @@ export class HostTaskLedger {
           : item)
         break
       }
+      case 'review-start':
+      case 'review-stop':
+      case 'review-restart': {
+        const task = this.document.tasks.find(item => item.id === action.taskId)
+        if (task === undefined) throw new Error('task not found')
+        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+        // The review controls exist in the review column only; the Host is the
+        // authority for that, not the browser's rendering. A card that left the
+        // column while the click was in flight is refused here.
+        if (task.status !== 'ready_for_test') throw new Error('review-action-requires-ready-for-test')
+        review = [{
+          taskId: task.id,
+          intent: action.kind === 'review-start' ? 'start' : action.kind === 'review-stop' ? 'stop' : 'restart',
+        }]
+        break
+      }
       case 'set-schedule': {
         const task = this.document.tasks.find(task => task.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
@@ -1145,6 +1216,7 @@ export class HostTaskLedger {
       ...(clarification === undefined ? {} : { clarification }),
       ...(paused === undefined ? {} : { paused }),
       ...(resumed === undefined ? {} : { resumed }),
+      ...(review === undefined ? {} : { review }),
     }
   }
 

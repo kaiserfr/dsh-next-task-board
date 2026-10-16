@@ -35,18 +35,39 @@ export const COMPOSE_TIMEOUT_MS = 5 * 60_000
 /** First host port a card's environment is offered when `{port}` is used. */
 export const DEFAULT_COMPOSE_PORT_BASE = 8100
 
+/** How many log lines one on-demand snapshot keeps. */
+export const COMPOSE_LOG_TAIL = 200
+
 /** Size of the range the per-card port is picked from. */
 export const DEFAULT_COMPOSE_PORT_RANGE = 800
 
 /** How many ports are probed before the allocation gives up. */
 const PORT_PROBES = 50
 
+/** Per-call options of one compose invocation. */
+export interface ComposeRunOptions {
+  /**
+   * Docker context the command addresses (`docker --context <name> compose …`).
+   * The board's own default context is the one the Host runs under; a workspace
+   * whose containers live elsewhere names its context in `reviewEnvironments`.
+   */
+  context?: string
+}
+
 /** The subset of the workflow the Host service uses; tests fake this. */
 export interface TaskComposeController {
+  /**
+   * Compose file the card would be brought up from (the card's worktree, else
+   * its checkout), or undefined when it has none. Optional: a fake controller
+   * without it simply never offers a compose environment.
+   */
+  fileFor?(task: TaskRecord): { dir: string; file: string } | undefined
   /** Bring the card's environment up; `undefined` when the card has none. */
-  up(task: TaskRecord): Promise<TaskCompose | undefined>
+  up(task: TaskRecord, options?: ComposeRunOptions): Promise<TaskCompose | undefined>
   /** Tear a project down again (idempotent; failures only log). */
-  down(project: string, dir: string): Promise<void>
+  down(project: string, dir: string, options?: ComposeRunOptions): Promise<void>
+  /** Snapshot of a project's container logs; optional like {@link TaskComposeController.fileFor}. */
+  logs?(project: string, dir: string, options?: ComposeRunOptions): Promise<string>
 }
 
 interface ComposeWorkflowOptions {
@@ -139,7 +160,7 @@ export class ComposeWorkflow implements TaskComposeController {
    * throws with the command's own output, so the caller can fail the run and
    * put the reason on the card.
    */
-  async up(task: TaskRecord): Promise<TaskCompose | undefined> {
+  async up(task: TaskRecord, options: ComposeRunOptions = {}): Promise<TaskCompose | undefined> {
     const target = this.fileFor(task)
     if (target === undefined) return undefined
     const project = composeProject(task)
@@ -150,14 +171,14 @@ export class ComposeWorkflow implements TaskComposeController {
       base: this.portBase,
       ...(task.compose?.env === undefined ? {} : { previous: task.compose.env }),
     })
-    const result = await this.exec(target.dir, ['compose', '-p', project, '-f', target.file, 'up', '-d'], task, env)
+    const result = await this.exec(target.dir, ['compose', '-p', project, '-f', target.file, 'up', '-d'], task, env, options)
     if (result.code !== 0) throw new Error(`docker compose up failed for ${project}: ${detailOf(result)}`)
     return {
       project,
       file: target.file,
       startedAt,
       ...(Object.keys(env).length === 0 ? {} : { env }),
-      ...(await this.ports(target.dir, project).then(ports => (ports.length === 0 ? {} : { ports }))),
+      ...(await this.ports(target.dir, project, options).then(ports => (ports.length === 0 ? {} : { ports }))),
     }
   }
 
@@ -166,17 +187,28 @@ export class ComposeWorkflow implements TaskComposeController {
    * a leftover volume would surprise the next run of the same card. A project
    * that is already gone is not an error; a real failure only logs.
    */
-  async down(project: string, dir: string): Promise<void> {
+  async down(project: string, dir: string, options: ComposeRunOptions = {}): Promise<void> {
     if (!existsSync(dir)) return
-    const result = await this.exec(dir, ['compose', '-p', project, 'down', '-v', '--remove-orphans'])
+    const result = await this.exec(dir, ['compose', '-p', project, 'down', '-v', '--remove-orphans'], undefined, {}, options)
     if (result.code !== 0) {
       console.warn(`task board: docker compose down failed for ${project}: ${detailOf(result)}`)
     }
   }
 
+  /**
+   * Snapshot of the project's container logs (the last {@link COMPOSE_LOG_TAIL}
+   * lines, no follow): the review modal reads it on demand, so a long-running
+   * stack never holds a stream open in the Host.
+   */
+  async logs(project: string, dir: string, options: ComposeRunOptions = {}): Promise<string> {
+    const result = await this.exec(dir, ['compose', '-p', project, 'logs', '--tail', String(COMPOSE_LOG_TAIL), '--no-color'], undefined, {}, options)
+    if (result.code !== 0) throw new Error(`docker compose logs failed for ${project}: ${detailOf(result)}`)
+    return `${result.stdout}${result.stderr}`
+  }
+
   /** Published host ports of the project, as `service host->container/proto`. */
-  private async ports(dir: string, project: string): Promise<string[]> {
-    const result = await this.exec(dir, ['compose', '-p', project, 'ps', '--format', 'json'])
+  private async ports(dir: string, project: string, options: ComposeRunOptions = {}): Promise<string[]> {
+    const result = await this.exec(dir, ['compose', '-p', project, 'ps', '--format', 'json'], undefined, {}, options)
     if (result.code !== 0) return []
     return parsePublishedPorts(result.stdout)
   }
@@ -184,11 +216,15 @@ export class ComposeWorkflow implements TaskComposeController {
   /**
    * Run one compose command in `dir`. The task id travels in the environment so
    * a compose file can key its own variables on it (`${DSH_TASK_ID}`), and the
-   * project name is exported as `COMPOSE_PROJECT_NAME` for the same reason.
+   * project name is exported as `COMPOSE_PROJECT_NAME` for the same reason. A
+   * context, when given, is addressed with docker's own global flag, so the
+   * command reaches the daemon the workspace named instead of the Host's
+   * default one.
    */
-  private exec(dir: string, args: readonly string[], task?: TaskRecord, extra: Record<string, string> = {}): Promise<CommandResult> {
+  private exec(dir: string, args: readonly string[], task?: TaskRecord, extra: Record<string, string> = {}, options: ComposeRunOptions = {}): Promise<CommandResult> {
+    const argv = [...(options.context === undefined || options.context === '' ? [] : ['--context', options.context]), ...args]
     return new Promise(resolve => {
-      const child = spawn(this.dockerCommand, [...args], {
+      const child = spawn(this.dockerCommand, argv, {
         cwd: dir,
         shell: false,
         env: {

@@ -14,7 +14,7 @@
 import type { TaskStore } from './store.ts';
 import { type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts';
 import { type TaskUpdatePatch } from './use-cases/task-update.ts';
-import type { TaskBoardAction, TaskBoardEventPayload, TaskBoardParseDraft, TaskBoardParseRequest, TaskBoardSnapshot } from '../protocol.ts';
+import type { TaskBoardAction, TaskBoardEventPayload, TaskBoardParseDraft, TaskBoardParseRequest, TaskBoardReviewRequest, TaskBoardReviewResponse, TaskBoardSnapshot } from '../protocol.ts';
 export interface TaskBoardTransport {
     bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>;
     state(): Promise<TaskBoardSnapshot>;
@@ -29,6 +29,13 @@ export interface TaskBoardTransport {
      * that cannot parse simply omits it, and the form hides the section.
      */
     parseDraft?(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>;
+    /**
+     * One review read (open the worktree, snapshot the logs, diff the reviewed
+     * commit). Optional like {@link TaskBoardTransport.parseDraft}: a Host that
+     * predates the review block omits it, and the panel then only shows what it
+     * can derive from the snapshot itself.
+     */
+    reviewOp?(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>;
 }
 /** The sessions face the controller needs for navigation awareness. */
 export interface SessionsControllerFace {
@@ -113,8 +120,12 @@ export interface ControllerSnapshot {
     formDrafts?: readonly string[];
     /** Whether the board may offer "register a new project" (issue #1536). */
     canCreateWorkspace?: boolean;
-    /** Whether this deployment can parse pasted text into task fields (issue #1540). */
+    /**
+     * Whether this deployment can parse pasted text into task fields (issue #1540).
+     */
     canParseTask?: boolean;
+    /** Whether this deployment serves the review reads (worktree, logs, diff). */
+    canReviewRead?: boolean;
     transportError?: string;
     /**
      * A session jump that failed because the runtime does not know the id even
@@ -122,7 +133,7 @@ export interface ControllerSnapshot {
      * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
      */
     sessionOpenError?: string;
-    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer'>;
+    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans'>;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
@@ -309,6 +320,37 @@ export declare class BoardController {
     approveSpec(id: string): Promise<boolean>;
     /** Re-run a settled task through the Host (the Host replans and executes). */
     rerunTask(id: string): Promise<void>;
+    /**
+     * Start the card's version for the manual review. Only a card standing in the
+     * review column may ask: the Host refuses anything else, and the board hides
+     * the controls everywhere else anyway.
+     * @returns whether the Host accepted the action.
+     */
+    reviewStart(id: string): Promise<boolean>;
+    /** Stop the card's review version again (compose project or configured command). */
+    reviewStop(id: string): Promise<boolean>;
+    /**
+     * Restart the card's review version: the Host stops a running environment
+     * first and starts it again, so a rebuilt image or a changed config takes
+     * effect without two clicks.
+     */
+    reviewRestart(id: string): Promise<boolean>;
+    private reviewAction;
+    /**
+     * Open the card's version in the configured editor (or the `*.code-workspace`
+     * it carries). The Host launches the editor on its own machine, so this is a
+     * read-only Host call rather than an action: nothing about the ledger changes.
+     */
+    openWorktree(id: string): Promise<TaskBoardReviewResponse>;
+    /** Snapshot of the card's container/application logs, for the detail modal. */
+    loadReviewLogs(id: string): Promise<TaskBoardReviewResponse>;
+    /** `git diff --stat` of the reviewed commit against the card's base branch. */
+    loadReviewDiff(id: string): Promise<TaskBoardReviewResponse>;
+    /**
+     * One review read against the Host. A deployment without that route answers
+     * with its reason instead of throwing, so the panel can show what happened.
+     */
+    private reviewRead;
     /**
      * Pause the in-progress runs of `ids` in one Host action: each card keeps its
      * column and its execution record, the Host stops the run's session. The

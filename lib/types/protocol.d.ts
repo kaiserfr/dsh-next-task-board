@@ -52,6 +52,13 @@ export interface TaskBoardSnapshot {
      * poll, so it is no ledger state; absent on an older Host.
      */
     awaitingAnswer?: Record<string, string>;
+    /**
+     * Task id → what the review step offers the card (see
+     * {@link TaskBoardReviewPlan}). Only cards in the review column appear, and
+     * the map is derived on every read (directories, compose files, settings), so
+     * it is never ledger state; absent on an older Host.
+     */
+    reviewPlans?: Record<string, TaskBoardReviewPlan>;
 }
 /** SSE event frame: revision/scheduler/power only, never the task list. */
 export interface TaskBoardEventPayload {
@@ -66,6 +73,13 @@ export interface TaskBoardEventPayload {
      * derived: it never bumps the revision the frame is gated on.
      */
     awaitingAnswer?: Record<string, string>;
+    /**
+     * What the review step offers, carried on the frame for the same reason as
+     * `awaitingAnswer`: the plan is derived from the filesystem and the settings,
+     * so editing `reviewEnvironments` must reach an open board without a ledger
+     * revision change.
+     */
+    reviewPlans?: Record<string, TaskBoardReviewPlan>;
 }
 /**
  * Request body of `POST {TASK_BOARD_API_PREFIX}/parse` (issue #1540): the text
@@ -140,7 +154,65 @@ export type TaskBoardAction = {
 } | {
     kind: 'approve-spec';
     taskId: string;
+} | {
+    kind: 'review-start';
+    taskId: string;
+} | {
+    kind: 'review-stop';
+    taskId: string;
+} | {
+    kind: 'review-restart';
+    taskId: string;
 };
+/**
+ * What the review step offers one card, derived by the Host from the filesystem
+ * and the settings on every snapshot (never ledger state). Only cards in the
+ * review column receive one, so the browser can render the whole block —
+ * worktree link, app links, container controls — from this plus the card's own
+ * `review` record.
+ */
+export interface TaskBoardReviewPlan {
+    /** Directory the card's version runs in: its worktree, else its main checkout. */
+    dir?: string;
+    /** Whether `dir` is the card's own worktree (false = the main checkout). */
+    worktree?: boolean;
+    /** `*.code-workspace` the editor should open instead of the directory. */
+    workspaceFile?: string;
+    /** Whether there is something to start (a compose file or configured commands). */
+    available: boolean;
+    /**
+     * Whether the Host can read logs for this card (a compose file, or a
+     * configured `logs` command). Without it the panel shows no logs control
+     * instead of one that always fails.
+     */
+    logs?: boolean;
+    /**
+     * Action the Host is carrying out for this card right now. In-flight work is
+     * deliberately not ledger state (a Host restart must not leave a card
+     * claiming a start it never finished), so it rides this derived plan.
+     */
+    pending?: 'start' | 'stop' | 'restart';
+}
+/** Read-only review operations the browser asks for (never ledger writes). */
+export type TaskBoardReviewRequest = {
+    kind: 'open';
+    taskId: string;
+} | {
+    kind: 'logs';
+    taskId: string;
+} | {
+    kind: 'diff';
+    taskId: string;
+};
+/** Answer of one review operation; `text` carries logs or a diff stat. */
+export interface TaskBoardReviewResponse {
+    ok: boolean;
+    /** What the answer carries: the opened path, a log/diff snapshot, or an error. */
+    text?: string;
+    error?: string;
+}
+/** Strict parse of one review request body; undefined rejects the request. */
+export declare function parseTaskBoardReviewRequest(value: unknown): TaskBoardReviewRequest | undefined;
 export interface TaskBoardActionEnvelope {
     requestId: string;
     action: TaskBoardAction;

@@ -21,6 +21,7 @@ import { CLARIFICATION_ADDENDUM, COMPLETION_INSTRUCTION, COMPLETION_MARKER } fro
 import { parseTaskDraft, TaskParseError } from './host-ai.ts'
 import { TASK_PERMISSIONS, DEFAULT_MAX_DONE_TASKS, type TaskPermission } from './core/tasks.ts'
 import { DEFAULT_COMPOSE_FILE } from './compose-workflow.ts'
+import { DEFAULT_EDITOR_COMMAND } from './review-workflow.ts'
 import type { StateMachineConfig } from './core/state-machine.ts'
 import { DEFAULT_SESSION_PERMISSION } from './core/handover.ts'
 import { makeTaskBoardRoutes } from './host-routes.ts'
@@ -104,6 +105,28 @@ export interface Config {
    * with the stack the human runs themselves. Example: `PORT={port}`.
    */
   composeEnv?: Volatile<string>
+  /**
+   * Review setups per workspace, as a JSON array. A card in `ready for test`
+   * shows the controls of the entry whose `path` is the card's directory or a
+   * parent of it (longest match wins):
+   *
+   * ```json
+   * [{ "path": "/home/me/proj", "env": "PORT={port}",
+   *    "start": "./start.sh", "stop": "./start.sh --stop",
+   *    "logs": "tail -n 200 data/server.log",
+   *    "url": "http://127.0.0.1:{port}", "dockerContext": "default" }]
+   * ```
+   *
+   * `{port}`, `{port2}` … become free host ports assigned to the card and kept
+   * for it, `{task}` is its id. The commands run in the card's directory (its
+   * worktree, else its main checkout) with the configured `env` and
+   * `DOCKER_CONTEXT`; a compose file in that directory wins over the configured
+   * commands. Leaving the review column stops the version again through the
+   * configured `stop` — but only one the board itself started.
+   */
+  reviewEnvironments?: Volatile<string>
+  /** Editor binary the worktree link launches (default `code`, opened with `-n`). */
+  editorCommand?: Volatile<string>
   /** Canonical reverse-proxy Host authorities admitted with a server-side token. */
   trustedProxyHosts?: string[]
   /** Environment variable whose value the authenticated proxy injects upstream. */
@@ -127,6 +150,10 @@ export const Config = z.object({
   maxDoneTasks: z.number().min(1).step(1).default(DEFAULT_MAX_DONE_TASKS).volatile(),
   composeFile: z.string().default(DEFAULT_COMPOSE_FILE).volatile(),
   composeEnv: z.string().default('').volatile(),
+  // Loose like `stateMachine`: one JSON document the settings card edits as text
+  // and `parseReviewEnvironments` validates entry by entry (with reasons).
+  reviewEnvironments: z.string().default('').volatile(),
+  editorCommand: z.string().default(DEFAULT_EDITOR_COMMAND).volatile(),
   trustedProxyHosts: z.array(z.string()).default([]),
   proxyTokenEnv: z.string().min(1).default(DEFAULT_PROXY_TOKEN_ENV),
   sessionDefaultPermission: z.union(TASK_PERMISSIONS).default(DEFAULT_SESSION_PERMISSION),
@@ -267,6 +294,10 @@ function applyImpl(ctx: Context, config?: Config): void {
     host.setMaxDoneTasks(readConfigField(live.maxDoneTasks, DEFAULT_MAX_DONE_TASKS))
     host.setComposeFile(readConfigField(live.composeFile, DEFAULT_COMPOSE_FILE))
     host.setComposeEnv(readConfigField(live.composeEnv, ''))
+    // An invalid document keeps the entries that parsed; the card surfaces the
+    // refusals as the field's error text, like the state machine does.
+    host.setReviewEnvironments(readConfigField(live.reviewEnvironments, ''))
+    host.setEditorCommand(readConfigField(live.editorCommand, DEFAULT_EDITOR_COMMAND))
     // An invalid machine keeps the one in force; the ledger reports the
     // refusals, which the settings card surfaces as the field's error text.
     host.setStateMachine(readConfigField(live.stateMachine, undefined))

@@ -1,4 +1,4 @@
-import type { TaskCompose } from './core/tasks.ts';
+import type { TaskCompose, TaskReview } from './core/tasks.ts';
 import { type ExecutionRecord, type TaskRecord } from './core/tasks.ts';
 import { type StateMachine } from './core/state-machine.ts';
 import { type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts';
@@ -39,6 +39,20 @@ export interface PausedRun {
 export interface ResumedRun {
     task: TaskRecord;
     execution: ExecutionRecord;
+}
+/**
+ * A review action the Host service has to carry out: the ledger validates it
+ * (the card exists, is not archived and stands in the review column) and hands
+ * the intent back instead of doing the work itself. Starting or stopping a
+ * version can take minutes — compose builds images, a start script runs — so the
+ * service runs it off the ledger write and writes the outcome back with
+ * {@link HostTaskLedger.noteReview}; nothing about the in-flight action is
+ * persisted, which is exactly why a Host restart cannot leave a card claiming a
+ * start it never finished.
+ */
+export interface ReviewIntent {
+    taskId: string;
+    intent: 'start' | 'stop' | 'restart';
 }
 /** Minimal value copy used by the Host session monitor. */
 export interface OpenExecutionReference {
@@ -128,6 +142,19 @@ export declare class HostTaskLedger {
         scheduler: TaskBoardSchedulerSnapshot;
     };
     state(): LedgerState;
+    /**
+     * One card as a live ledger reference (no clone), for Host-side bookkeeping
+     * that must not pay for a whole-ledger copy — a review action resolving its
+     * card, or a cleanup notice after the card is gone.
+     */
+    task(taskId: string): TaskRecord | undefined;
+    /**
+     * Cheap projection for the review plan map: the cards standing in the review
+     * column. The derived plans are recomputed on every ledger change, so this
+     * path must not clone the ledger ({@link HostTaskLedger.state}); the planner
+     * only reads each card and the filesystem behind it.
+     */
+    reviewCandidates(): readonly TaskRecord[];
     /**
      * The state machine currently in force, i.e. what the Host validates moves
      * against and what the browser renders its columns and drop targets from.
@@ -246,6 +273,7 @@ export declare class HostTaskLedger {
         clarification?: OpenedRun;
         paused?: PausedRun[];
         resumed?: ResumedRun[];
+        review?: ReviewIntent[];
     };
     openScheduled(taskId: string, nextRunAt: number | undefined, triggeredAt: number): OpenedRun | undefined;
     skipMissed(now: number): void;
@@ -258,6 +286,14 @@ export declare class HostTaskLedger {
      * the state — project, ports, failure — visible on the card.
      */
     noteCompose(taskId: string, compose: TaskCompose | undefined): void;
+    /**
+     * Record the card's review environment (or clear it with `undefined`). Like
+     * {@link HostTaskLedger.noteCompose} this is a Host-side write, not a browser
+     * action: the service owns the lifecycle, and the record only makes the state
+     * — how it runs, where, which URLs answer, what failed — visible on the card.
+     * A card that left the review column in the meantime keeps no record.
+     */
+    noteReview(taskId: string, review: TaskReview | undefined): void;
     settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void;
     private apply;
     private repairSchedules;

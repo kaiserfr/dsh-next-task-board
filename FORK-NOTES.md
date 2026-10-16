@@ -44,6 +44,8 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 24 | **Mehr können** | **Git-Worktree pro Karte**: `git.openBranch` legt neben dem Feature-Branch einen eigenen Checkout unter `$DSH_HOME/task-board/worktrees/<Karten-Id>` an (`TaskGit.worktreePath`), und die Ausführungssitzung wird mit diesem Verzeichnis als `cwd` erstellt — die Hauptcheckout des Menschen bleibt auf ihrem Branch und unangetastet, zwei Karten eines Workspace teilen sich kein Verzeichnis mehr. `useBranch` ist dort ein No-op, Commit und Review-Gate arbeiten im Worktree, nur der Merge läuft in der Hauptcheckout und entfernt danach den Wegwerf-Worktree. Wo `git worktree` verweigert, fällt das Board auf die alte gemeinsame Checkout zurück |
 | 25 | **Mehr können** | **Eigene Container pro Karte (Docker Compose)**: liegt im Worktree der Karte eine Compose-Datei (Einstellung `composeFile`, Default `docker-compose.yml`, leer = aus), bringt der Host vor jedem Implementierungslauf eine **eigene Stack-Instanz** hoch — Projektname `dsh-tb-<Karten-Id>`, alles im Worktree der Karte, Ports werden aus `docker compose ps` zurückgelesen und auf der Karte angezeigt. Die Umgebung lebt, solange die Karte läuft oder im Review steht, und wird beim Verlassen dieser Spalten, beim Löschen und beim Archivieren mit `docker compose down -v` gestoppt; ein fehlgeschlagener Start lässt den Lauf scheitern und zeigt dockers Ausgabe auf der Karte |
 
+| 26 | **Mehr können** | **Prüf-Block auf „Ready for test"-Karten**: die Karte nennt ihr eigenes Verzeichnis (Worktree, sonst gekennzeichnet das Haupt-Checkout) und öffnet es per Klick in VS Code (`code -n`, bevorzugt die `.code-workspace`), zeigt die URLs der laufenden Version (Template `url` + karten-eigene Ports, plus je veröffentlichter Compose-Port) und bietet Start/Stop/Restart/Logs für **genau diese Karte** — Compose-Projekt `dsh-tb-<Id>` wenn vorhanden, sonst die pro Workspace konfigurierten Befehle (`reviewEnvironments`). Kein Auto-Start; beim Verlassen der Spalte wird nur gestoppt, was das Board selbst gestartet hat. Andere Spalten zeigen nichts. |
+
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
 
@@ -866,6 +868,59 @@ Die englische Fassung dieser Übersicht steht im README unter
       argv und Arbeitsverzeichnis über einen docker-Stub, Port-Parsing, Fehler,
       Teardown) und `tests/compose-lifecycle.spec.ts` (Hochfahren vor dem Lauf,
       Erhalt im Review, Abbau bei Rückgabe/Löschen, fehlgeschlagener Start).
+
+26. **Prüf-Block „Manuelle Prüfung" (Review-Umgebung)** — eine Karte in
+    „待测试" (ready_for_test) zeigt in der Detailansicht alles, was die
+    manuelle Nachprüfung vor dem Merge braucht; alle anderen Spalten und
+    archivierte Karten zeigen **nichts**:
+
+    - **Worktree-Link:** die Karte nennt ihr eigenes Verzeichnis (`worktreePath`,
+      sonst sichtbar gekennzeichnet das Haupt-Checkout, ohne Git das
+      registrierte Workspace-Verzeichnis) und öffnet es per Klick in VS Code:
+      `code -n <Verzeichnis>`, bevorzugt die dort liegende
+      `*.code-workspace` (deren relatives `"."` zeigt dann auf den Worktree).
+      Der Aufruf läuft auf dem Host-Rechner und ist **enger gefenced** als der
+      Rest der API: `POST /api/task-board/review` mit `kind: "open"` wird über
+      einen authentifizierten Proxy oder aus dem LAN mit 403 abgelehnt — nur
+      eine Loopback-Anfrage darf ein Programm starten.
+    - **Link zur laufenden Anwendung:** die Karte zeigt die URLs der laufenden
+      Version — aus dem URL-Template des Workspace (`url`, Default
+      `http://127.0.0.1:{port}`) mit den **dieser Karte** zugeteilten Ports,
+      plus je veröffentlichtem Compose-Port ein Link. Ports werden an der Karte
+      gemerkt, ein Neustart kommt also auf derselben URL wieder hoch; eine
+      gestoppte Version zeigt keinen Link.
+    - **Steuerung:** Start / Stop / Restart / Logs — **nichts startet
+      automatisch**, alles adressiert genau diese Karte. Gibt es im
+      Kartenverzeichnis eine Compose-Datei, gewinnt das Compose-Projekt
+      (`dsh-tb-<Karten-Id>`, eigene Ports, eigene Volumes); sonst laufen die pro
+      Workspace konfigurierten Befehle (`reviewEnvironments`, JSON-Array, per
+      **längstem Pfad-Präfix** zugeordnet — eine Karte im eigenen Worktree wird
+      über das zugehörige Repository gefunden, weil der Worktree außerhalb
+      liegt) im Kartenverzeichnis, mit `env` (`{port}`, `{port2}` … `{task}`)
+      und `DOCKER_CONTEXT`. Logs öffnet einen Schnappschuss der letzten 200
+      Zeilen (Compose-Logs oder der konfigurierte `logs`-Befehl) mit
+      Aktualisieren; ein fehlgeschlagener Start hinterlässt die Ausgabe des
+      Befehls auf der Karte.
+    - **Was geprüft wird:** Branch, Basis-Branch, der gebundene Prüf-Commit
+      (`reviewedCommit`, an den das Merge-Gate gebunden ist) und auf Wunsch
+      `git diff --stat` gegen die Basis.
+    - **Aufräumen:** Verlässt die Karte die Prüfspalte, wird archiviert oder
+      gelöscht, wird die Version wieder gestoppt — **aber nur eine, die das
+      Board selbst gestartet hat** (Marker: `startedAt` bzw. die
+      `reviewEnvs`-Abbildung im Dienst, die beim Host-Start aus dem Ledger
+      gesät wird). Ein fehlgeschlagener Stop bleibt auf der Karte sichtbar und
+      wird nicht alle 5 s wiederholt. Laufende Aktionen stehen **nicht** im
+      Ledger: sie sind ein In-Memory-Marker und reisen mit dem abgeleiteten
+      Plan (`reviewPlans`) in Snapshot und SSE-Frame, ein Host-Neustart kann
+      eine Karte also nie fälschlich „startet gerade" nennen.
+    - **Ein Regelwerk für beide Hälften:** `src/core/review-config.ts` parst und
+      validiert das Einstellungsdokument — die Settings-Karte im Browser nutzt
+      dieselbe Funktion wie der Host, ungültige Einträge werden mit Grund
+      gemeldet und verworfen, die übrigen gelten weiter.
+    - Abgedeckt durch `tests/review-config.spec.ts`,
+      `tests/review-workflow.spec.ts`, `tests/host-review.spec.ts`,
+      `tests/host-routes.spec.ts` (Loopback-Fence) und
+      `tests/review-ui.spec.tsx` (nur in der Prüfspalte, Buttons je Karte).
 
 Unverändert übernommen: Ledger-Pfad und -Format (`$DSH_HOME/task-board/ledger-v2.json`,
 Schema v3), die Host-Routen, die Sidebar-/Board-UI und die Row-Id `ui-task-board`

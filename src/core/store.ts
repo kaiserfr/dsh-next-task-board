@@ -10,7 +10,7 @@
  * localStorage backend.
  */
 import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskCompose, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
+import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskCompose, type TaskFreeze, type TaskGit, type TaskRecord, type TaskPermission, type TaskReview, type TaskStatus } from './tasks.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
@@ -68,6 +68,8 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
   if (record.permission !== undefined && typeof record.permission !== 'string') return false
   if (record.reuseSession !== undefined && typeof record.reuseSession !== 'boolean') return false
   if (record.git !== undefined && (typeof record.git !== 'object' || record.git === null)) return false
+  if (record.compose !== undefined && (typeof record.compose !== 'object' || record.compose === null)) return false
+  if (record.review !== undefined && (typeof record.review !== 'object' || record.review === null)) return false
   if (!Array.isArray(record.executions)) return false
   for (const execution of record.executions) {
     if (typeof execution !== 'object' || execution === null) return false
@@ -211,6 +213,51 @@ function normalizeCompose(value: unknown): TaskCompose | undefined {
   }
 }
 
+/**
+ * Repair a persisted review environment. The record exists to be stopped and
+ * displayed, so it needs a mode, a source and a directory; without them there is
+ * nothing to act on and the field drops (the same repair policy the git and
+ * compose records follow). Everything the Host re-reads anyway — pending marker,
+ * timestamps, ports, env, links, error — is sanitized but never required, and an
+ * unknown mode from a future version drops the field instead of guessing at a
+ * teardown.
+ */
+function normalizeReview(value: unknown): TaskReview | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const row = value as Record<string, unknown>
+  const mode = row.mode === 'compose' ? 'compose' as const : row.mode === 'command' ? 'command' as const : undefined
+  const source = typeof row.source === 'string' ? row.source.trim() : ''
+  const dir = typeof row.dir === 'string' ? row.dir.trim() : ''
+  if (mode === undefined || source === '' || dir === '') return undefined
+  const startedAt = typeof row.startedAt === 'number' && Number.isFinite(row.startedAt) ? row.startedAt : undefined
+  const stoppedAt = typeof row.stoppedAt === 'number' && Number.isFinite(row.stoppedAt) ? row.stoppedAt : undefined
+  const context = typeof row.context === 'string' && row.context.trim() !== '' ? row.context.trim() : undefined
+  const error = typeof row.error === 'string' && row.error.trim() !== '' ? row.error : undefined
+  const stringsOf = (input: unknown): string[] | undefined => {
+    if (!Array.isArray(input)) return undefined
+    const values = [...new Set(input.filter((entry): entry is string => typeof entry === 'string' && entry.trim() !== ''))]
+    return values.length === 0 ? undefined : values
+  }
+  const ports = stringsOf(row.ports)
+  const links = stringsOf(row.links)
+  const env = typeof row.env === 'object' && row.env !== null && !Array.isArray(row.env)
+    ? Object.fromEntries(Object.entries(row.env as Record<string, unknown>)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string'))
+    : undefined
+  return {
+    mode,
+    source,
+    dir,
+    ...(context === undefined ? {} : { context }),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(stoppedAt === undefined ? {} : { stoppedAt }),
+    ...(ports === undefined ? {} : { ports }),
+    ...(env === undefined || Object.keys(env).length === 0 ? {} : { env }),
+    ...(links === undefined ? {} : { links }),
+    ...(error === undefined ? {} : { error }),
+  }
+}
+
 /** Parse + validate a persisted ledger document; invalid rows are dropped. */export function parseLedger(raw: string | null): TaskRecord[] {
   if (raw === null) return []
   let parsed: unknown
@@ -255,6 +302,7 @@ function normalizeCompose(value: unknown): TaskCompose | undefined {
     task.handover = normalizeHandover(row.handover)
     task.git = normalizeGit(row.git)
     task.compose = normalizeCompose(row.compose)
+    task.review = normalizeReview(row.review)
     // Tags are repaired field by field like the schedule: a malformed entry is
     // dropped, and a list that repairs to nothing clears the field instead of
     // dropping the task row.

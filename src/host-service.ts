@@ -2,13 +2,14 @@ import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { nextRunAtMs } from './core/schedule.ts'
 import { reusableSessionId } from './core/session-reuse.ts'
 import { taskLane } from './core/tasks.ts'
-import { HostTaskLedger, type OpenedRun, type OpenExecutionReference, type PausedRun, type ResumedRun } from './host-ledger.ts'
-import type { TaskCompose, TaskRecord as ComposeTaskRecord } from './core/tasks.ts'
+import { HostTaskLedger, type OpenedRun, type OpenExecutionReference, type PausedRun, type ResumedRun, type ReviewIntent } from './host-ledger.ts'
+import type { TaskCompose, TaskRecord as ComposeTaskRecord, TaskReview } from './core/tasks.ts'
 import { ComposeWorkflow, composeDir, composeProject, type TaskComposeController } from './compose-workflow.ts'
+import { ReviewWorkflow } from './review-workflow.ts'
 import { HostExecutionRunner, SessionLaunchError, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
 import { GitWorkflow } from './git-workflow.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
-import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardSnapshot } from './protocol.ts'
+import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardReviewPlan, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts'
 import type { TaskPermission } from './core/handover.ts'
 
 const SESSION_POLL_MS = 5_000
@@ -30,6 +31,8 @@ export class TaskBoardHostService {
   readonly git: GitWorkflow
   /** Task-scoped Docker Compose environments: up before a run, down afterwards. */
   readonly compose: TaskComposeController
+  /** Review environments: the card's version, started and stopped from the review column. */
+  readonly review: ReviewWorkflow
   private readonly listeners = new Set<() => void>()
   private timers: Array<ReturnType<typeof setInterval>> = []
   private lastScheduleTick: number | undefined
@@ -90,6 +93,19 @@ export class TaskBoardHostService {
    */
   private readonly composeProjects = new Map<string, { project: string; dir: string }>()
   private composeBusy = false
+  /**
+   * Review environments the board started (card id → its record), plus the
+   * action currently in flight per card. The map is what survives a card's
+   * deletion — the record is gone, the environment it started is not — and it is
+   * the only marker of "the board started this one", which is exactly what the
+   * automatic cleanup is allowed to stop. The in-flight marker is deliberately
+   * in memory: a Host restart must not leave a card claiming a start it never
+   * finished, and the buttons are then simply enabled again.
+   */
+  private readonly reviewEnvs = new Map<string, TaskReview>()
+  private readonly reviewBusy = new Map<string, 'start' | 'stop' | 'restart'>()
+  /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
+  private reviewPlans: Record<string, TaskBoardReviewPlan> = {}
   private readonly now: () => number
 
   constructor(gateway: TypertGateway, options: {
@@ -104,11 +120,14 @@ export class TaskBoardHostService {
     compose?: TaskComposeController
     /** Compose file inside the card's worktree (settings `composeFile`). */
     composeFile?: string
+    /** Review environments of the cards; omit for the default workflow. */
+    review?: ReviewWorkflow
     /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
     stateMachine?: unknown
   } = {}) {
     this.git = options.git ?? new GitWorkflow(options.workspaceRegistry)
     this.compose = options.compose ?? new ComposeWorkflow({ ...(options.composeFile === undefined ? {} : { file: options.composeFile }) })
+    this.review = options.review ?? new ReviewWorkflow({ compose: this.compose, ...(options.workspaceRegistry === undefined ? {} : { workspaceRegistry: options.workspaceRegistry }) })
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git, stateMachine: options.stateMachine })
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry)
     this.power = options.power ?? new PowerInhibitor()
@@ -116,9 +135,11 @@ export class TaskBoardHostService {
     // Environments survive a Host restart (the review keeps its stack); the
     // ledger is the record of what is running, so seed the project map from it.
     this.seedComposeProjects()
+    this.seedReviewEnvironments()
     installStreamErrorGuards()
     this.ledger.subscribe(() => {
       this.syncPowerReasons()
+      this.refreshReviewPlans()
       this.emit()
       // A settle frees its lane's WIP slot, so the next queued run starts here.
       this.pumpLaunchQueue()
@@ -205,6 +226,59 @@ export class TaskBoardHostService {
     if ('setEnv' in this.compose && typeof this.compose.setEnv === 'function') this.compose.setEnv(env)
   }
 
+  /**
+   * Apply the review setups (settings `reviewEnvironments`): one entry per
+   * workspace directory, with the start/stop/restart/logs commands, the optional
+   * URL template, docker context and environment. An invalid document is
+   * reported as a whole — the entries that parse stay in force, so one typo does
+   * not silently disable every other workspace — and the derived plans are
+   * re-published, because a workspace that just gained a start command must show
+   * its buttons without a ledger change.
+   * @param value - raw setting (JSON text or the parsed array).
+   * @returns the reasons of every entry that was refused (empty when all parsed).
+   */
+  setReviewEnvironments(value: unknown): string[] {
+    const errors = this.review.configure(value)
+    this.refreshReviewPlans()
+    this.emit()
+    return errors
+  }
+
+  /** Point the worktree link at another editor binary (settings `editorCommand`). */
+  setEditorCommand(command: string): void {
+    this.review.setEditorCommand(command)
+  }
+
+  /**
+   * Recompute the derived review plans: what the review column offers each card
+   * (directory, worktree or main-checkout fallback, editor target, whether there
+   * is anything to start) plus the action currently in flight. Called on every
+   * ledger change and on every settings change, and never persisted — the plan
+   * is a projection of the filesystem and the settings, not of the ledger.
+   */
+  private refreshReviewPlans(): void {
+    const next: Record<string, TaskBoardReviewPlan> = {}
+    for (const task of this.ledger.reviewCandidates()) {
+      const pending = this.reviewBusy.get(task.id)
+      next[task.id] = { ...this.review.plan(task), ...(pending === undefined ? {} : { pending }) }
+    }
+    this.reviewPlans = next
+  }
+
+  /**
+   * Seed the review bookkeeping from the ledger: a record with a `startedAt`
+   * stamp is a version the board started, so a Host restart re-attaches it
+   * (the very thing the automatic cleanup has to be able to stop later) instead
+   * of forgetting an environment the human can still see on the card.
+   */
+  private seedReviewEnvironments(): void {
+    for (const task of this.ledger.reviewCandidates()) {
+      if (task.review?.startedAt === undefined) continue
+      this.reviewEnvs.set(task.id, task.review)
+    }
+    this.refreshReviewPlans()
+  }
+
   setMaxDoneTasks(limit: number): void {
     this.ledger.setMaxDoneTasks(limit)
   }
@@ -221,11 +295,18 @@ export class TaskBoardHostService {
   }
 
   snapshot(): TaskBoardSnapshot {
-    const state = this.ledger.state()
+    return this.snapshotWith(this.ledger.state())
+  }
+
+  /**
+   * Build the wire snapshot from an already-read ledger state, so a caller that
+   * has one (the action path) never pays for a second whole-ledger clone.
+   */
+  private snapshotWith(state: { revision: number; tasks: readonly ComposeTaskRecord[]; scheduler: TaskBoardSnapshot['scheduler'] }): TaskBoardSnapshot {
     return {
       schemaVersion: TASK_BOARD_SCHEMA_VERSION,
       revision: state.revision,
-      tasks: state.tasks,
+      tasks: [...state.tasks],
       scheduler: state.scheduler,
       power: this.power.snapshot(),
       sessionDefaultPermission: this.ledger.sessionDefaultPermission,
@@ -235,6 +316,7 @@ export class TaskBoardHostService {
       maxConcurrentRuns: this.maxConcurrentRuns,
       maxDoneTasks: this.ledger.maxDoneTasksLimit,
       awaitingAnswer: { ...this.awaitingAnswer },
+      reviewPlans: { ...this.reviewPlans },
     }
   }
 
@@ -250,6 +332,7 @@ export class TaskBoardHostService {
       // Rides the frame like the limits do: the flag is derived, so it never
       // bumps the ledger revision, and the 5 s heartbeat must still deliver it.
       awaitingAnswer: { ...this.awaitingAnswer },
+      reviewPlans: { ...this.reviewPlans },
     }
   }
 
@@ -260,6 +343,12 @@ export class TaskBoardHostService {
 
   apply(requestId: string, action: TaskBoardAction, initiator?: string): TaskBoardSnapshot {
     if (!this.active) throw new Error('task board is disabled')
+    // A review action the Host is already carrying out for this card is refused
+    // here, before the ledger: the in-flight marker lives in the service (it is
+    // not durable state), and a second click must not start a second stack.
+    if (isReviewAction(action) && this.reviewBusy.has(action.taskId)) {
+      throw new Error('a review action is already running for this task')
+    }
     const result = this.ledger.applyRequest(requestId, action, initiator)
     // A clarification run is a run: both go through the launch queue below, but
     // only the implementation run is gated by the lane WIP limit; the
@@ -270,17 +359,114 @@ export class TaskBoardHostService {
     // run); stopping the sessions happens next, off this call.
     for (const paused of result.paused ?? []) this.stopPausedRun(paused)
     for (const resumed of result.resumed ?? []) this.resumePausedRun(resumed)
-    return {
-      schemaVersion: TASK_BOARD_SCHEMA_VERSION,
-      revision: result.state.revision,
-      tasks: result.state.tasks,
-      scheduler: result.state.scheduler,
-      power: this.power.snapshot(),
-      sessionDefaultPermission: this.ledger.sessionDefaultPermission,
-      stateMachine: this.ledger.stateMachine.toJSON(),
-      maxConcurrentRuns: this.maxConcurrentRuns,
-      maxDoneTasks: this.ledger.maxDoneTasksLimit,
-      awaitingAnswer: { ...this.awaitingAnswer },
+    // Review environments take minutes to come up (compose builds images, a
+    // start script boots the app), so they are carried out off this call: the
+    // card shows "starting" from the in-flight plan and the outcome is written
+    // back to the ledger when it is known.
+    for (const intent of result.review ?? []) this.scheduleReview(intent)
+    return this.snapshotWith(result.state)
+  }
+
+  /**
+   * The branch of {@link TaskBoardHostService.apply} that answers a review
+   * action: the ledger already validated it, so this only starts the work and
+   * marks the card as busy.
+   */
+  private scheduleReview(intent: ReviewIntent): void {
+    this.reviewBusy.set(intent.taskId, intent.intent)
+    this.refreshReviewPlans()
+    this.emit()
+    void this.runReviewIntent(intent).catch(error => {
+      safeConsoleError(`[dsh-task-board] review action ${intent.intent} failed for task ${intent.taskId}`, error)
+    })
+  }
+
+  /**
+   * Carry out one review action and write its outcome back to the card. The
+   * record is always written — a failure keeps the environment's identity and
+   * the reason, so the card can explain itself instead of silently doing
+   * nothing. `restart` is a stop (when something runs) followed by a start;
+   * `stop` on a card that never started is a no-op the Host still reports as
+   * stopped.
+   */
+  private async runReviewIntent(intent: ReviewIntent): Promise<void> {
+    // Read the card fresh: the ledger may have moved it out of the review
+    // column (or dropped it) while this action waited.
+    const task = this.ledger.task(intent.taskId)
+    if (task === undefined) {
+      this.reviewEnvs.delete(intent.taskId)
+      return
+    }
+    const current = this.reviewEnvs.get(task.id) ?? task.review
+    try {
+      if (intent.intent === 'stop') {
+        // Nothing the board started: there is no environment to stop, and the
+        // card's (possibly failed) record stays as it is.
+        if (current === undefined) return
+        await this.review.stop(task.id, current)
+        this.reviewEnvs.delete(task.id)
+        this.forgetComposeRecord(task, current)
+        this.ledger.noteReview(task.id, stoppedReview(current, this.now()))
+        return
+      }
+      if (intent.intent === 'restart' && current !== undefined) {
+        await this.review.stop(task.id, current)
+        this.reviewEnvs.delete(task.id)
+        this.forgetComposeRecord(task, current)
+      }
+      const review = await this.review.start(task)
+      this.reviewEnvs.set(task.id, review)
+      this.ledger.noteReview(task.id, review)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const described = current ?? this.review.describe(task)
+      // A failed stop leaves the version possibly running: its record keeps the
+      // running stamp, the reason is added, and the cleanup does not retry it
+      // five seconds later (a broken stop command would only be hammered).
+      const failed: TaskReview | undefined = intent.intent === 'stop'
+        ? (described === undefined ? undefined : { ...described, error: message })
+        : (described === undefined ? undefined : { ...described, startedAt: undefined, error: message })
+      this.reviewEnvs.delete(task.id)
+      if (failed !== undefined) this.ledger.noteReview(task.id, failed)
+      // Re-thrown so the scheduler's catch logs it once; the card already says
+      // what went wrong.
+      throw error
+    } finally {
+      this.reviewBusy.delete(intent.taskId)
+      this.refreshReviewPlans()
+      this.emit()
+    }
+  }
+
+  /**
+   * Drop the run environment's record when it names the very project the review
+   * just took down: the stack is gone, and the card must not keep showing "up
+   * since …" for it.
+   */
+  private forgetComposeRecord(task: ComposeTaskRecord, review: TaskReview): void {
+    if (review.mode !== 'compose' || task.compose === undefined) return
+    if (task.compose.project === review.source) this.ledger.noteCompose(task.id, undefined)
+  }
+
+  /**
+   * Read-only review work the browser asks for (open the worktree, read logs,
+   * diff the reviewed commit). Every one of them is scoped to the named card —
+   * its own directory, its own project — and every one answers with text or a
+   * reason, so the panel never renders a raw exception.
+   */
+  async reviewOperation(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse> {
+    const task = this.ledger.state().tasks.find(item => item.id === request.taskId)
+    if (task === undefined) return { ok: false, error: 'task not found' }
+    try {
+      if (request.kind === 'open') {
+        const target = await this.review.openInEditor(task)
+        return { ok: true, text: target }
+      }
+      if (request.kind === 'diff') return { ok: true, text: await this.review.reviewDiff(task) }
+      if (task.review === undefined) return { ok: false, error: 'this card has no review environment yet; start it first' }
+      return { ok: true, text: await this.review.logs(task.id, task.review) }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
 
@@ -507,12 +693,54 @@ export class TaskBoardHostService {
     }
   }
 
+  /**
+   * Tear down the review environments whose card left the review column, was
+   * archived or disappeared from the ledger — but only what the board itself
+   * started: a version the human brought up by hand is not the board's to kill,
+   * which is why the record's `startedAt` (and this map) is the marker. The card
+   * keeps its record, marked stopped, so a re-parked card starts its next review
+   * on the very port the human already knows.
+   *
+   * A stop that fails stays visible on the card instead of being retried every
+   * five seconds: the environment may still be running, and hammering a broken
+   * stop command would not help.
+   */
+  private reconcileReview(): void {
+    if (this.disposed || this.reviewEnvs.size === 0) return
+    const wanted = new Set<string>()
+    for (const task of this.ledger.reviewCandidates()) {
+      if (this.reviewEnvs.has(task.id)) wanted.add(task.id)
+    }
+    for (const [taskId, review] of [...this.reviewEnvs]) {
+      // A card that is still in the review column keeps its version; one whose
+      // action is in flight is left alone until that action settles.
+      if (wanted.has(taskId) || this.reviewBusy.has(taskId)) continue
+      this.reviewEnvs.delete(taskId)
+      void this.review.stop(taskId, review).then(() => {
+        const task = this.ledger.task(taskId)
+        if (task === undefined) return
+        this.ledger.noteReview(taskId, stoppedReview(review, this.now()))
+        // The compose project the review used is the same one a run brings up;
+        // its record must not keep claiming a stack that is down again.
+        if (task.compose !== undefined && review.mode === 'compose' && task.compose.project === review.source) {
+          this.ledger.noteCompose(taskId, undefined)
+        }
+      }).catch(error => {
+        const message = error instanceof Error ? error.message : String(error)
+        safeConsoleError(`[dsh-task-board] could not stop the review environment of task ${taskId}`, error)
+        if (this.ledger.task(taskId) !== undefined) this.ledger.noteReview(taskId, { ...review, error: message })
+      })
+    }
+  }
+
   private async pollSessions(): Promise<void> {
     if (this.disposed) return
     // Environments are reconciled on every poll, whether or not the board is
     // active: a stack whose card left the run/review columns (or is gone) must
-    // not keep running just because the plugin was switched off meanwhile.
+    // not keep running just because the plugin was switched off meanwhile. The
+    // review environments the board started are held to the same rule.
     this.reconcileCompose()
+    this.reconcileReview()
     if (!this.active && this.ledger.runtimeView().openExecutions.length === 0) return
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
@@ -549,6 +777,7 @@ export class TaskBoardHostService {
     // A settle may have parked the card (the stack stays) — and a card that left
     // the review columns is torn down on the next poll.
     this.reconcileCompose()
+    this.reconcileReview()
   }
 
   /**
@@ -827,4 +1056,19 @@ export function safeConsoleError(message: string, ...args: unknown[]): void {
   } catch {
     // Best-effort stderr write; ignore write errors when stderr stream fails
   }
+}
+
+/** Whether an action is one of the review controls (the service's own bookkeeping). */
+function isReviewAction(action: TaskBoardAction): action is Extract<TaskBoardAction, { kind: 'review-start' | 'review-stop' | 'review-restart' }> {
+  return action.kind === 'review-start' || action.kind === 'review-stop' || action.kind === 'review-restart'
+}
+
+/**
+ * The record a stopped environment keeps: its identity and the ports it was
+ * started with (so the next start re-creates it on the URL the human already
+ * has open), without pretending to be up. The links stay on the record for the
+ * same reason — the card renders them while the environment runs.
+ */
+function stoppedReview(review: TaskReview, at: number): TaskReview {
+  return { ...review, startedAt: undefined, stoppedAt: at, error: undefined }
 }

@@ -1,5 +1,5 @@
 import type { TaskRecord } from '../core/tasks.ts';
-import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardParseDraft, type TaskBoardParseRequest, type TaskBoardSnapshot } from '../protocol.ts';
+import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardParseDraft, type TaskBoardParseRequest, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from '../protocol.ts';
 /**
  * Failure classes of the Host API, in the language the panel renders
  * (issue #1528). The Host is the only part that knows whether a task-board
@@ -21,6 +21,8 @@ export interface TaskBoardHostTransport {
     subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void;
     /** One-shot model parse of pasted text (issue #1540). */
     parseDraft(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>;
+    /** One review read: open the worktree, snapshot logs, diff the reviewed commit. */
+    reviewOp(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>;
 }
 export declare class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     private readonly storage;
@@ -36,5 +38,13 @@ export declare class HttpTaskBoardHostTransport implements TaskBoardHostTranspor
      * the form, so the UI never renders a raw status code (issue #1540).
      */
     parseDraft(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>;
+    /**
+     * One review read. The Host answers every one of them with `{ ok, text?,
+     * error? }` — including its own refusals — so a failed read stays a sentence
+     * in the panel instead of a transport error. Only a Host that never mounted
+     * the route (404) and an authentication refusal are reported as such, because
+     * those are not about the card.
+     */
+    reviewOp(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>;
     subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void;
 }

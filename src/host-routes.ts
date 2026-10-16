@@ -7,6 +7,7 @@ import { isLoopbackAddress, isLoopbackRequest } from './loopback.ts'
 import { TaskParseError, TASK_PARSE_MAX_INPUT } from './host-ai.ts'
 import {
   parseActionEnvelope,
+  parseTaskBoardReviewRequest,
   parseTaskParseRequest,
   TASK_BOARD_API_PREFIX,
   type TaskBoardParseDraft,
@@ -253,5 +254,43 @@ export function makeTaskBoardRoutes(
       }
     },
   }
-  return [state, action, events, parse]
+  /**
+   * Review reads: open a card's worktree in the editor, snapshot its logs, or
+   * diff the commit under review. All three are read-only and card-scoped, and
+   * all three answer `{ ok, text?, error? }` — a failure is a message for the
+   * panel, not a transport error.
+   *
+   * The editor launch is the one operation that runs a program on the machine
+   * the Host runs on, so it is fenced tighter than the rest: only a request from
+   * the loopback interface (the machine itself, where the window would appear)
+   * may trigger it, never an authenticated proxy or LAN caller.
+   */
+  const review: WebRoute = {
+    kind: 'exact',
+    path: `${TASK_BOARD_API_PREFIX}/review`,
+    handler: async (req, res): Promise<void> => {
+      if (req.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' }, { 'cache-control': 'no-store' })
+      if (!guard(req, res)) return
+      if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+        return writeJson(res, 415, { ok: false, error: 'json-required' }, { 'cache-control': 'no-store' })
+      }
+      let body: { raw: string; value: unknown }
+      try {
+        body = await readBody(req)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return writeJson(res, message === 'body-too-large' ? 413 : 400, { ok: false, error: message }, { 'cache-control': 'no-store' })
+      }
+      const request = parseTaskBoardReviewRequest(body.value)
+      if (request === undefined) return writeJson(res, 400, { ok: false, error: 'invalid-review-request' }, { 'cache-control': 'no-store' })
+      if (Buffer.byteLength(body.raw) > ACTION_LIMIT) {
+        return writeJson(res, 413, { ok: false, error: 'body-too-large' }, { 'cache-control': 'no-store' })
+      }
+      if (request.kind === 'open' && !isLoopbackRequest(req)) {
+        return writeJson(res, 403, { ok: false, error: 'forbidden' }, { 'cache-control': 'no-store' })
+      }
+      writeJson(res, 200, await service.reviewOperation(request), { 'cache-control': 'no-store' })
+    },
+  }
+  return [state, action, events, parse, review]
 }

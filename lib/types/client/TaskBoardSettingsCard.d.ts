@@ -24,6 +24,14 @@ export interface TaskBoardSettings {
     composeFile?: string;
     /** Environment of a card's stack, `KEY=VALUE` pairs with `{port}`/`{task}` (e.g. `PORT={port}`). */
     composeEnv?: string;
+    /**
+     * Review setups per workspace (JSON): the commands that start, stop, restart
+     * and log the card's version, its URL template, docker context and env. A
+     * compose file in the card's directory wins over these commands.
+     */
+    reviewEnvironments?: string;
+    /** Editor binary the worktree link launches (default `code`). */
+    editorCommand?: string;
     /** The board's state machine: columns, allowed transitions, transition actions. */
     stateMachine?: StateMachineConfig;
 }
@@ -45,6 +53,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
     composeEnv: CardFieldState;
     /** State-machine JSON draft. */
     stateMachine: CardFieldState;
+    /** Review-environment JSON draft. */
+    reviewEnvironments: CardFieldState;
+    /** Editor binary draft for the worktree link. */
+    editorCommand: CardFieldState;
 }
 /** The registration-side face the card's slot entry injects. */
 export interface TaskBoardSettingsCardFace extends CardActions {
