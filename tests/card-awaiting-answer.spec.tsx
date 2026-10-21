@@ -31,7 +31,7 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     title: 'Task A',
     description: '',
     prompt: 'do it',
-    status: 'todo',
+    status: 'clarification',
     createdAt: 0,
     updatedAt: 0,
     executions: [],

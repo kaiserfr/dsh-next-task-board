@@ -91,8 +91,8 @@ export declare class GitWorkflow {
      * — so no run's work is ever left uncommitted in the worktree, no matter
      * whether the run succeeded, failed or was cancelled.
      *
-     * A card that never had a branch (it skipped `todo`, or a cron/button start)
-     * gets one cut first, so the commit has a branch to land on. An already-clean
+     * A card that never had a branch (it skipped `clarification`, or a cron/button
+     * start) gets one cut first, so the commit has a branch to land on. An already-clean
      * worktree is left alone: no empty commit, and `committedAt` keeps the last
      * instant something was actually committed.
      *
@@ -198,9 +198,9 @@ export declare class GitWorkflow {
     private removeWorktree;
     /**
      * Branch a new feature branch starts from: HEAD while it is a normal branch,
-     * otherwise the repository's main branch (a second card pulled into `todo`
-     * while the first is still under review must not nest on the first card's
-     * branch).
+     * otherwise the repository's main branch (a second card pulled into
+     * `clarification` while the first is still under review must not nest on the
+     * first card's branch).
      */
     private baseBranch;
     private branchExists;

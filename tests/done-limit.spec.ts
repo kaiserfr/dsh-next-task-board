@@ -130,7 +130,7 @@ describe('withStatus done stamp', () => {
     expect(done.doneAt).toBe(20)
     const again = withStatus(done, 'done', 30)
     expect(again.doneAt).toBe(20)
-    const reopened = withStatus(again, 'todo', 40)
+    const reopened = withStatus(again, 'clarification', 40)
     expect(reopened.doneAt).toBeUndefined()
   })
 })
@@ -208,13 +208,12 @@ describe('HostTaskLedger done-column limit', () => {
     const { ledger, create, move } = harness(1)
     create('done-card'); create('todo-card')
     move('done-card', 'done')
-    // The card reaches `todo` through the clarification column: `backlog → todo`
-    // is not a transition any more.
+    // The card reaches the waiting column through the clarification step:
+    // `backlog → clarification` is the only way in.
     move('todo-card', 'clarification')
-    move('todo-card', 'todo')
     const tasks = ledger.state().tasks
     expect(byId(tasks, 'done-card').archivedAt).toBeUndefined()
-    expect(byId(tasks, 'todo-card').status).toBe('todo')
+    expect(byId(tasks, 'todo-card').status).toBe('clarification')
     expect(byId(tasks, 'todo-card').archivedAt).toBeUndefined()
   })
 })

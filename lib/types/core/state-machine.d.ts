@@ -22,7 +22,7 @@
  * normalizer reports why and the caller keeps the default.
  */
 /** Task lifecycle status. The closed union is stable; the machine says which are columns. */
-export type TaskStatus = 'backlog' | 'clarification' | 'todo' | 'running' | 'ready_for_test' | 'done' | 'failed';
+export type TaskStatus = 'backlog' | 'clarification' | 'running' | 'ready_for_test' | 'done' | 'failed';
 /** Every status the ledger knows, independent of any machine configuration. */
 export declare const ALL_STATUSES: readonly TaskStatus[];
 /** Brand an unknown string as a status; undefined when it is not one. */
@@ -101,10 +101,9 @@ export declare const STAMP_FIELDS: readonly ["doneAt"];
  *   link, but WIP-free, so it starts at once) whose prompt asks the open
  *   questions first and stops. The card stays in `clarification`, reads as
  *   Running on the board and settles without moving (`clarify`). The human
- *   answers in the card's chat, and the card is pulled on to `todo` when the
- *   questions are settled — a drag the machine validates like any other move.
- *   `todo → clarification` re-opens that same conversation, so a card whose
- *   questions resurface never mints a second chat.
+ *   answers in the card's chat and pulls the card on to the run column when the
+ *   questions are settled — that drag is the go-ahead, and `clarification` is
+ *   the only pre-implementation column: there is no separate "To do".
  * - `running` is the runner's own state: it is entered by a run and left by
  *   that run settling (success → `ready_for_test`, failure → `failed`),
  *   never by a drag
@@ -118,10 +117,12 @@ export declare const STAMP_FIELDS: readonly ["doneAt"];
  * - `ready_for_test → running` and `failed → running` pull the card onto the
  *   run column from there: the run continues the card's conversation, so a
  *   correction the human typed into that chat is already in context
+ * - a card sent back for rework leaves `ready_for_test`/`failed` for
+ *   `clarification` again (the waiting column the human pulls it on from) —
+ *   the correction lives in the card's chat, and the return never starts a run
  * - every manual → manual move is allowed, as before — except a drag straight
- *   from `backlog` to `running` and from `clarification` to `running`, which
- *   have no transition at all: the card has to pass the clarification step and
- *   `todo` first
+ *   from `backlog` to `running`, which has no transition at all: the card has
+ *   to pass the clarification step first
  * - the `run` transition is the go-ahead: starting the work closes the card's
  *   open clarification round and continues the very session the questions were
  *   asked and answered in.

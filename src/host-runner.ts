@@ -273,7 +273,7 @@ function mergePrompt(task: TaskRecord): string {
  * go-ahead, so the answers stay in context (there is no second session).
  *
  * The addendum is the *only* difference to the run column's prompt: dropping a
- * card on `todo` starts the same run, it just asks first. Its wording is load
+ * card on `clarification` starts the same run, it just asks first. Its wording is load
  * bearing — the board's system-prompt rule recognizes a clarification session
  * by these very lines and forbids implementing in it, and that rule is re-sent
  * with every turn, so it also holds after each answer. That rule interpolates
@@ -292,7 +292,7 @@ function clarificationPrompt(task: TaskRecord): string {
 }
 
 /**
- * The clarification addendum: what the `backlog → todo` run tells the agent to
+ * The clarification addendum: what the `backlog → clarification` run tells the agent to
  * do *instead of* working. Exported because the board's system-prompt rule keys
  * off exactly this text (see `TASK_BOARD_GUIDANCE`).
  */

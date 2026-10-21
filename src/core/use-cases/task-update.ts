@@ -47,18 +47,18 @@ export function hasContentPatch(patch: TaskUpdatePatch): boolean {
 
 /**
  * Whether a task's content may still be edited: the task must be on-board (not
- * archived) and must still sit in one of the pre-execution columns `backlog`,
- * `clarification` or `todo`. Fail-closed everywhere else: a running task holds
- * the content its session reads, and once a card moved on to
+ * archived) and must still sit in one of the pre-execution columns `backlog` or
+ * `clarification`. Fail-closed everywhere else: a running task holds the
+ * content its session reads, and once a card moved on to
  * `ready_for_test`/`done`/`failed` its content is the record of what ran.
  *
  * Earlier attempts do NOT lock the card: a task whose run failed (or was
- * cancelled) and was dragged back to `backlog`/`clarification`/`todo` is
- * preparation again and gets the edit form back — including the "Parse with AI"
- * source text.
+ * cancelled) and was dragged back to `backlog`/`clarification` is preparation
+ * again and gets the edit form back — including the "Parse with AI" source
+ * text.
  */
 export function canEditTaskContent(task: TaskRecord): boolean {
-  return task.archivedAt === undefined && (task.status === 'backlog' || task.status === 'clarification' || task.status === 'todo')
+  return task.archivedAt === undefined && (task.status === 'backlog' || task.status === 'clarification')
 }
 
 /** Keep an unknown permission string from entering the ledger. */
@@ -118,11 +118,6 @@ export function applyUpdateTask(
     if (('permission' in patch && patch.permission !== undefined && patch.permission !== task.permission) || 'handover' in patch) {
       next.permissionConfirmedAt = undefined
     }
-    // The specification release binds the text that was released: editing the
-    // content (title, description, prompt) or the parse source re-arms the gate,
-    // so an approved card whose instruction changed is never implemented on the
-    // old approval.
-    if (hasContentPatch(patch)) next.specApprovedAt = undefined
     // Session reuse is a boolean opt-in; false (or an explicit null from a
     // caller that needs to clear it) returns the task to one session per run.
     if ('reuseSession' in patch) next.reuseSession = patch.reuseSession === true ? true : undefined

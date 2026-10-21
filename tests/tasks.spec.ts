@@ -71,13 +71,13 @@ describe('createTask', () => {
 })
 
 describe('status transitions', () => {
-  it('manual moves go to backlog/todo/ready_for_test/done but never out of running', () => {
-    expect(canMoveManually('todo', 'backlog')).toBe(true)
-    expect(canMoveManually('failed', 'todo')).toBe(true)
+  it('manual moves go to backlog/clarification/ready_for_test/done but never out of running', () => {
+    expect(canMoveManually('clarification', 'backlog')).toBe(true)
+    expect(canMoveManually('failed', 'clarification')).toBe(true)
     expect(canMoveManually('done', 'backlog')).toBe(true)
     expect(canMoveManually('ready_for_test', 'done')).toBe(true)
-    expect(canMoveManually('todo', 'ready_for_test')).toBe(true)
-    expect(canMoveManually('todo', 'running')).toBe(false)
+    expect(canMoveManually('clarification', 'ready_for_test')).toBe(true)
+    expect(canMoveManually('clarification', 'running')).toBe(false)
     expect(canMoveManually('running', 'done')).toBe(false)
   })
 
@@ -117,10 +117,10 @@ describe('settleExecution', () => {
     expect(settled.executions[0].error).toBe('boom')
   })
 
-  it('cancelled runs return a non-running task to todo', () => {
+  it('cancelled runs return a non-running task to clarification', () => {
     const { task } = startExecution(sampleTask(), NOW, 'exec-1')
     const settled = settleExecution(task, 'exec-1', 'cancelled', NOW + 10, 'interrupted')
-    expect(settled.status).toBe('todo')
+    expect(settled.status).toBe('clarification')
     expect(settled.executions[0].result).toBe('cancelled')
   })
 

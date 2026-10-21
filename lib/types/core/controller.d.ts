@@ -312,12 +312,6 @@ export declare class BoardController {
      * (resolves the pending-confirmation transaction; no-op otherwise).
      */
     confirmPermission(id: string): Promise<boolean>;
-    /**
-     * Release a card's specification through the Host: the gate every
-     * implementation run (`run`, `rerun`, cron) checks. Without a transport the
-     * stamp is applied locally for the legacy seam; a second release is a no-op.
-     */
-    approveSpec(id: string): Promise<boolean>;
     /** Re-run a settled task through the Host (the Host replans and executes). */
     rerunTask(id: string): Promise<void>;
     /**

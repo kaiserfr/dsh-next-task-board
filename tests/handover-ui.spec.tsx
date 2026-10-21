@@ -25,7 +25,7 @@ function card(overrides: Partial<TaskRecord> = {}): TaskRecord {
     title: '交接卡',
     description: '',
     prompt: 'p',
-    status: 'todo',
+    status: 'clarification',
     createdAt: 0,
     updatedAt: 0,
     executions: [],

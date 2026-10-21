@@ -45,7 +45,7 @@ export interface ExecutionRecord {
   frozenBy?: string
   /**
    * Whether this run was started to work off a rework: the card had been sent
-   * back from `ready_for_test`/`failed` to `todo` (see
+   * back from `ready_for_test`/`failed` to `clarification` (see
    * {@link TaskRecord.reworkAt}) and the human has not started a run since. The
    * correction itself was typed by the human into the card's own conversation,
    * so this mark only carries the two consequences the board owes that round:
@@ -58,8 +58,8 @@ export interface ExecutionRecord {
    * walks the card through the run column). `'clarify'` marks the card's
    * clarification run — a real execution (it holds the card's session, the board
    * shows Running/Queued and links it) that settles **without moving the card**:
-   * it still sits in `todo` so the human can pull it on to the run column, which
-   * continues the very same session. `'merge'` marks the automatic
+   * it still sits in `clarification` so the human can pull it on to the run
+   * column, which continues the very same session. `'merge'` marks the automatic
    * conflict-resolution run of a merge release: the base branch had moved on, the
    * Host replayed the card's feature branch onto it and left the conflict in the
    * worktree, so this run's whole job is to resolve it and finish the replay — it
@@ -107,7 +107,7 @@ export interface ScheduleRule {
 
 /**
  * Git workflow state of a task on the board's feature-branch flow: the branch
- * opened when the card entered `todo`, the branch it was cut from (the merge
+ * opened when the card entered `clarification`, the branch it was cut from (the merge
  * target), and the worktree it lives in. Absent on cards whose workspace has
  * no git repository (the git integration is opt-in per workspace).
  */
@@ -445,7 +445,7 @@ export interface TaskRecord {
   reuseSession?: boolean
   /**
    * Rework stamp: a human reviewed the card in `ready_for_test` (or the run
-   * landed in `failed`) and sent it back to `todo`. The correction is typed
+   * landed in `failed`) and sent it back to `clarification`. The correction is typed
    * into the card's own conversation — the board keeps no note of its own — so
    * the stamp is the record that the card went through a rework and when.
    *
@@ -477,9 +477,9 @@ export interface TaskRecord {
   tags?: TaskTag[]
   /**
    * Conversation the card's questions are settled in. Opened by the
-   * clarification run of the `backlog → todo` step; the card links to it, and
-   * the run that starts the work continues this conversation so the collected
-   * answers stay in context. Absent until that session exists.
+   * clarification run of the `backlog → clarification` step; the card links to
+   * it, and the run that starts the work continues this conversation so the
+   * collected answers stay in context. Absent until that session exists.
    */
   clarificationSessionId?: string
   /**
@@ -488,14 +488,6 @@ export interface TaskRecord {
    * or handover change re-arms the gate by clearing it.
    */
   permissionConfirmedAt?: number
-  /**
-   * Human release of the card's specification (ms epoch). Absent while the
-   * card still waits for its "Freigabe": the Host refuses to start an
-   * implementation run (`run`, `rerun`, cron) until the human pressed the
-   * approve action. A clarification round and a content edit re-arm the gate by
-   * clearing it — the approval belongs to the text that was released.
-   */
-  specApprovedAt?: number
   /**
    * Git feature-branch state for the agentic-programming workflow; absent on
    * cards whose workspace is not a git worktree.
@@ -629,7 +621,7 @@ export const ALL_STATUSES: readonly TaskStatus[] = DEFAULT_STATE_MACHINE.states.
  * Statuses a task may be archived from: every status the ledger knows but
  * `running`, whose execution the runner still owns until it settles. A
  * settled-only gate made the duplicate-and-archive flow a silent no-op for
- * scheduled tasks, which return to `todo` after every successful run
+ * scheduled tasks, which return to `clarification` after every successful run
  * (issue #1447).
  */
 export const ARCHIVABLE_STATUSES: readonly TaskStatus[] = ALL_STATUSES.filter(status => status !== 'running')
@@ -680,14 +672,14 @@ export function normalizeParseText(value: unknown): string | undefined {
 
 /**
  * Whether this move sends the card back for rework: out of the review column
- * (`ready_for_test`) or out of a failed run (`failed`) into `todo`. Every such
+ * (`ready_for_test`) or out of a failed run (`failed`) into `clarification`. Every such
  * move is stamped ({@link withReworkStamp}), no matter who fired it — the
  * human's drag/chip or the Host noticing a correction in the card's chat.
  * @param from - the column the card leaves.
  * @param to - the column the card enters.
  */
 export function isReworkReturn(from: TaskStatus, to: TaskStatus): boolean {
-  return to === 'todo' && (from === 'ready_for_test' || from === 'failed')
+  return to === 'clarification' && (from === 'ready_for_test' || from === 'failed')
 }
 
 /**
@@ -758,8 +750,8 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     prompt: input.prompt.trim(),
     ...(parseText === undefined ? {} : { parseText }),
     // New cards start where the state machine says (the shipped machine:
-    // `backlog`, pulled into `todo` by hand — that move opens the feature
-    // branch).
+    // `backlog`, pulled into `clarification` by hand — that move opens the
+    // feature branch).
     status: input.initialStatus ?? 'backlog',
     createdAt: now,
     updatedAt: now,
@@ -822,10 +814,10 @@ export function withSchedule(
  * running execution record. Returns the new task and the new execution.
  *
  * `kind: 'clarify'` opens the card's *clarification run* instead: the execution
- * is a real one (the WIP-free todo run — it starts without waiting for a lane
- * slot, and the board shows the card as Running and links the session), but the
- * card keeps its column — the clarification must not leave `todo`, because the
- * human pulls it on to the run column afterwards.
+ * is a real one (the WIP-free clarification run — it starts without waiting for
+ * a lane slot, and the board shows the card as Running and links the session),
+ * but the card keeps its column — the clarification must not leave
+ * `clarification`, because the human pulls it on to the run column afterwards.
  */
 export function startExecution(
   task: TaskRecord,
@@ -883,7 +875,8 @@ export function startExecution(
  *
  * A clarification run is the exception: its outcome is recorded, but the card
  * keeps its column. Settling a chat must never park the card in
- * `ready_for_test`/`failed`; it waits in `todo` for the human to pull it on.
+ * `ready_for_test`/`failed`; it waits in `clarification` for the human to pull
+ * it on.
  */
 export function settleExecution(
   task: TaskRecord,
@@ -904,7 +897,7 @@ export function settleExecution(
     : outcome === 'succeeded'
       ? 'ready_for_test'
       : outcome === 'failed' ? 'failed'
-        : task.status === 'running' ? 'todo' : task.status
+        : task.status === 'running' ? 'clarification' : task.status
   return { ...task, status, updatedAt: now, pausedAt: undefined, executions }
 }
 
@@ -934,17 +927,6 @@ export function hasOpenRun(task: TaskRecord): boolean {
 }
 
 /**
- * Whether the card still needs the human's specification release. The gate
- * lives on the `run` action — drag onto the run column, the detail Run button
- * and cron all pass through it — so an unreleased card is never implemented.
- * A clarification run (`clarify`) is not gated: asking questions is exactly what
- * has to happen before the release.
- */
-export function requiresSpecApproval(task: Pick<TaskRecord, 'specApprovedAt'>): boolean {
-  return task.specApprovedAt === undefined
-}
-
-/**
  * Pause or resume the card's open run: stamp {@link TaskRecord.pausedAt} or
  * clear it. The status column is deliberately not touched — a paused card stays
  * in "In progress" so it can be resumed later. Pausing an already-paused card
@@ -962,9 +944,10 @@ export function withPause(task: TaskRecord, paused: boolean, now: number): TaskR
  * sits in a runner-owned column with an open run but no session yet is only
  * waiting for a free WIP slot (queued) — the board marks "running now" and
  * "waiting" differently, so this predicate is the single answer to which is
- * which. A `todo` clarification run never waits for a slot, so it is only
- * session-less for the moment its launch takes. A paused card keeps its open run and its column, but it is neither
- * running now nor waiting for a slot: its session was stopped.
+ * which. A clarification run never waits for a slot, so it is only
+ * session-less for the moment its launch takes. A paused card keeps its open
+ * run and its column, but it is neither running now nor waiting for a slot: its
+ * session was stopped.
  */
 export function isTaskExecuting(task: TaskRecord): boolean {
   const latest = task.executions[task.executions.length - 1]

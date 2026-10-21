@@ -137,7 +137,7 @@ describe('card merge badge', () => {
   })
 
   it('renders no badge on a card with nothing to say about a merge', () => {
-    expect(badgeOf([card({ status: 'todo', git: undefined })])).toBeNull()
+    expect(badgeOf([card({ status: 'clarification', git: undefined })])).toBeNull()
   })
 })
 

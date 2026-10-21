@@ -21,7 +21,6 @@ export const zh = {
   'board.status': '状态',
   'board.status.backlog': '待规划',
   'board.status.clarification': '澄清',
-  'board.status.todo': '待办',
   'board.status.running': '进行中',
   'board.status.ready_for_test': '待测试',
   'board.status.done': '已完成',
@@ -114,16 +113,14 @@ export const zh = {
   'board.deleteSelected': '删除选中',
   'board.dragCount': '移动 {count} 个任务',
   'board.tagEmpty': '没有同时带这些标签的任务',
-  // 澄清步骤：拖到「待办」即启动卡片自己的澄清运行（与运行列同一条队列）。
+  // 澄清步骤：拖进「澄清」即启动卡片自己的澄清运行（与运行列同一条队列）；
+  // 回答完问题后可直接拖到「进行中」，同一条会话继续实现。
   'card.clarifySession': '打开澄清会话',
   // 提问等待：该卡的会话里有 agent 提出、尚未回答的问题；点符号直接跳到那个会话。
   'card.awaitingAnswer': '等待你的回答',
   'detail.permissionPending': '权限待确认：本卡有效权限（{permission}）高于会话默认，手动执行与定时调度都会被拒绝，需人工确认后才能运行。',
   'detail.permissionConfirm': '确认权限绑定',
   'detail.permissionConfirmed': '已确认权限绑定 · {time}',
-  'detail.specPending': '规格待放行：这张卡还没有得到你的放行，Host 会拒绝任何实现运行（手动、重试与定时）。',
-  'detail.specApprove': '放行规格',
-  'detail.specApproved': '规格已放行 · {time}',
   'detail.title': '任务详情',
   'detail.edit': '编辑',
   'detail.editTags': '编辑标签',
@@ -138,7 +135,7 @@ export const zh = {
   'detail.prompt': '执行 Prompt',
   'detail.rework': '返工',
   'detail.reworkStamp': '最近一次退回：{time}（共 {count} 次）',
-  'detail.reworkHint': '修改意见直接写在卡片会话的聊天里——聊天中的人工发言就是返工意见，卡片会自动退回待办；看板不再收集说明文字。',
+  'detail.reworkHint': '修改意见直接写在卡片会话的聊天里——聊天中的人工发言就是返工意见，卡片会自动退回澄清；看板不再收集说明文字。',
   'detail.execution.rework': '返工轮次',
   'detail.description': '描述',
   'detail.execution': '执行记录',
@@ -170,7 +167,6 @@ export const zh = {
   'delete.cancel': '取消',
   'status.move.backlog': '移到待规划',
   'status.move.clarification': '移到澄清',
-  'status.move.todo': '移到待办',
   'status.move.ready_for_test': '移到待测试',
   'status.move.done': '移到已完成（合并分支）',
   'exec.error.noWorkspace': '没有可用工作区，无法执行任务',
@@ -296,7 +292,7 @@ export const zh = {
   'settings.repoSubpath': 'Git 仓库位置（JSON，按工作区）',
   'settings.repoSubpathHint': 'JSON 数组，用于「工作区目录本身不是 git 仓库」的情况：每一项把工作区目录映射到它里面的仓库目录，最长路径前缀匹配。卡片的分支、worktree 和合并都在这个仓库里进行。示例：[{"path":"/home/frank/develop/workspaces/dsh-comfy-taskboard","repo":"dsh-next-task-board"}]。留空：这类工作区没有分支（卡片照常工作，只是不合并）。',
   'settings.editorCommandHint': '默认 code：点击「在 VS Code 中打开」时在本机执行 `code -n <目录>`（目录里有 .code-workspace 时优先打开它）。只有从本机（loopback）发出的请求能触发它。',
-  'settings.stateMachineHint': '看板的列就是任务状态。这里声明列（states）、允许的状态转移（transitions）以及转移时触发的动作（actions：git.openBranch 开 feature 分支、git.commitBranch 把工作区改动提交到 feature 分支、git.mergeBranch 合并回基线分支、run 启动执行、clarify 启动澄清运行、stamp 写时间戳）。拖放只允许已声明的转移；留空使用内置状态机（待规划 → 澄清 → 待办 → 进行中 → 待测试 → 已失败/已完成）。配置无效时整份拒绝，继续沿用当前状态机，并在卡片上显示原因。自定义状态机应把 git.commitBranch 挂到自己进入待测试的转移上（未提交的工作不会因此留下：Runner 结算时总会提交）。语法示例：{"states":[{"status":"backlog"},{"status":"clarification"},{"status":"todo"},{"status":"running","drop":false},{"status":"ready_for_test"},{"status":"done"}],"transitions":[{"from":"backlog","to":"clarification","actions":["git.openBranch","clarify"]},{"from":"clarification","to":"todo"},{"from":"todo","to":"ready_for_test","actions":["git.commitBranch"]},{"from":"ready_for_test","to":"done","actions":["git.mergeBranch"]}],"initial":"backlog"}',
+  'settings.stateMachineHint': '看板的列就是任务状态。这里声明列（states）、允许的状态转移（transitions）以及转移时触发的动作（actions：git.openBranch 开 feature 分支、git.commitBranch 把工作区改动提交到 feature 分支、git.mergeBranch 合并回基线分支、run 启动执行、clarify 启动澄清运行、stamp 写时间戳）。拖放只允许已声明的转移；留空使用内置状态机（待规划 → 澄清 → 进行中 → 待测试 → 已失败/已完成）。配置无效时整份拒绝，继续沿用当前状态机，并在卡片上显示原因。自定义状态机应把 git.commitBranch 挂到自己进入待测试的转移上（未提交的工作不会因此留下：Runner 结算时总会提交）。语法示例：{"states":[{"status":"backlog"},{"status":"clarification"},{"status":"running","drop":false},{"status":"ready_for_test"},{"status":"done"}],"transitions":[{"from":"backlog","to":"clarification","actions":["git.openBranch","clarify"]},{"from":"clarification","to":"running","actions":["run"]},{"from":"clarification","to":"ready_for_test","actions":["git.commitBranch"]},{"from":"ready_for_test","to":"done","actions":["git.mergeBranch"]}],"initial":"backlog"}',
   'settings.powerStatus': '平台：{platform}；保护状态：{phase}；运行会话：{running}；已启用计划：{schedules}',  'settings.powerBoundary': '这可能增加电池消耗。合盖、手动睡眠、休眠、关机、低电量或企业策略不在保证范围内，也不会唤醒已经睡眠的机器。',
   'settings.powerUnknown': '未知',
   'settings.powerError': '最近一次电源保护错误：{error}',
@@ -333,7 +329,6 @@ export const en: Record<keyof typeof zh, string> = {
   'board.status': 'Status',
   'board.status.backlog': 'Backlog',
   'board.status.clarification': 'Clarification',
-  'board.status.todo': 'To Do',
   'board.status.running': 'In Progress',
   'board.status.ready_for_test': 'Ready for test',
   'board.status.done': 'Done',
@@ -426,7 +421,9 @@ export const en: Record<keyof typeof zh, string> = {
   'board.deleteSelected': 'Delete',
   'board.dragCount': 'Moving {count} tasks',
   'board.tagEmpty': 'No task carries all of these tags',
-  // Clarification step: a drop on To Do starts the card's own clarification run.
+  // Clarification step: a drop on Clarification starts the card's own
+  // clarification run; once the questions are answered the card can be pulled
+  // straight on to In progress, where that same conversation implements.
   'card.clarifySession': 'Open clarification chat',
   // Waiting question: the card's conversation holds a question the agent asked
   // and nothing answered yet; the symbol jumps straight into that session.
@@ -434,9 +431,6 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.permissionPending': 'Permission pending confirmation: this card\'s effective permission ({permission}) is above the session default; manual runs and cron are refused until a human confirms.',
   'detail.permissionConfirm': 'Confirm permission binding',
   'detail.permissionConfirmed': 'Permission confirmed · {time}',
-  'detail.specPending': 'Specification not released: the Host refuses every implementation run (manual, retry and cron) until you release this card\'s specification.',
-  'detail.specApprove': 'Release specification',
-  'detail.specApproved': 'Specification released · {time}',
   'detail.title': 'Task Detail',
   'detail.edit': 'Edit',
   'detail.editTags': 'Edit tags',
@@ -451,7 +445,7 @@ export const en: Record<keyof typeof zh, string> = {
   'detail.prompt': 'Run Prompt',
   'detail.rework': 'Rework',
   'detail.reworkStamp': 'Last sent back: {time} ({count}×)',
-  'detail.reworkHint': 'Write the correction into the card\'s own chat: a human message there is the rework remark, and the card goes back to To Do by itself. The board no longer collects note text.',
+  'detail.reworkHint': 'Write the correction into the card\'s own chat: a human message there is the rework remark, and the card goes back to Clarification by itself. The board no longer collects note text.',
   'detail.execution.rework': 'Rework round',
   'detail.description': 'Description',
   'detail.execution': 'Execution History',
@@ -483,7 +477,6 @@ export const en: Record<keyof typeof zh, string> = {
   'delete.cancel': 'Cancel',
   'status.move.backlog': 'Move to Backlog',
   'status.move.clarification': 'Move to Clarification',
-  'status.move.todo': 'Move to To Do',
   'status.move.ready_for_test': 'Move to Ready for test',
   'status.move.done': 'Move to Done (merge branch)',
   'exec.error.noWorkspace': 'No workspace is available to run the task',
@@ -609,7 +602,7 @@ export const en: Record<keyof typeof zh, string> = {
   'settings.repoSubpath': 'Repository location (JSON, per workspace)',
   'settings.repoSubpathHint': 'A JSON array for workspaces whose own directory is not a git repository: each entry maps a workspace directory to the repository directory inside it, longest path prefix wins. The card\'s branch, its worktree and the merge all happen in that repository. Example: [{"path":"/home/me/proj","repo":"app"}]. Empty: such a workspace has no branch (cards keep working, they just never merge).',
   'settings.editorCommandHint': 'Default `code`: the "Open in VS Code" button runs `code -n <directory>` on this machine, preferring the .code-workspace the directory carries. Only a request from this machine (loopback) may trigger it.',
-  'settings.stateMachineHint': 'The board\'s columns are the task states. This declares the columns (states), the allowed state transitions (transitions), and the actions a transition fires (actions: git.openBranch opens the feature branch, git.commitBranch commits the worktree onto the feature branch, git.mergeBranch merges it back, run starts an execution, clarify starts the clarification run, stamp writes a timestamp). A drag & drop is only allowed for a declared transition; leave empty for the built-in machine (Backlog → Clarification → To Do → In progress → Ready for test → Failed/Done). An invalid config is refused as a whole — the machine in force stays and the card shows why. A custom machine should carry git.commitBranch on its own ways into Ready for test (uncommitted work cannot pile up regardless: every run settle commits). Example: {"states":[{"status":"backlog"},{"status":"clarification"},{"status":"todo"},{"status":"running","drop":false},{"status":"ready_for_test"},{"status":"done"}],"transitions":[{"from":"backlog","to":"clarification","actions":["git.openBranch","clarify"]},{"from":"clarification","to":"todo"},{"from":"todo","to":"ready_for_test","actions":["git.commitBranch"]},{"from":"ready_for_test","to":"done","actions":["git.mergeBranch"]}],"initial":"backlog"}',
+  'settings.stateMachineHint': 'The board\'s columns are the task states. This declares the columns (states), the allowed state transitions (transitions), and the actions a transition fires (actions: git.openBranch opens the feature branch, git.commitBranch commits the worktree onto the feature branch, git.mergeBranch merges it back, run starts an execution, clarify starts the clarification run, stamp writes a timestamp). A drag & drop is only allowed for a declared transition; leave empty for the built-in machine (Backlog → Clarification → In progress → Ready for test → Failed/Done). An invalid config is refused as a whole — the machine in force stays and the card shows why. A custom machine should carry git.commitBranch on its own ways into Ready for test (uncommitted work cannot pile up regardless: every run settle commits). Example: {"states":[{"status":"backlog"},{"status":"clarification"},{"status":"running","drop":false},{"status":"ready_for_test"},{"status":"done"}],"transitions":[{"from":"backlog","to":"clarification","actions":["git.openBranch","clarify"]},{"from":"clarification","to":"running","actions":["run"]},{"from":"clarification","to":"ready_for_test","actions":["git.commitBranch"]},{"from":"ready_for_test","to":"done","actions":["git.mergeBranch"]}],"initial":"backlog"}',
   'settings.powerStatus': 'Platform: {platform}; protection: {phase}; running sessions: {running}; enabled schedules: {schedules}',
   'settings.powerBoundary': 'This may use more battery. Lid close, manual sleep, hibernation, shutdown, low-battery actions, and enterprise policy are outside the guarantee; an already sleeping computer is not woken.',
   'settings.powerUnknown': 'unknown',

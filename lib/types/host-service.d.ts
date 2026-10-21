@@ -45,7 +45,7 @@ export declare class TaskBoardHostService {
     private readonly launchesInFlight;
     /**
      * WIP limit per workspace/lane: how many implementation runs may hold a
-     * session at once (always >= 1). Clarification runs (`todo`) are exempt.
+     * session at once (always >= 1). Clarification runs are exempt.
      */
     private maxConcurrentRuns;
     /**
@@ -326,7 +326,7 @@ export declare class TaskBoardHostService {
      * runs within one lane still start FIFO. A run above its lane's limit stays
      * queued: its ledger execution is already open without a session, so the card
      * reads as waiting and cannot be opened twice. A clarification run is never
-     * held back — `todo` has no WIP limit. Called on enqueue, on every ledger
+     * held back — the clarification column has no WIP limit. Called on enqueue, on every ledger
      * change (a settle frees a slot), after a launch attaches a session or fails,
      * and when the limit changes.
      */

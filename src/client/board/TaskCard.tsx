@@ -107,7 +107,8 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingRea
   // The pause button covers every open run of the card: the executing one (its
   // session is stopped) and the queued one (it never starts). A paused card
   // offers the same button as a play button to resume the run. The card's
-  // clarification run in `todo` is a run like any other, so it is pausable too.
+  // clarification run in `clarification` is a run like any other, so it is
+  // pausable too.
   const openRun = latest !== undefined && latest.endedAt === undefined
   const showPauseControl = !archived && !pending && (paused || openRun)
   // One jump target per card: the newest execution's conversation — and a card

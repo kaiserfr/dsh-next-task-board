@@ -127,7 +127,7 @@ describe('use-case: update content editability', () => {
     // An earlier attempt does not lock the card any more: a run that was
     // cancelled (or failed) and left the card in todo is preparation again.
     const cancelled = settleExecution(startExecution(fresh, NOW, 'e-cancel').task, 'e-cancel', 'cancelled', NOW + 1, undefined)
-    expect(cancelled.status).toBe('todo')
+    expect(cancelled.status).toBe('clarification')
     expect(cancelled.executions).toHaveLength(1)
     expect(canEditTaskContent(cancelled)).toBe(true)
 

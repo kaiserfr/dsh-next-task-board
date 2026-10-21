@@ -106,7 +106,6 @@ function harness(options: { failUp?: string } = {}) {
 describe.skipIf(!hasGit)('task environment lifecycle', () => {
   it('brings the stack up before the run and keeps it through the review', async () => {
     const { ledger, service, calls, worktree, flush, poll } = harness()
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
 
     service.apply('run-card', { kind: 'run', taskId: 'card' })
     await flush()
@@ -135,14 +134,13 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
 
   it('tears the stack down when the card goes back to work, is archived or deleted', async () => {
     const { ledger, service, calls, worktree, flush, poll } = harness()
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     service.apply('run-card', { kind: 'run', taskId: 'card' })
     await flush()
     ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
     await flush()
 
     // Back to To do (a rework return): the next run brings a fresh stack up.
-    service.apply('rework', { kind: 'move', taskId: 'card', status: 'todo' })
+    service.apply('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     await poll()
     expect(calls.down.map(entry => entry.project)).toEqual(['dsh-tb-card'])
@@ -163,7 +161,6 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
 
   it('fails the run and records the reason when the stack cannot start', async () => {
     const { ledger, service, worktree, flush } = harness({ failUp: 'docker compose up failed for dsh-tb-card: port is already allocated' })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
 
     service.apply('run-card', { kind: 'run', taskId: 'card' })
     await flush()

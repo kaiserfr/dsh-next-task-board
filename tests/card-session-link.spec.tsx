@@ -31,7 +31,7 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     title: 'Task A',
     description: '',
     prompt: 'do it',
-    status: 'todo',
+    status: 'clarification',
     createdAt: 0,
     updatedAt: 0,
     executions: [],
@@ -129,7 +129,7 @@ describe('card → session jump', () => {
   })
 
   it('keeps the double click opening the detail while a mark does not', async () => {
-    const view = render({ tasks: [task({ status: 'todo', executions: [settledRun(10, 'session-old')] })] })
+    const view = render({ tasks: [task({ status: 'clarification', executions: [settledRun(10, 'session-old')] })] })
     await view.render()
 
     const card = view.container.querySelector('button[data-dsh-part="card"]') as HTMLButtonElement

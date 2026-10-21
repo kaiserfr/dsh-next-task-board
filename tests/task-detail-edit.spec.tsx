@@ -111,7 +111,7 @@ describe('task content editing before execution (issue #1110)', () => {
 
   it('offers the edit button again once the card is back in a waiting column', async () => {
     const { container } = await renderDetail(task({
-      status: 'todo',
+      status: 'clarification',
       executions: [{ id: 'e-fail', sessionId: undefined, startedAt: 1, endedAt: 2, result: 'failed', error: 'boom' }],
     }))
     expect(editButtonOf(container)).toBeDefined()

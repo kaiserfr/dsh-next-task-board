@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * Rework UI: a card that failed its test goes back to To Do with the button
+ * Rework UI: a card that failed its test goes back to Clarification with the button
  * that is left (the status move), and the correction is written in the card's
  * own chat — the detail view collects no note text any more.
  */
@@ -68,14 +68,14 @@ describe('rework after a failed test', () => {
     expect(container.querySelector('textarea')).toBeNull()
   })
 
-  it('keeps the way back to To Do as a plain status move', () => {
+  it('keeps the way back to Clarification as a plain status move', () => {
     const container = render(<TaskDetail controller={controller()} task={card()} />)
-    const button = [...container.querySelectorAll('button')].find(item => item.textContent?.includes(t('status.move.todo')))
+    const button = [...container.querySelectorAll('button')].find(item => item.textContent?.includes(t('status.move.clarification')))
     expect(button).toBeDefined()
   })
 
   it('shows the stamp of a card that was sent back, without any note text', () => {
-    const container = render(<TaskDetail controller={controller()} task={card({ status: 'todo', reworkAt: 1_700_000_000_000, reworkCount: 2 })} />)
+    const container = render(<TaskDetail controller={controller()} task={card({ status: 'clarification', reworkAt: 1_700_000_000_000, reworkCount: 2 })} />)
     const stamp = container.querySelector('[data-dsh-part="rework-stamp"]')
     expect(stamp).not.toBeNull()
     expect(stamp!.textContent).toContain('2')

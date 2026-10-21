@@ -209,10 +209,10 @@ describe('task mutations', () => {
     const { controller, store } = makeController()
     const first = controller.createTask({ title: 'a', description: '', prompt: '' })!
     const second = controller.createTask({ title: 'b', description: '', prompt: '' })!
-    await expect(controller.moveTasks([first.id, second.id, first.id], 'todo')).resolves.toBe(true)
+    await expect(controller.moveTasks([first.id, second.id, first.id], 'clarification')).resolves.toBe(true)
     expect(store.load().map(entry => [entry.id, entry.status])).toEqual([
-      [first.id, 'todo'],
-      [second.id, 'todo'],
+      [first.id, 'clarification'],
+      [second.id, 'clarification'],
     ])
   })
 
@@ -220,7 +220,7 @@ describe('task mutations', () => {
     const { controller, store } = makeController()
     controller.createTask({ title: 'a', description: '', prompt: '' })
     const before = store.load().map(entry => [entry.id, entry.status])
-    await expect(controller.moveTasks([], 'todo')).resolves.toBe(true)
+    await expect(controller.moveTasks([], 'clarification')).resolves.toBe(true)
     expect(store.load().map(entry => [entry.id, entry.status])).toEqual(before)
   })
 })

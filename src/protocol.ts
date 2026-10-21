@@ -143,7 +143,6 @@ export type TaskBoardAction =
   | { kind: 'pause'; taskIds: string[] }
   | { kind: 'resume'; taskIds: string[] }
   | { kind: 'confirm-permission'; taskId: string }
-  | { kind: 'approve-spec'; taskId: string }
   | { kind: 'approve-merge'; taskId: string }
   | { kind: 'review-start'; taskId: string }
   | { kind: 'review-stop'; taskId: string }
@@ -483,7 +482,6 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
       }
     }
     case 'confirm-permission':
-    case 'approve-spec':
     case 'approve-merge':
     case 'review-start':
     case 'review-stop':

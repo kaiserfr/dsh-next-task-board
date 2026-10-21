@@ -144,7 +144,6 @@ describe('confirmation gate: unconfirmed high-permission binding refuses executi
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('req-create', { kind: 'create', id: 'card', input: { title: '高权卡', description: '', prompt: 'p', handover: HANDOVER } })
     const { service, create } = makeService(ledger, () => NOW)
-    service.apply('req-approve', { kind: 'approve-spec', taskId: 'card' })
     service.apply('req-confirm', { kind: 'confirm-permission', taskId: 'card' })
     expect(ledger.state().tasks[0].permissionConfirmedAt).toBe(NOW)
     service.apply('req-run', { kind: 'run', taskId: 'card' })
@@ -158,7 +157,6 @@ describe('confirmation gate: unconfirmed high-permission binding refuses executi
     const ledger = new HostTaskLedger(tempRoot(), () => NOW, { sessionDefaultPermission: 'workspace-write' })
     ledger.applyRequest('req-create', { kind: 'create', id: 'card', input: { title: '平权卡', description: '', prompt: 'p', handover: { ...HANDOVER, permission: 'workspace-write' } } })
     const { service } = makeService(ledger, () => NOW)
-    ledger.applyRequest('req-approve', { kind: 'approve-spec', taskId: 'card' })
     expect(() => service.apply('req-run', { kind: 'run', taskId: 'card' })).not.toThrow()
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
     service.dispose()
@@ -229,7 +227,6 @@ describe('confirmation gate: cron refuses unconfirmed cards', () => {
       input: { title: '定时高权卡', description: '', prompt: 'p', handover: HANDOVER, schedule: { enabled: true, cron: '* * * * *' } },
     })
     ledger.applyRequest('req-confirm', { kind: 'confirm-permission', taskId: 'card' })
-    ledger.applyRequest('req-approve', { kind: 'approve-spec', taskId: 'card' })
     const { service, create } = makeService(ledger, () => now)
     now = new Date(2026, 7, 16, 10, 1, 0).getTime()
     await (service as unknown as { tickSchedule(first: boolean): Promise<void> }).tickSchedule(false)
