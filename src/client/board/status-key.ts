@@ -5,7 +5,6 @@ import type { TaskBoardKey } from '../locales.ts'
 export const STATUS_KEY: Record<TaskStatus, TaskBoardKey> = {
   backlog: 'board.status.backlog',
   clarification: 'board.status.clarification',
-  todo: 'board.status.todo',
   running: 'board.status.running',
   ready_for_test: 'board.status.ready_for_test',
   done: 'board.status.done',

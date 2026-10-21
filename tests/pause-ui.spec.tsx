@@ -93,7 +93,7 @@ describe('board-wide pause/resume', () => {
         task({ id: 'b' }),
         // Queued: in progress without a session, paused with the same action.
         task({ id: 'c', executions: [{ id: 'e2', sessionId: undefined, startedAt: 0, endedAt: undefined, result: undefined, error: undefined }] }),
-        task({ id: 'd', status: 'todo', executions: [] }),
+        task({ id: 'd', status: 'clarification', executions: [] }),
       ],
     }, { pauseTasks })
     const container = render(<TaskBoard controller={controller} />)
@@ -120,7 +120,7 @@ describe('board-wide pause/resume', () => {
   })
 
   it('is disabled while nothing is in progress', () => {
-    const controller = fakeController({ tasks: [task({ id: 'a', status: 'todo', executions: [] })] })
+    const controller = fakeController({ tasks: [task({ id: 'a', status: 'clarification', executions: [] })] })
     const container = render(<TaskBoard controller={controller} />)
     expect((container.querySelector('[data-dsh-part="pause-all"]') as HTMLButtonElement).disabled).toBe(true)
   })

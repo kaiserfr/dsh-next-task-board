@@ -152,9 +152,6 @@ export type TaskBoardAction = {
     kind: 'confirm-permission';
     taskId: string;
 } | {
-    kind: 'approve-spec';
-    taskId: string;
-} | {
     kind: 'approve-merge';
     taskId: string;
 } | {

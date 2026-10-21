@@ -1,6 +1,6 @@
 /**
  * Rework without a board-side note: sending a card back from `ready_for_test`
- * (or `failed`) to `todo` stamps it, and the correction itself is the human's
+ * (or `failed`) to `clarification` stamps it, and the correction itself is the human's
  * own turn in the card's conversation — the next run continues that chat and
  * opens with the rework framing instead of repeating the card body.
  */
@@ -19,12 +19,12 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
 
 describe('rework return', () => {
   it('is exactly the way back from the review and failure columns', () => {
-    expect(isReworkReturn('ready_for_test', 'todo')).toBe(true)
-    expect(isReworkReturn('failed', 'todo')).toBe(true)
+    expect(isReworkReturn('ready_for_test', 'clarification')).toBe(true)
+    expect(isReworkReturn('failed', 'clarification')).toBe(true)
     // Accepting the work, or moving on from any other column, is no rework.
     expect(isReworkReturn('ready_for_test', 'done')).toBe(false)
-    expect(isReworkReturn('todo', 'todo')).toBe(false)
-    expect(isReworkReturn('done', 'todo')).toBe(false)
+    expect(isReworkReturn('clarification', 'clarification')).toBe(false)
+    expect(isReworkReturn('done', 'clarification')).toBe(false)
   })
 
   it('stamps when it happened and counts the rounds', () => {
@@ -87,14 +87,14 @@ describe('the wire gate no longer carries a rework action', () => {
   it('refuses the removed action', () => {
     // The board writes the send-back as an ordinary, machine-validated move.
     expect(parseActionEnvelope({ requestId: 'rework-a', action: { kind: 'rework', taskId: 'task-a', note: 'fix it' } })).toBeUndefined()
-    expect(parseActionEnvelope({ requestId: 'move-a', action: { kind: 'move', taskId: 'task-a', status: 'todo' } })?.action)
-      .toEqual({ kind: 'move', taskId: 'task-a', status: 'todo' })
+    expect(parseActionEnvelope({ requestId: 'move-a', action: { kind: 'move', taskId: 'task-a', status: 'clarification' } })?.action)
+      .toEqual({ kind: 'move', taskId: 'task-a', status: 'clarification' })
   })
 })
 
 describe('rework persistence', () => {
   it('round-trips the stamp through the ledger parser', () => {
-    const stored = task({ reworkAt: 120, reworkCount: 3, status: 'todo' })
+    const stored = task({ reworkAt: 120, reworkCount: 3, status: 'clarification' })
     const [parsed] = parseLedger(JSON.stringify([stored]))
     expect(parsed?.reworkAt).toBe(120)
     expect(parsed?.reworkCount).toBe(3)

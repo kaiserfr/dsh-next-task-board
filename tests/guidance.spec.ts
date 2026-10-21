@@ -16,13 +16,16 @@ describe('task-board model guidance', () => {
     // Plus the shape of the step: pulling a card out of the backlog lands it in
     // the clarification column and starts a real run exactly like a drop on the
     // run column (same queue, but WIP-free — that column counts against no lane
-    // limit), only its prompt asks first; the human closes the step by moving
-    // the card to To do and releasing the specification, and the run then
-    // continues that same session.
+    // limit), only its prompt asks first; the human answers in the chat and
+    // pulls the card straight on to In progress, where the same session
+    // implements. There is no separate To do column and no specification
+    // release gate.
     expect(TASK_BOARD_GUIDANCE).toContain('Der Übergang von Backlog nach Clarification ist der Klärungsschritt')
     expect(TASK_BOARD_GUIDANCE).toContain('ohne die WIP-Grenze der Spur')
     expect(TASK_BOARD_GUIDANCE).toContain('澄清列无 WIP 名额')
-    expect(TASK_BOARD_GUIDANCE).toContain('approve-spec')
+    expect(TASK_BOARD_GUIDANCE).not.toContain('approve-spec')
+    expect(TASK_BOARD_GUIDANCE).toContain('回答完直接把卡片拖到「进行中」')
+    expect(TASK_BOARD_GUIDANCE).not.toContain('拖到「待办」')
     // The rule keys off the run's own addendum, and it has to spell that
     // addendum out: a trigger the prompt does not contain would never fire, so
     // the guidance interpolates the very lines the clarification run sends.

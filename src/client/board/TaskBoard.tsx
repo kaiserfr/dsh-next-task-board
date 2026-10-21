@@ -48,8 +48,9 @@ function waitingTooltip(reason: WaitingReason, workspaceTitles: ReadonlyMap<stri
 
 /**
  * The notice for a drop on the run column whose cards cannot start yet, or
- * undefined when at least one of them starts now. `todo` and the review columns
- * are WIP-free, so only the cards whose lane is held by another run count; they
+ * undefined when at least one of them starts now. The clarification and review
+ * columns are WIP-free, so only the cards whose lane is held by another run
+ * count; they
  * keep their place in the lane's FIFO queue and start on their own. Exported
  * for the test that pins the wording against a blocked lane.
  */
@@ -404,7 +405,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // selection actions): "pause all running work" must not silently skip cards
   // the current filter or project pick hides. Paused cards come back through
   // the same button as a resume, so one control covers both directions. Every
-  // open run counts, the clarification run in `todo` included.
+  // open run counts, the clarification run in `clarification` included.
   const runningIds = snapshot.tasks
     .filter(task => task.archivedAt === undefined && task.pausedAt === undefined && openExecution(task) !== undefined)
     .map(task => task.id)

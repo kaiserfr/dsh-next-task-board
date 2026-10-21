@@ -44,18 +44,18 @@ describe('BoardController archive', () => {
   it('archives every non-running task and refuses running ones', () => {
     const done = task('done', 'done')
     const failed = task('failed', 'failed')
-    const todo = task('todo', 'todo')
+    const todo = task('clarification', 'clarification')
     const running = task('running', 'running')
     const { controller, store } = makeController([done, failed, todo, running])
     expect(controller.archiveTask('done')).toBe(true)
     expect(controller.archiveTask('failed')).toBe(true)
     // A scheduled task returns to todo after every run, so the duplicate flow
     // must be able to archive it (issue #1447).
-    expect(controller.archiveTask('todo')).toBe(true)
+    expect(controller.archiveTask('clarification')).toBe(true)
     expect(controller.archiveTask('running')).toBe(false)
     const persisted = store.load()
     expect(persisted.find(item => item.id === 'done')?.archivedAt).toBe(NOW)
-    expect(persisted.find(item => item.id === 'todo')?.archivedAt).toBe(NOW)
+    expect(persisted.find(item => item.id === 'clarification')?.archivedAt).toBe(NOW)
     expect(persisted.find(item => item.id === 'running')?.archivedAt).toBeUndefined()
   })
 

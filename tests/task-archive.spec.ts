@@ -42,7 +42,7 @@ describe('applyArchiveTask', () => {
   })
 
   it('archives backlog and todo tasks', () => {
-    for (const status of ['backlog', 'todo'] as const) {
+    for (const status of ['backlog', 'clarification'] as const) {
       const { tasks, archived } = applyArchiveTask([task('y', status)], 'y', NOW + 1)
       expect(archived).toBe(true)
       expect(tasks[0].archivedAt).toBe(NOW + 1)
@@ -51,13 +51,13 @@ describe('applyArchiveTask', () => {
 
   it('archives a scheduled todo task and disarms its cron (issue #1447)', () => {
     const t = {
-      ...task('t6', 'todo'),
+      ...task('t6', 'clarification'),
       executions: [{ id: 'e1', sessionId: 's1', startedAt: 1, endedAt: 2, result: 'succeeded' as const, error: undefined }],
       schedule: { enabled: true, cron: '0 9 * * *', nextRunAt: NOW + 60_000, lastTriggeredAt: NOW - 60_000 },
     }
     const { tasks, archived } = applyArchiveTask([t], 't6', NOW + 5)
     expect(archived).toBe(true)
-    expect(tasks[0]).toMatchObject({ id: 't6', status: 'todo', archivedAt: NOW + 5 })
+    expect(tasks[0]).toMatchObject({ id: 't6', status: 'clarification', archivedAt: NOW + 5 })
     expect(tasks[0].schedule).toEqual({
       enabled: false, cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: NOW - 60_000,
     })

@@ -111,7 +111,7 @@ export interface PromptTextOptions {
     merge?: boolean;
 }
 /**
- * The clarification addendum: what the `backlog → todo` run tells the agent to
+ * The clarification addendum: what the `backlog → clarification` run tells the agent to
  * do *instead of* working. Exported because the board's system-prompt rule keys
  * off exactly this text (see `TASK_BOARD_GUIDANCE`).
  */

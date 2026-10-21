@@ -35,7 +35,7 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
     title: 'Task A',
     description: '',
     prompt: 'do it',
-    status: 'todo',
+    status: 'clarification',
     createdAt: 0,
     updatedAt: Date.now(),
     executions: [],
@@ -127,9 +127,9 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
 
     const controller = fakeController({
       tasks: [
-        task({ id: 't-todo', status: 'todo' }),
+        task({ id: 't-todo', status: 'clarification' }),
         task({ id: 't-running', status: 'running' }),
-        task({ id: 't-pending', status: 'todo' }),
+        task({ id: 't-pending', status: 'clarification' }),
       ],
       pendingTaskIds: ['t-pending'],
     })
@@ -139,7 +139,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     expect(cards).toHaveLength(3)
 
     // Todo card is draggable
-    const todoCard = Array.from(cards).find(c => c.getAttribute('data-status') === 'todo' && !c.hasAttribute('data-pending'))
+    const todoCard = Array.from(cards).find(c => c.getAttribute('data-status') === 'clarification' && !c.hasAttribute('data-pending'))
     expect(todoCard?.getAttribute('draggable')).toBe('true')
 
     // Running card is not draggable
@@ -151,7 +151,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     expect(pendingCard?.getAttribute('draggable')).toBe('false')
   })
 
-  it('drops a backlog card onto the todo column and triggers controller.moveTask', async () => {
+  it('drops a backlog card onto the clarification column and triggers controller.moveTask', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
@@ -201,7 +201,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
       .map(column => column.getAttribute('data-status'))
     // The full default column order: the swap moved `failed` in front of
     // `done`, every other column kept its slot, and none is lost or doubled.
-    expect(statuses).toEqual(['backlog', 'clarification', 'todo', 'running', 'ready_for_test', 'failed', 'done'])
+    expect(statuses).toEqual(['backlog', 'clarification', 'running', 'ready_for_test', 'failed', 'done'])
   })
 
   it('drops a ready_for_test card onto the done column and triggers controller.moveTask', async () => {
@@ -239,7 +239,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     const controller = fakeController(
       {
         tasks: [
-          task({ id: 't-todo', status: 'todo' }),
+          task({ id: 't-todo', status: 'clarification' }),
           task({ id: 't-running', status: 'running' }),
           task({ id: 't-pending', status: 'done' }),
         ],
@@ -288,7 +288,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     const controller = fakeController(
       {
         tasks: [
-          task({ id: 't-todo', status: 'todo' }),
+          task({ id: 't-todo', status: 'clarification' }),
           task({ id: 't-running', status: 'running' }),
         ],
       },
@@ -298,7 +298,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     )
     await act(async () => { root.render(<TaskBoard controller={controller} />) })
 
-    const todoColumn = container.querySelector('section[data-status="todo"]')
+    const todoColumn = container.querySelector('section[data-status="clarification"]')
 
     // Dropping on the same column does nothing
     const sameColTransfer = {
@@ -350,8 +350,8 @@ describe('TaskBoard running-card marking and runner-column order', () => {
         task({ id: 'exec', title: 'exec', status: 'running', executions: [openRun(200, 'session-exec')] }),
         // A column the runner does not own keeps the ledger order, even when
         // the run timestamps would sort differently.
-        task({ id: 'todo-1', title: 'todo-1', status: 'todo', updatedAt: 900 }),
-        task({ id: 'todo-2', title: 'todo-2', status: 'todo', updatedAt: 10 }),
+        task({ id: 'todo-1', title: 'todo-1', status: 'clarification', updatedAt: 900 }),
+        task({ id: 'todo-2', title: 'todo-2', status: 'clarification', updatedAt: 10 }),
       ],
     })
     await act(async () => { root.render(<TaskBoard controller={controller} />) })
@@ -375,7 +375,7 @@ describe('TaskBoard running-card marking and runner-column order', () => {
     expect(cards[2]!.getAttribute('title')).toBe(waiting)
     expect(cards[1]!.querySelector('[data-dsh-part="card-waiting"]')).not.toBeNull()
 
-    const todo = container.querySelector('section[data-status="todo"]')
+    const todo = container.querySelector('section[data-status="clarification"]')
     expect(Array.from(todo!.querySelectorAll('button[data-dsh-part="card"]'))
       .map(card => card.getAttribute('title'))).toEqual(['todo-1', 'todo-2'])
   })
@@ -394,7 +394,7 @@ describe('TaskBoard running-card marking and runner-column order', () => {
       task({ id: 'exec', title: 'Exec card', status: 'running', workspaceId: 'w1', executions: [openRun(100, 'session-exec')] }),
       task({ id: 't-next', title: 'Next card', status: 'running', workspaceId: 'w1', executions: [openRun(200)] }),
       // The card the user drops: still in a movable column, same lane.
-      task({ id: 't-drop', title: 'Drop card', status: 'todo', workspaceId: 'w1' }),
+      task({ id: 't-drop', title: 'Drop card', status: 'clarification', workspaceId: 'w1' }),
     ]
     const controller = fakeController(
       {
@@ -670,8 +670,8 @@ describe('TaskBoard multi-selection and group drag', () => {
   it('walks the board order across columns with Shift', async () => {
     const board = await render([
       task({ id: 't-a', title: 'A', status: 'backlog' }),
-      task({ id: 't-c', title: 'C', status: 'todo' }),
-      task({ id: 't-d', title: 'D', status: 'todo' }),
+      task({ id: 't-c', title: 'C', status: 'clarification' }),
+      task({ id: 't-d', title: 'D', status: 'clarification' }),
     ])
 
     await click(board.card('A'))
@@ -751,7 +751,7 @@ describe('TaskBoard multi-selection and group drag', () => {
       [
         task({ id: 't-a', title: 'A', status: 'backlog' }),
         task({ id: 't-b', title: 'B', status: 'backlog' }),
-        task({ id: 't-c', title: 'C', status: 'todo' }),
+        task({ id: 't-c', title: 'C', status: 'clarification' }),
       ],
       {
         moveTask: (id, status) => { singles.push({ id, status }) },
@@ -786,7 +786,7 @@ describe('TaskBoard multi-selection and group drag', () => {
     const board = await render(
       [
         task({ id: 't-a', title: 'A', status: 'backlog' }),
-        task({ id: 't-c', title: 'C', status: 'todo' }),
+        task({ id: 't-c', title: 'C', status: 'clarification' }),
       ],
       {
         moveTask: (id, status) => { singles.push({ id, status }) },
@@ -847,7 +847,7 @@ describe('TaskBoard multi-selection and group drag', () => {
   it('starts every dragged card when the group lands on the run column', async () => {
     const started: string[] = []
     const board = await render(
-      [task({ id: 't-a', title: 'A', status: 'todo' }), task({ id: 't-b', title: 'B', status: 'todo' })],
+      [task({ id: 't-a', title: 'A', status: 'clarification' }), task({ id: 't-b', title: 'B', status: 'clarification' })],
       { rerunTask: async (id) => { started.push(id) } },
     )
 
@@ -865,8 +865,8 @@ describe('TaskBoard multi-selection and group drag', () => {
     const board = await render(
       [
         task({ id: 't-a', title: 'A', status: 'backlog' }),
-        task({ id: 't-b', title: 'B', status: 'todo' }),
-        task({ id: 't-c', title: 'C', status: 'todo' }),
+        task({ id: 't-b', title: 'B', status: 'clarification' }),
+        task({ id: 't-c', title: 'C', status: 'clarification' }),
       ],
       { archiveTask: (id) => { archived.push(id); return true } },
     )
@@ -891,7 +891,7 @@ describe('TaskBoard multi-selection and group drag', () => {
     const board = await render(
       [
         task({ id: 't-run', title: 'Run', status: 'running' }),
-        task({ id: 't-todo', title: 'Todo', status: 'todo' }),
+        task({ id: 't-todo', title: 'Todo', status: 'clarification' }),
       ],
       { archiveTask: (id) => { archived.push(id); return true } },
     )
@@ -935,7 +935,7 @@ describe('TaskBoard multi-selection and group drag', () => {
       const board = await render([task({
         id: 't-a',
         title: 'A',
-        status: 'todo',
+        status: 'clarification',
         clarificationSessionId: 'session-clarify',
       })])
 
@@ -947,7 +947,7 @@ describe('TaskBoard multi-selection and group drag', () => {
       const board = await render([task({
         id: 't-a',
         title: 'A',
-        status: 'todo',
+        status: 'clarification',
         clarificationSessionId: 'session-clarify',
         executions: [{
           id: 'clarify-1', kind: 'clarify', sessionId: 'session-clarify',
@@ -957,7 +957,7 @@ describe('TaskBoard multi-selection and group drag', () => {
 
       const card = board.card('A')
       // The card stays in its column but reads like a running one.
-      expect(card.getAttribute('data-status')).toBe('todo')
+      expect(card.getAttribute('data-status')).toBe('clarification')
       expect(card.getAttribute('data-executing')).toBe('true')
       expect(card.textContent).toContain(zh['card.running'])
       expect(board.container.querySelector('a[data-dsh-part="card-session"]')?.getAttribute('href'))
@@ -971,7 +971,7 @@ describe('TaskBoard multi-selection and group drag', () => {
       const board = await render([task({
         id: 't-a',
         title: 'A',
-        status: 'todo',
+        status: 'clarification',
         executions: [{
           id: 'clarify-1', kind: 'clarify', sessionId: undefined,
           startedAt: 1, endedAt: undefined, result: undefined, error: undefined,
@@ -985,8 +985,8 @@ describe('TaskBoard multi-selection and group drag', () => {
       const started: string[] = []
       const board = await render(
         [
-          task({ id: 't-open', title: 'Open', status: 'todo' }),
-          task({ id: 't-clear', title: 'Clear', status: 'todo' }),
+          task({ id: 't-open', title: 'Open', status: 'clarification' }),
+          task({ id: 't-clear', title: 'Clear', status: 'clarification' }),
         ],
         { rerunTask: async (id) => { started.push(id) } },
       )
@@ -1005,7 +1005,7 @@ describe('TaskBoard multi-selection and group drag', () => {
     it('starts a card whose round already settled', async () => {
       const started: string[] = []
       const board = await render(
-        [task({ id: 't-a', title: 'A', status: 'todo', clarificationSessionId: 'session-clarify' })],
+        [task({ id: 't-a', title: 'A', status: 'clarification', clarificationSessionId: 'session-clarify' })],
         { rerunTask: async (id) => { started.push(id) } },
       )
 

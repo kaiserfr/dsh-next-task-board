@@ -20,7 +20,6 @@ export declare const zh: {
     'board.status': string;
     'board.status.backlog': string;
     'board.status.clarification': string;
-    'board.status.todo': string;
     'board.status.running': string;
     'board.status.ready_for_test': string;
     'board.status.done': string;
@@ -118,9 +117,6 @@ export declare const zh: {
     'detail.permissionPending': string;
     'detail.permissionConfirm': string;
     'detail.permissionConfirmed': string;
-    'detail.specPending': string;
-    'detail.specApprove': string;
-    'detail.specApproved': string;
     'detail.title': string;
     'detail.edit': string;
     'detail.editTags': string;
@@ -167,7 +163,6 @@ export declare const zh: {
     'delete.cancel': string;
     'status.move.backlog': string;
     'status.move.clarification': string;
-    'status.move.todo': string;
     'status.move.ready_for_test': string;
     'status.move.done': string;
     'exec.error.noWorkspace': string;

@@ -43,7 +43,7 @@ export interface ExecutionRecord {
     frozenBy?: string;
     /**
      * Whether this run was started to work off a rework: the card had been sent
-     * back from `ready_for_test`/`failed` to `todo` (see
+     * back from `ready_for_test`/`failed` to `clarification` (see
      * {@link TaskRecord.reworkAt}) and the human has not started a run since. The
      * correction itself was typed by the human into the card's own conversation,
      * so this mark only carries the two consequences the board owes that round:
@@ -56,8 +56,8 @@ export interface ExecutionRecord {
      * walks the card through the run column). `'clarify'` marks the card's
      * clarification run — a real execution (it holds the card's session, the board
      * shows Running/Queued and links it) that settles **without moving the card**:
-     * it still sits in `todo` so the human can pull it on to the run column, which
-     * continues the very same session. `'merge'` marks the automatic
+     * it still sits in `clarification` so the human can pull it on to the run
+     * column, which continues the very same session. `'merge'` marks the automatic
      * conflict-resolution run of a merge release: the base branch had moved on, the
      * Host replayed the card's feature branch onto it and left the conflict in the
      * worktree, so this run's whole job is to resolve it and finish the replay — it
@@ -95,7 +95,7 @@ export interface ScheduleRule {
 }
 /**
  * Git workflow state of a task on the board's feature-branch flow: the branch
- * opened when the card entered `todo`, the branch it was cut from (the merge
+ * opened when the card entered `clarification`, the branch it was cut from (the merge
  * target), and the worktree it lives in. Absent on cards whose workspace has
  * no git repository (the git integration is opt-in per workspace).
  */
@@ -377,7 +377,7 @@ export interface TaskRecord {
     reuseSession?: boolean;
     /**
      * Rework stamp: a human reviewed the card in `ready_for_test` (or the run
-     * landed in `failed`) and sent it back to `todo`. The correction is typed
+     * landed in `failed`) and sent it back to `clarification`. The correction is typed
      * into the card's own conversation — the board keeps no note of its own — so
      * the stamp is the record that the card went through a rework and when.
      *
@@ -409,9 +409,9 @@ export interface TaskRecord {
     tags?: TaskTag[];
     /**
      * Conversation the card's questions are settled in. Opened by the
-     * clarification run of the `backlog → todo` step; the card links to it, and
-     * the run that starts the work continues this conversation so the collected
-     * answers stay in context. Absent until that session exists.
+     * clarification run of the `backlog → clarification` step; the card links to
+     * it, and the run that starts the work continues this conversation so the
+     * collected answers stay in context. Absent until that session exists.
      */
     clarificationSessionId?: string;
     /**
@@ -420,14 +420,6 @@ export interface TaskRecord {
      * or handover change re-arms the gate by clearing it.
      */
     permissionConfirmedAt?: number;
-    /**
-     * Human release of the card's specification (ms epoch). Absent while the
-     * card still waits for its "Freigabe": the Host refuses to start an
-     * implementation run (`run`, `rerun`, cron) until the human pressed the
-     * approve action. A clarification round and a content edit re-arm the gate by
-     * clearing it — the approval belongs to the text that was released.
-     */
-    specApprovedAt?: number;
     /**
      * Git feature-branch state for the agentic-programming workflow; absent on
      * cards whose workspace is not a git worktree.
@@ -556,7 +548,7 @@ export declare const ALL_STATUSES: readonly TaskStatus[];
  * Statuses a task may be archived from: every status the ledger knows but
  * `running`, whose execution the runner still owns until it settles. A
  * settled-only gate made the duplicate-and-archive flow a silent no-op for
- * scheduled tasks, which return to `todo` after every successful run
+ * scheduled tasks, which return to `clarification` after every successful run
  * (issue #1447).
  */
 export declare const ARCHIVABLE_STATUSES: readonly TaskStatus[];
@@ -589,7 +581,7 @@ export declare function normalizeTargetId(value: string | undefined): string | u
 export declare function normalizeParseText(value: unknown): string | undefined;
 /**
  * Whether this move sends the card back for rework: out of the review column
- * (`ready_for_test`) or out of a failed run (`failed`) into `todo`. Every such
+ * (`ready_for_test`) or out of a failed run (`failed`) into `clarification`. Every such
  * move is stamped ({@link withReworkStamp}), no matter who fired it — the
  * human's drag/chip or the Host noticing a correction in the card's chat.
  * @param from - the column the card leaves.
@@ -650,10 +642,10 @@ export declare function withSchedule(task: TaskRecord, patch: Partial<ScheduleRu
  * running execution record. Returns the new task and the new execution.
  *
  * `kind: 'clarify'` opens the card's *clarification run* instead: the execution
- * is a real one (the WIP-free todo run — it starts without waiting for a lane
- * slot, and the board shows the card as Running and links the session), but the
- * card keeps its column — the clarification must not leave `todo`, because the
- * human pulls it on to the run column afterwards.
+ * is a real one (the WIP-free clarification run — it starts without waiting for
+ * a lane slot, and the board shows the card as Running and links the session),
+ * but the card keeps its column — the clarification must not leave
+ * `clarification`, because the human pulls it on to the run column afterwards.
  */
 export declare function startExecution(task: TaskRecord, now: number, executionId: string, initiatedBy?: string, kind?: 'clarify' | 'merge'): {
     task: TaskRecord;
@@ -671,7 +663,8 @@ export declare function startExecution(task: TaskRecord, now: number, executionI
  *
  * A clarification run is the exception: its outcome is recorded, but the card
  * keeps its column. Settling a chat must never park the card in
- * `ready_for_test`/`failed`; it waits in `todo` for the human to pull it on.
+ * `ready_for_test`/`failed`; it waits in `clarification` for the human to pull
+ * it on.
  */
 export declare function settleExecution(task: TaskRecord, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', now: number, error: string | undefined): TaskRecord;
 /** Whether the card's open run is paused (still `running`, but not worked on). */
@@ -690,14 +683,6 @@ export declare function openExecution(task: TaskRecord): ExecutionRecord | undef
  */
 export declare function hasOpenRun(task: TaskRecord): boolean;
 /**
- * Whether the card still needs the human's specification release. The gate
- * lives on the `run` action — drag onto the run column, the detail Run button
- * and cron all pass through it — so an unreleased card is never implemented.
- * A clarification run (`clarify`) is not gated: asking questions is exactly what
- * has to happen before the release.
- */
-export declare function requiresSpecApproval(task: Pick<TaskRecord, 'specApprovedAt'>): boolean;
-/**
  * Pause or resume the card's open run: stamp {@link TaskRecord.pausedAt} or
  * clear it. The status column is deliberately not touched — a paused card stays
  * in "In progress" so it can be resumed later. Pausing an already-paused card
@@ -710,9 +695,10 @@ export declare function withPause(task: TaskRecord, paused: boolean, now: number
  * sits in a runner-owned column with an open run but no session yet is only
  * waiting for a free WIP slot (queued) — the board marks "running now" and
  * "waiting" differently, so this predicate is the single answer to which is
- * which. A `todo` clarification run never waits for a slot, so it is only
- * session-less for the moment its launch takes. A paused card keeps its open run and its column, but it is neither
- * running now nor waiting for a slot: its session was stopped.
+ * which. A clarification run never waits for a slot, so it is only
+ * session-less for the moment its launch takes. A paused card keeps its open
+ * run and its column, but it is neither running now nor waiting for a slot: its
+ * session was stopped.
  */
 export declare function isTaskExecuting(task: TaskRecord): boolean;
 /**

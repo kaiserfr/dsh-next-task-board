@@ -167,25 +167,25 @@ describe('task-board group move action (move-many)', () => {
   it('accepts a batch and dedupes it', () => {
     const parsed = parseActionEnvelope({
       requestId: 'batch-a',
-      action: { kind: 'move-many', taskIds: ['a', 'b', 'a'], status: 'todo' },
+      action: { kind: 'move-many', taskIds: ['a', 'b', 'a'], status: 'clarification' },
     })
-    expect(parsed?.action).toEqual({ kind: 'move-many', taskIds: ['a', 'b'], status: 'todo' })
+    expect(parsed?.action).toEqual({ kind: 'move-many', taskIds: ['a', 'b'], status: 'clarification' })
   })
 
   it('rejects a batch with no cards, a blank id, a bad status, or extra keys', () => {
     const base = { requestId: 'batch-b' }
-    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: [], status: 'todo' } })).toBeUndefined()
-    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a', ''], status: 'todo' } })).toBeUndefined()
-    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: [1], status: 'todo' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: [], status: 'clarification' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a', ''], status: 'clarification' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: [1], status: 'clarification' } })).toBeUndefined()
     expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a'], status: 'nope' } })).toBeUndefined()
-    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a'], status: 'todo', extra: 1 } })).toBeUndefined()
-    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', status: 'todo' } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', taskIds: ['a'], status: 'clarification', extra: 1 } })).toBeUndefined()
+    expect(parseActionEnvelope({ ...base, action: { kind: 'move-many', status: 'clarification' } })).toBeUndefined()
   })
 
   it('caps the batch size', () => {
     const ids = Array.from({ length: MAX_BATCH_MOVE }, (_, index) => `t-${index}`)
-    expect(parseActionEnvelope({ requestId: 'batch-max', action: { kind: 'move-many', taskIds: ids, status: 'todo' } })?.action.kind).toBe('move-many')
-    expect(parseActionEnvelope({ requestId: 'batch-over', action: { kind: 'move-many', taskIds: [...ids, 'one-more'], status: 'todo' } })).toBeUndefined()
+    expect(parseActionEnvelope({ requestId: 'batch-max', action: { kind: 'move-many', taskIds: ids, status: 'clarification' } })?.action.kind).toBe('move-many')
+    expect(parseActionEnvelope({ requestId: 'batch-over', action: { kind: 'move-many', taskIds: [...ids, 'one-more'], status: 'clarification' } })).toBeUndefined()
   })
 })
 
@@ -214,7 +214,7 @@ describe('task-board pause/resume actions', () => {
       expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: ['a', ''] } })).toBeUndefined()
       expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: [1] } })).toBeUndefined()
       expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: [...ids, 'one-more'] } })).toBeUndefined()
-      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: ['a'], status: 'todo' } })).toBeUndefined()
+      expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: ['a'], status: 'clarification' } })).toBeUndefined()
       expect(parseActionEnvelope({ requestId: 'x', action: { kind, taskIds: ids } })?.action.kind).toBe(kind)
     }
   })

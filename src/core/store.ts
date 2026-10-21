@@ -93,9 +93,15 @@ export function isTaskRecord(value: unknown): value is TaskRecord {
   return isTaskRecordShape(value) && isTaskStatus(value.status)
 }
 
-/** Normalize an unknown persisted status back into the closed status union. */
+/**
+ * Normalize a persisted status back into the closed status union. Legacy rows
+ * from the board's former `todo` column migrate to `clarification`, whose role
+ * they took over; an unknown status from a future version lands in the neutral
+ * first column instead of dropping the row.
+ */
 function normalizeStatus(status: unknown): TaskStatus {
-  return isTaskStatus(status) ? status : 'todo'
+  if (status === 'todo') return 'clarification'
+  return isTaskStatus(status) ? status : 'backlog'
 }
 
 /**
@@ -305,9 +311,10 @@ function normalizeReview(value: unknown): TaskReview | undefined {
   }
   const tasks: TaskRecord[] = []
   for (const row of parsed) {
-    // Status is normalized (an unknown status from a future version lands in
-    // todo instead of dropping the row); the schedule is repaired field by
-    // field; every other field must be valid.
+    // Status is normalized (the retired `todo` column migrates to clarification
+    // and an unknown status from a future version lands in backlog instead of
+    // dropping the row); the schedule is repaired field by field; every other
+    // field must be valid.
     if (!isTaskRecordShape(row)) {
       console.warn('[dsh-task-board] dropping invalid task row from persisted ledger', row)
       continue
@@ -346,10 +353,9 @@ function normalizeReview(value: unknown): TaskReview | undefined {
     // persisted value clears the field instead of dropping the card row.
     task.parseText = normalizeParseText(row.parseText)
     task.permissionConfirmedAt = typeof row.permissionConfirmedAt === 'number' && Number.isFinite(row.permissionConfirmedAt) ? row.permissionConfirmedAt : undefined
-    // The specification release is repaired like the permission confirmation: a
-    // malformed stamp clears the release instead of dropping the card row, so a
-    // hand-edited ledger can never fake an approval.
-    task.specApprovedAt = typeof row.specApprovedAt === 'number' && Number.isFinite(row.specApprovedAt) ? row.specApprovedAt : undefined
+    // The retired specification-release stamp is dropped from legacy rows: the
+    // release gate no longer exists and no board state reads the old value.
+    delete (task as unknown as Record<string, unknown>).specApprovedAt
     // The pause stamp is repaired like the other runtime stamps: a malformed
     // persisted value clears the pause instead of dropping the card row.
     task.pausedAt = typeof row.pausedAt === 'number' && Number.isFinite(row.pausedAt) ? row.pausedAt : undefined

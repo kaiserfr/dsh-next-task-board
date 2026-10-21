@@ -44,7 +44,6 @@ function harness(now: number, workspaces: Record<string, string> = {}) {
       input: { title: id.toUpperCase(), description: '', prompt: `work ${id}`, ...(workspaces[id] === undefined ? {} : { workspaceId: workspaces[id] }) },
     })
     // Released: these cases measure the lane slots, not the release gate.
-    ledger.applyRequest(`approve-${id}`, { kind: 'approve-spec', taskId: id })
   }
   const service = new TaskBoardHostService({} as unknown as TypertGateway, {
     ledger,
@@ -153,8 +152,7 @@ describe('task-board WIP limit', () => {
     // other run of the lane.
     settleTask('b')
     await flush()
-    // The human closes the step and then pulls the card on to the run column.
-    service.apply('b-to-todo-2', { kind: 'move', taskId: 'b', status: 'todo' })
+    // The human pulls the card straight from clarification on to the run column.
     service.apply('b-to-running', { kind: 'move', taskId: 'b', status: 'running' })
     await flush()
     expect(started).toEqual(['a', 'b'])

@@ -3,9 +3,9 @@
  * `clarification` column and starts its run there — the run column's execution
  * (same queue, no WIP limit, same session link, pausable) whose prompt asks the
  * card's open questions first and stops. The agent asks them in the card's own
- * chat, the human answers there, the card is pulled on to `todo`, and the
- * go-ahead (the drag on to the run column or the Run button) continues that
- * very conversation with the implementation.
+ * chat, the human answers there, and the go-ahead (the drag on to the run
+ * column or the Run button) continues that very conversation with the
+ * implementation. There is no separate To do column in between.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -38,8 +38,6 @@ function seeded(): HostTaskLedger {
     id: 'a',
     input: { title: 'A', description: 'the card', prompt: 'implement it' },
   })
-  // Released: these cases are about the clarification round and the go-ahead.
-  ledger.applyRequest('seed-approve', { kind: 'approve-spec', taskId: 'a' })
   return ledger
 }
 
@@ -74,16 +72,16 @@ describe('a clarification execution never moves the card', () => {
 })
 
 describe('the clarification step starts the card own run', () => {
-  it('has no transition from backlog or the clarification column to the run column', () => {
+  it('refuses a drag from backlog to the run column but allows it from clarification', () => {
     const machine = new StateMachine(DEFAULT_STATE_MACHINE)
     expect(machine.canTransition('backlog', 'running')).toBe(false)
-    expect(machine.canTransition('clarification', 'running')).toBe(false)
+    expect(machine.canTransition('clarification', 'running')).toBe(true)
     const ledger = seeded()
     expect(() => ledger.applyRequest('straight-to-running', { kind: 'move', taskId: 'a', status: 'running' }))
       .toThrow('invalid state transition: backlog → running')
     ledger.applyRequest('to-clarify', { kind: 'move', taskId: 'a', status: 'clarification' })
-    expect(() => ledger.applyRequest('clarify-to-running', { kind: 'move', taskId: 'a', status: 'running' }))
-      .toThrow('invalid state transition: clarification → running')
+    const opened = ledger.applyRequest('clarify-to-running', { kind: 'move', taskId: 'a', status: 'running' })
+    expect(opened.run?.task.status).toBe('running')
     ledger.dispose()
   })
 
@@ -98,10 +96,6 @@ describe('the clarification step starts the card own run', () => {
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
     expect(ledger.state().tasks[0].status).toBe('clarification')
     expect(ledger.runtimeView().openExecutions[0]?.taskId).toBe('a')
-    // The human closes the step: the answers are settled, the card goes on.
-    const on = ledger.applyRequest('to-todo', { kind: 'move', taskId: 'a', status: 'todo' })
-    expect(on.state.tasks[0].status).toBe('todo')
-    expect(on.clarification).toBeUndefined()
     ledger.dispose()
   })
 
@@ -129,13 +123,7 @@ describe('the clarification step starts the card own run', () => {
     expect(again.clarification?.execution.kind).toBe('clarify')
     expect(again.clarification?.task.clarificationSessionId).toBe('session-clarify')
     expect(again.clarification?.task.executions).toHaveLength(2)
-    // The questions may also resurface after the step was closed: the move out
-    // of `todo` re-enters the very same conversation.
     ledger.settle('a', again.clarification!.execution.id, 'succeeded')
-    ledger.applyRequest('on-to-todo', { kind: 'move', taskId: 'a', status: 'todo' })
-    const reopened = ledger.applyRequest('again-from-todo', { kind: 'move', taskId: 'a', status: 'clarification' })
-    expect(reopened.clarification?.task.clarificationSessionId).toBe('session-clarify')
-    expect(reopened.clarification?.task.executions).toHaveLength(3)
     ledger.dispose()
   })
 
@@ -143,8 +131,7 @@ describe('the clarification step starts the card own run', () => {
     const ledger = seeded()
     ledger.applyRequest('to-clarify', { kind: 'move', taskId: 'a', status: 'clarification' })
     // The chat has not settled yet; the human may already pull the card on to
-    // `todo` and from there on to the run column.
-    ledger.applyRequest('to-todo', { kind: 'move', taskId: 'a', status: 'todo' })
+    // the run column.
     const opened = ledger.applyRequest('to-running', { kind: 'move', taskId: 'a', status: 'running' })
     expect(opened.run?.task.status).toBe('running')
     // The go-ahead closes the round: a card never holds two open executions

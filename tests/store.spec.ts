@@ -142,15 +142,18 @@ describe('parseLedger', () => {
     const ledger = [
       valid,
       { id: 't-2' },                       // missing fields
-      { ...valid, id: 't-3', status: 'weird' }, // unknown status → normalized to todo
+      { ...valid, id: 't-3', status: 'weird' }, // unknown status → normalized to backlog
+      { ...valid, id: 't-4', status: 'todo' },  // retired column → migrated to clarification
       null,
       'nope',
     ]
     const parsed = parseLedger(JSON.stringify(ledger))
-    expect(parsed).toHaveLength(2)
+    expect(parsed).toHaveLength(3)
     expect(parsed[0].id).toBe('t-1')
     expect(parsed[1].id).toBe('t-3')
-    expect(parsed[1].status).toBe('todo')
+    expect(parsed[1].status).toBe('backlog')
+    expect(parsed[2].id).toBe('t-4')
+    expect(parsed[2].status).toBe('clarification')
   })
 
   it('loads legacy rows without execution targets and keeps their pins absent', () => {

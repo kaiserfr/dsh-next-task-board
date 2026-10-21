@@ -143,6 +143,36 @@ describe('HostTaskLedger', () => {
     expect(restarted.state().scheduler.error).toContain('quarantined')
   })
 
+  it('migrates a retired todo row to clarification and drops the old spec stamp', () => {
+    const root = tempRoot()
+    const legacy = { ...task('legacy-todo'), status: 'todo', specApprovedAt: NOW }
+    writeFileSync(join(root, 'ledger-v2.json'), JSON.stringify({
+      schemaVersion: 3,
+      revision: 1,
+      tasks: [legacy],
+      scheduler: { timeZone: 'UTC', ledgerId: 'legacy' },
+    }))
+    const ledger = new HostTaskLedger(root, () => NOW)
+    const loaded = ledger.state().tasks[0]
+    expect(loaded.status).toBe('clarification')
+    expect(loaded).not.toHaveProperty('specApprovedAt')
+    ledger.dispose()
+  })
+
+  it('migrates a v2 document with a todo row to clarification too', () => {
+    const root = tempRoot()
+    const legacy = { ...task('legacy-v2'), status: 'todo' }
+    writeFileSync(join(root, 'ledger-v2.json'), JSON.stringify({
+      schemaVersion: 2,
+      revision: 1,
+      tasks: [legacy],
+      scheduler: { timeZone: 'UTC', ledgerId: 'legacy-v2' },
+    }))
+    const ledger = new HostTaskLedger(root, () => NOW)
+    expect(ledger.state().tasks[0].status).toBe('clarification')
+    ledger.dispose()
+  })
+
   it('opens one due execution and rolls a running task without queuing another', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
@@ -150,8 +180,6 @@ describe('HostTaskLedger', () => {
       enabled: true, cron: '* * * * *', nextRunAt: NOW, lastTriggeredAt: undefined,
     }, NOW)
     ledger.applyRequest('import', { kind: 'import', sourceId: 'source', tasks: [due] })
-    // The specification release gates every run, cron included.
-    ledger.applyRequest('approve-scheduled', { kind: 'approve-spec', taskId: 'scheduled' })
     const opened = ledger.openScheduled('scheduled', NOW + 60_000, NOW)
     expect(opened).toBeDefined()
     expect(ledger.openScheduled('scheduled', NOW + 120_000, NOW + 60_000)).toBeUndefined()
@@ -173,7 +201,7 @@ describe('HostTaskLedger', () => {
     const running = startExecution({ ...task('running'), executions: history }, NOW - 1_000, 'open').task
     const awaitingSession = {
       ...startExecution(task('awaiting-session'), NOW - 500, 'awaiting-session-open').task,
-      status: 'todo' as const,
+      status: 'clarification' as const,
     }
     const archivedSchedule = {
       ...withSchedule(task('archived-schedule'), {
@@ -232,7 +260,6 @@ describe('HostTaskLedger', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
     ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'task-a' })
     ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' })
     ledger.dispose()
     const restarted = new HostTaskLedger(root, () => NOW + 1000)
@@ -263,7 +290,6 @@ describe('HostTaskLedger', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
     ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'task-a' })
     ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' })
     ledger.setScheduler({ lastTickAt: NOW })
     ledger.dispose()
@@ -472,9 +498,8 @@ describe('HostTaskLedger', () => {
   it('rejects moving or deleting a task while any execution remains open', () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'task-a' })
     ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' })
-    expect(() => ledger.applyRequest('move', { kind: 'move', taskId: 'task-a', status: 'todo' })).toThrow('cannot be moved')
+    expect(() => ledger.applyRequest('move', { kind: 'move', taskId: 'task-a', status: 'clarification' })).toThrow('cannot be moved')
     expect(() => ledger.applyRequest('delete', { kind: 'delete', taskId: 'task-a' })).toThrow('cannot be deleted')
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
   })
@@ -511,7 +536,7 @@ describe('HostTaskLedger', () => {
       kind: 'update', taskId: 'archived', patch: { title: 'renamed' },
     })).toThrow('archived task is read-only')
     expect(() => ledger.applyRequest('move-archived', {
-      kind: 'move', taskId: 'archived', status: 'todo',
+      kind: 'move', taskId: 'archived', status: 'clarification',
     })).toThrow('archived task is read-only')
     expect(() => ledger.applyRequest('schedule-archived', {
       kind: 'set-schedule', taskId: 'archived', patch: { enabled: true, cron: '* * * * *' },
@@ -534,16 +559,12 @@ describe('HostTaskLedger', () => {
 
     expect(() => ledger.applyRequest('update-blank-title', { kind: 'update', taskId: 'task-a', patch: { title: '   ' } })).toThrow('title is required')
 
-    // The content edit above re-armed the release gate, so the release has to
-    // follow the text it releases.
-    expect(() => ledger.applyRequest('run-unreleased', { kind: 'run', taskId: 'task-a' })).toThrow(/spec-approval-required/)
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'task-a' })
     const opened = ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' })
     const executionId = opened.state.tasks[0].executions[0].id
-    expect(() => ledger.applyRequest('update-running', { kind: 'update', taskId: 'task-a', patch: { prompt: 'live' } })).toThrow('task content is locked outside backlog and todo')
+    expect(() => ledger.applyRequest('update-running', { kind: 'update', taskId: 'task-a', patch: { prompt: 'live' } })).toThrow('task content is locked outside backlog and clarification')
 
     ledger.settle('task-a', executionId, 'failed', 'boom')
-    expect(() => ledger.applyRequest('update-done', { kind: 'update', taskId: 'task-a', patch: { title: 'C' } })).toThrow('task content is locked outside backlog and todo')
+    expect(() => ledger.applyRequest('update-done', { kind: 'update', taskId: 'task-a', patch: { title: 'C' } })).toThrow('task content is locked outside backlog and clarification')
 
     // Execution targets stay editable on a locked card; content stays fixed.
     const targets = ledger.applyRequest('update-targets', { kind: 'update', taskId: 'task-a', patch: { workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only' } })
@@ -556,10 +577,9 @@ describe('HostTaskLedger', () => {
   it('lets a card settled back into a waiting column be edited again, parse source included', () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('create', { kind: 'create', id: 'task-b', input: { title: 'A', description: 'd', prompt: 'p' } })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'task-b' })
     const opened = ledger.applyRequest('run', { kind: 'run', taskId: 'task-b' })
     ledger.settle('task-b', opened.state.tasks[0].executions[0].id, 'cancelled')
-    expect(ledger.state().tasks[0].status).toBe('todo')
+    expect(ledger.state().tasks[0].status).toBe('clarification')
 
     // The gate follows the status, not the execution history: an earlier,
     // cancelled attempt no longer locks the card for good.
@@ -773,18 +793,16 @@ describe('ledger schema v3 migration', () => {
 describe('HostTaskLedger state machine', () => {
   const machine = {
     initial: 'backlog',
-    states: [{ status: 'backlog' }, { status: 'todo' }, { status: 'done' }],
+    states: [{ status: 'backlog' }, { status: 'clarification' }, { status: 'done' }],
     transitions: [
-      { from: 'backlog', to: 'todo', actions: ['run'] },
-      { from: 'todo', to: 'done', actions: [{ kind: 'stamp', field: 'doneAt' }] },
+      { from: 'backlog', to: 'clarification', actions: ['run'] },
+      { from: 'clarification', to: 'done', actions: [{ kind: 'stamp', field: 'doneAt' }] },
     ],
   }
 
   function seeded(extra: ConstructorParameters<typeof HostTaskLedger>[2] = {}): HostTaskLedger {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW, extra)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: '' } })
-    // Released, because these tests are about the machine, not the release gate.
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     return ledger
   }
 
@@ -798,9 +816,9 @@ describe('HostTaskLedger state machine', () => {
 
   it('opens an execution when the transition carries the run action', () => {
     const ledger = seeded({ stateMachine: machine })
-    const result = ledger.applyRequest('backlog-todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    const result = ledger.applyRequest('backlog-clarification', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(result.run?.execution.id).toBe(result.state.tasks[0].executions.at(-1)?.id)
-    expect(result.state.tasks[0].status).toBe('todo')
+    expect(result.state.tasks[0].status).toBe('clarification')
     expect(result.state.tasks[0].executions).toHaveLength(1)
     ledger.dispose()
   })
@@ -809,32 +827,29 @@ describe('HostTaskLedger state machine', () => {
     const ledger = seeded({ stateMachine: machine })
     expect(ledger.setStateMachine({ states: [] })).toEqual(['stateMachine.states: expected a non-empty array'])
     // `resolveStateMachine` hands back the built-in machine for a refused
-    // config, so the custom `backlog → todo` is gone and the built-in moves
-    // apply instead.
-    expect(() => ledger.applyRequest('custom-run', { kind: 'move', taskId: 'card', status: 'todo' }))
-      .toThrow('invalid state transition: backlog → todo')
-    expect(ledger.applyRequest('built-in-clarify', { kind: 'move', taskId: 'card', status: 'clarification' }).state.tasks[0].status)
-      .toBe('clarification')
+    // config, so the custom `backlog → clarification` run is gone and the
+    // built-in clarification step (open branch + clarify) applies instead.
+    const moved = ledger.applyRequest('built-in-clarify', { kind: 'move', taskId: 'card', status: 'clarification' })
+    expect(moved.state.tasks[0].status).toBe('clarification')
+    expect(moved.state.tasks[0].executions[0].kind).toBe('clarify')
+    expect(moved.run).toBeUndefined()
     ledger.dispose()
   })
 })
 
-describe('HostTaskLedger rework (ready_for_test/failed → todo is stamped)', () => {
+describe('HostTaskLedger rework (ready_for_test/failed → clarification is stamped)', () => {
   /** A card parked in `ready_for_test`, as a finished run leaves it. */
   function parked(): HostTaskLedger {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'open the page' } })
-    // The card's specification is released: the tests below exercise the return
-    // to `todo` and the restart of a released card, not the gate itself.
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
     return ledger
   }
 
-  it('sends the card back to todo and stamps the return', () => {
+  it('sends the card back to clarification and stamps the return', () => {
     const ledger = parked()
-    const result = ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'todo' })
-    expect(result.state.tasks[0].status).toBe('todo')
+    const result = ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
+    expect(result.state.tasks[0].status).toBe('clarification')
     expect(result.state.tasks[0].reworkAt).toBe(NOW)
     expect(result.state.tasks[0].reworkCount).toBe(1)
     // A rework never runs: the human decides when the agent works again, and
@@ -847,16 +862,16 @@ describe('HostTaskLedger rework (ready_for_test/failed → todo is stamped)', ()
   it('stamps a return out of the failed column too, and counts every round', () => {
     const ledger = parked()
     ledger.applyRequest('fail', { kind: 'move', taskId: 'card', status: 'failed' })
-    expect(ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' }).state.tasks[0].reworkCount).toBe(1)
+    expect(ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' }).state.tasks[0].reworkCount).toBe(1)
     ledger.applyRequest('park-again', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
-    const second = ledger.applyRequest('back-again', { kind: 'move', taskId: 'card', status: 'todo' })
+    const second = ledger.applyRequest('back-again', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(second.state.tasks[0].reworkCount).toBe(2)
     ledger.dispose()
   })
 
   it('does not stamp a move that is not a send-back', () => {
     const ledger = parked()
-    // Review → done is an acceptance, and todo → backlog is a plain move.
+    // Review → done is an acceptance, and clarification → backlog is a plain move.
     expect(ledger.applyRequest('accept', { kind: 'move', taskId: 'card', status: 'done' }).state.tasks[0].reworkAt).toBeUndefined()
     ledger.applyRequest('backlog', { kind: 'move', taskId: 'card', status: 'backlog' })
     expect(ledger.state().tasks[0].reworkAt).toBeUndefined()
@@ -869,10 +884,9 @@ describe('HostTaskLedger rework (ready_for_test/failed → todo is stamped)', ()
     let clock = NOW
     const ledger = new HostTaskLedger(tempRoot(), () => clock)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'open the page' } })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
     clock += 10
-    ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
     clock += 10
     const started = ledger.applyRequest('run', { kind: 'run', taskId: 'card' })
     expect(started.run?.execution.rework).toBe(true)
@@ -888,12 +902,12 @@ describe('HostTaskLedger rework (ready_for_test/failed → todo is stamped)', ()
 
   it('stamps a batch return and refuses the moves the machine does not declare', () => {
     const ledger = parked()
-    ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['card'], status: 'todo' })
+    ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['card'], status: 'clarification' })
     expect(ledger.state().tasks[0].reworkAt).toBe(NOW)
-    // `todo → todo` is not a transition, so a card already parked there cannot
+    // `clarification → clarification` is not a transition, so a card already parked there cannot
     // be sent back again (and stays unstamped).
-    expect(() => ledger.applyRequest('not-parked', { kind: 'move', taskId: 'card', status: 'todo' }))
-      .toThrow('invalid state transition: todo → todo')
+    expect(() => ledger.applyRequest('not-parked', { kind: 'move', taskId: 'card', status: 'clarification' }))
+      .toThrow('invalid state transition: clarification → clarification')
     expect(ledger.state().tasks[0].reworkCount).toBe(1)
     ledger.dispose()
   })
@@ -917,13 +931,13 @@ describe('HostTaskLedger rework (ready_for_test/failed → todo is stamped)', ()
   it('refuses a return while an execution is open and on an archived card', () => {
     const ledger = parked()
     ledger.applyRequest('run', { kind: 'run', taskId: 'card' })
-    expect(() => ledger.applyRequest('running', { kind: 'move', taskId: 'card', status: 'todo' }))
+    expect(() => ledger.applyRequest('running', { kind: 'move', taskId: 'card', status: 'clarification' }))
       .toThrow('running task cannot be moved')
     ledger.dispose()
 
     const archived = parked()
     archived.applyRequest('archive', { kind: 'archive', taskId: 'card' })
-    expect(() => archived.applyRequest('archived', { kind: 'move', taskId: 'card', status: 'todo' }))
+    expect(() => archived.applyRequest('archived', { kind: 'move', taskId: 'card', status: 'clarification' }))
       .toThrow('archived task is read-only')
     archived.dispose()
   })
@@ -935,8 +949,7 @@ describe('HostTaskLedger group move (move-many)', () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW, extra)
     for (const id of ids) {
       ledger.applyRequest(`create-${id}`, { kind: 'create', id, input: { title: id, description: '', prompt: '' } })
-      ledger.applyRequest(`approve-${id}`, { kind: 'approve-spec', taskId: id })
-    }
+      }
     return ledger
   }
 
@@ -977,39 +990,39 @@ describe('HostTaskLedger group move (move-many)', () => {
   })
 
   it('rejects the whole batch when one card has no such transition', () => {
-    // A machine that only lists backlog → todo: the todo card in the batch has
-    // no transition at all, so the backlog card must not move either.
+    // A machine that only lists backlog → clarification: the clarification card
+    // in the batch has no transition at all, so the backlog card must not move
+    // either.
     const ledger = new HostTaskLedger(tempRoot(), () => NOW, {
       stateMachine: {
         initial: 'backlog',
-        states: [{ status: 'backlog' }, { status: 'todo' }, { status: 'done' }],
-        transitions: [{ from: 'backlog', to: 'todo' }],
+        states: [{ status: 'backlog' }, { status: 'clarification' }, { status: 'done' }],
+        transitions: [{ from: 'backlog', to: 'clarification' }],
       },
     })
     ledger.applyRequest('import', {
       kind: 'import',
       sourceId: 'seed',
-      tasks: [{ ...task('x'), status: 'todo' }, task('y')],
+      tasks: [{ ...task('x'), status: 'clarification' }, task('y')],
     })
-    expect(() => ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['y', 'x'], status: 'todo' }))
-      .toThrow('invalid state transition: todo → todo')
+    expect(() => ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['y', 'x'], status: 'clarification' }))
+      .toThrow('invalid state transition: clarification → clarification')
     expect(ledger.state().tasks.map(entry => [entry.id, entry.status]))
-      .toEqual([['x', 'todo'], ['y', 'backlog']])
+      .toEqual([['x', 'clarification'], ['y', 'backlog']])
     ledger.dispose()
   })
 
   it('refuses a batch whose transition opens an execution', () => {
     const ledger = seeded(['a'])
-    // The run column is only reachable from `todo` (a backlog card has no such
-    // transition), and the clarification column itself may not be a batch
-    // target either: a batch would leave the card there without its round.
+    // The clarification column itself may not be a batch target: a batch would
+    // leave the card there without its round. The run column is a batch target
+    // only on paper — its transition opens an execution.
     expect(() => ledger.applyRequest('batch-clarify', { kind: 'move-many', taskIds: ['a'], status: 'clarification' }))
       .toThrow('batch move cannot start the clarification round')
     ledger.applyRequest('to-clarify', { kind: 'move', taskId: 'a', status: 'clarification' })
-    ledger.applyRequest('to-todo', { kind: 'move', taskId: 'a', status: 'todo' })
     expect(() => ledger.applyRequest('batch-run', { kind: 'move-many', taskIds: ['a'], status: 'running' }))
       .toThrow('batch move cannot start executions')
-    expect(ledger.state().tasks[0].status).toBe('todo')
+    expect(ledger.state().tasks[0].status).toBe('clarification')
     // Only the clarification step's own execution exists: the refused batches
     // added none.
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
@@ -1034,7 +1047,6 @@ describe('HostTaskLedger pause/resume of open runs', () => {
   function running(extra: ConstructorParameters<typeof HostTaskLedger>[2] = {}): HostTaskLedger {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW, extra)
     ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
-    ledger.applyRequest('approve-a', { kind: 'approve-spec', taskId: 'a' })
     const opened = ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
     ledger.attachSession('a', opened.run!.execution.id, 'session-a')
     return ledger
@@ -1093,7 +1105,6 @@ describe('HostTaskLedger pause/resume of open runs', () => {
     // execution but no session attached.
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
-    ledger.applyRequest('approve-a', { kind: 'approve-spec', taskId: 'a' })
     ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
     const result = ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })
     expect(result.paused).toEqual([{ taskId: 'a', sessionId: undefined }])
@@ -1108,7 +1119,7 @@ describe('HostTaskLedger pause/resume of open runs', () => {
     expect(ledger.applyRequest('pause-again', { kind: 'pause', taskIds: ['a', 'nope'] }).paused).toBeUndefined()
     expect(() => ledger.applyRequest('run-a-again', { kind: 'run', taskId: 'a' })).toThrow('already running')
     expect(() => ledger.applyRequest('rerun-a', { kind: 'rerun', taskId: 'a' })).toThrow('already running')
-    expect(() => ledger.applyRequest('move-a', { kind: 'move', taskId: 'a', status: 'todo' })).toThrow('running task cannot be moved')
+    expect(() => ledger.applyRequest('move-a', { kind: 'move', taskId: 'a', status: 'clarification' })).toThrow('running task cannot be moved')
     ledger.dispose()
   })
 
@@ -1126,7 +1137,6 @@ describe('HostTaskLedger pause/resume of open runs', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
     ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
-    ledger.applyRequest('approve-a', { kind: 'approve-spec', taskId: 'a' })
     // A queued run (no session) is what a restart would otherwise cancel.
     ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
     ledger.applyRequest('pause-a', { kind: 'pause', taskIds: ['a'] })

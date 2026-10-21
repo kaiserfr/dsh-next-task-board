@@ -18,7 +18,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 
 | Nr. | Art | Änderung |
 | --- | --- | --- |
-| 1 | **Mehr können** | Host-erzwungenes WIP-Limit **je Workspace/Lane** `maxConcurrentRuns` (Default `1`) mit FIFO-Queue — gilt für **Implementierungsläufe** („In progress", Cron); Klärungsläufe in „To do" sind WIP-frei (siehe 14 und 17) |
+| 1 | **Mehr können** | Host-erzwungenes WIP-Limit **je Workspace/Lane** `maxConcurrentRuns` (Default `1`) mit FIFO-Queue — gilt für **Implementierungsläufe** („In progress", Cron); Klärungsläufe in „Klärung" sind WIP-frei (siehe 14 und 17) |
 | 2 | Datenschutz | Installations-Heartbeat an `dsh-market.com` entfernt |
 | 3 | Paketierung | Eigenständiges Repo statt Monorepo (Build-Preset vendored in `build/`) |
 | 4 | **Mehr können** | Karte auf „In Arbeit" ziehen startet den Task (Host-Aktion `rerun`) |
@@ -29,24 +29,25 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 9 | **Mehr können** | Läuft-jetzt-Karte unübersehbar markiert (Rahmen, Warn-Hintergrund, Ring, Abzeichen); WIP-Spalte als Queue sortiert (laufende Karte oben, wartende in Ankunftsreihenfolge) |
 | 10 | **Mehr können** | Direkter Sprung von der Karte in die Session: Link in der Karten-Ecke, für aktive und inaktive Sessions; `#session=<id>`-Deep-Link (neuer Tab / kopierte URL), Roster-Refresh vor dem Retry |
 | 11 | **Mehr können** | Mehrfachauswahl und Gruppen-Verschieben: Karten per Klick, Ctrl/Cmd-Klick und Shift-Bereich markieren (Doppelklick öffnet weiterhin das Detail), eine markierte Karte ziehen bewegt die ganze Auswahl als **eine** atomare Host-Aktion `move-many` |
-| 12 | **Mehr können** | Korrektur nach Test: Karte von „Ready for test" zurück nach „To do" mit Anmerkung; die Anmerkung geht als **eigene neue Nachricht** in die vorherige Session (der ursprüngliche Prompt bleibt unverändert) |
-| 13 | **Mehr können** | Inhalte bleiben editierbar, solange die Karte in „Backlog"/„To do" wartet — auch nach einem früheren Lauf; der Text der Box „Parse with AI" liegt als `parseText` an der Karte und wird beim Bearbeiten wiederverwendet |
-| 14 | **Mehr können** | Klärungsschritt vor der Implementierung *(seit 23 in der eigenen Spalte „Klärung“ statt in Todo)*: `backlog → clarification` startet für **jede** Karte ihren Lauf (Aktion `clarify`) — dieselbe Execution wie in der In-Progress-Spalte (gleiche Start-Queue, aber **WIP-frei**: startet sofort statt „Queued", pausierbar), nur der Prompt ist der Karten-Prompt plus Klärungsblock („Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts." … „Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".") samt System-Prompt-Stoppregel, die in jedem Turn gilt; **der Agent stellt seine offenen Fragen im Chat der Karte**, der Nutzer antwortet dort (kein Fragenfeld, kein `openQuestions`/`questionsResolvedAt`); die Karte bleibt in Todo, das Ziehen nach In Progress schließt die Runde und setzt **dieselbe Session** mit „Bitte jetzt implementieren." fort, direktes Ziehen Backlog → In Progress bleibt unmöglich |
+| 12 | **Mehr können** | Korrektur nach Test: Karte von „Ready for test" zurück nach „Klärung" mit Anmerkung; die Anmerkung geht als **eigene neue Nachricht** in die vorherige Session (der ursprüngliche Prompt bleibt unverändert) |
+| 13 | **Mehr können** | Inhalte bleiben editierbar, solange die Karte in „Backlog"/„Klärung" wartet — auch nach einem früheren Lauf; der Text der Box „Parse with AI" liegt als `parseText` an der Karte und wird beim Bearbeiten wiederverwendet |
+| 14 | **Mehr können** | Klärungsschritt vor der Implementierung *(seit 23 in der eigenen Spalte „Klärung“ statt in Todo)*: `backlog → clarification` startet für **jede** Karte ihren Lauf (Aktion `clarify`) — dieselbe Execution wie in der In-Progress-Spalte (gleiche Start-Queue, aber **WIP-frei**: startet sofort statt „Queued", pausierbar), nur der Prompt ist der Karten-Prompt plus Klärungsblock („Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts." … „Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".") samt System-Prompt-Stoppregel, die in jedem Turn gilt; **der Agent stellt seine offenen Fragen im Chat der Karte**, der Nutzer antwortet dort (kein Fragenfeld, kein `openQuestions`/`questionsResolvedAt`); die Karte bleibt in Klärung, das Ziehen nach In Progress schließt die Runde und setzt **dieselbe Session** mit „Bitte jetzt implementieren." fort, direktes Ziehen Backlog → In Progress bleibt unmöglich |
 | 15 | **Mehr können** | Pausieren/Fortsetzen laufender Arbeit: ein Klick pausiert **alle** Karten in „In progress“ (Host-Aktion `pause`, stoppt je Lauf die Session), Karten bleiben in ihrer Spalte (`pausedAt`, Lauf bleibt offen), Pause-/Play-Symbolik am Kopf-Button, an jeder Karte und am Ausführungs-Knopf im Detail; Fortsetzen (`resume`) schreibt „Weitermachen“ in dieselbe Session |
 | 16 | **Mehr können** | Fertig-Meldung des Laufs, Session-Ende entscheidet: der Agent beendet seine letzte Antwort mit einer eigenen Zeile `FERTIG: <Zusammenfassung>` (Bericht für den Menschen im Chat); die Karte wandert erst nach „Ready for test", wenn die Session des Laufs **tatsächlich beendet** ist — eine weiter als laufend geführte Session blockiert den Wechsel, unabhängig von der Meldung |
 | 17 | **Mehr können** | *(durch 18 abgelöst)* WIP-Platz nur für **wirklich arbeitende** Läufe: eine offene Ausführung, deren Session der letzte Roster-Poll als untätig sah, belegte keinen Platz mehr — der Roster kennt aber nur „läuft gerade ein Turn?", nicht „ist der Lauf fertig?" |
-| 18 | **Mehr können** | **WIP 1 strikt je Workspace/Lane**: der Platz gehört jeder offenen Implementierungs-Ausführung **mit angehängter Session**, von der Session-Zuweisung bis zum `settle()` (Erfolg erst nach dem Ende der Session) oder bis zur Pause — der Roster gibt ihn **nicht** mehr frei. Damit kann nie eine zweite Implementierungs-Session derselben Workspace im selben Worktree arbeiten; wartende Karten bleiben in „In progress" und tragen ein Warte-Abzeichen samt Blocker und Workspace, der Drop auf die Laufspalte meldet den Grund einmalig. Todo und Ready for Test bleiben ohne Limit |
+| 18 | **Mehr können** | **WIP 1 strikt je Workspace/Lane**: der Platz gehört jeder offenen Implementierungs-Ausführung **mit angehängter Session**, von der Session-Zuweisung bis zum `settle()` (Erfolg erst nach dem Ende der Session) oder bis zur Pause — der Roster gibt ihn **nicht** mehr frei. Damit kann nie eine zweite Implementierungs-Session derselben Workspace im selben Worktree arbeiten; wartende Karten bleiben in „In progress" und tragen ein Warte-Abzeichen samt Blocker und Workspace, der Drop auf die Laufspalte meldet den Grund einmalig. Klärung und Ready for Test bleiben ohne Limit |
 | 19 | **Mehr können** | Kein stiller Verlust von Formular-Eingaben: Klick neben das Popup, Escape und „Cancel" schließen es, die Eingaben bleiben aber als **Entwurf** im Board-Controller und kommen beim nächsten Öffnen zurück (eigener Entwurf je Formular/Karte, Hinweis mit „Entwurf verwerfen", Punkt am „+ New task"-Knopf); nach dem Anlegen/Speichern ist der Entwurf verbraucht |
 | 20 | **Mehr können** | **Wartende Frage auf der Karte**: hält die Konversation einer Karte eine Frage, die der Agent gestellt hat und auf die er wartet (blockierender `ask_user_question`-Aufruf ohne Ergebnis, oder ein Turn, den der Agent mit eigener Nachricht beendet hat, während die Session stillsteht), trägt die Karte ein Fragezeichen in der linken oberen Ecke; ein Klick springt über denselben `#session=<id>`-Deep-Link direkt in die Session mit der Frage. Der Host liest das je Poll aus der Konversation (`awaitingAnswerWatch` + `runner.awaitingAnswer`, zusätzlich die `userQuestions`-Projektion für das timed-Schema) und schickt `awaitingAnswer: { taskId → sessionId }` im Snapshot und im SSE-Frame — nie ins Ledger. Die Markierung erscheint mit der Frage und verschwindet mit der Antwort; ein fehlgeschlagener Read hält das letzte Urteil, eine unbekannte Session-Liste ändert nichts |
 | 21 | **Mehr können** | **Freigabe an den geprüften Commit gebunden (Merge-Gate)**: das Parken in „Ready for test" stempelt den Branch-HEAD als `TaskGit.reviewedCommit`; `git.mergeBranch` (`ready_for_test → done`) merged nur noch exakt diesen Stand und verweigert fail-closed, wenn der Worktree schmutzig ist, der Branch weitergewandert ist oder der Stempel fehlt — der Sicherheitsnetz-Commit beim Mergen ist entfernt, die Karte bleibt in der Review-Spalte. Erneutes Parken bindet die Freigabe an den neuen Stand |
-| 22 | **Mehr können** | **Spec-Freigabe-Gate vor jedem Implementierungslauf**: `specApprovedAt` wird ausschließlich von der Host-Aktion `approve-spec` gesetzt (Knopf „Spezifikation freigeben" in der Kartendetailansicht). Jeder `run`-Weg prüft sie serverseitig — der Zug auf die Laufspalte, der Ausführen-Knopf und `rerun` werden mit `spec-approval-required` abgelehnt, Cron überspringt die Karte und rollt den nächsten Termin; der Klärungslauf (`clarify`) ist nicht betroffen. Eine Inhaltsänderung (Titel/Beschreibung/Prompt/Parse-Text) entwaffnet die Freigabe wieder, ebenso ein Import |
-| 23 | **Mehr können** | **Eigene Klärungsspalte**: `backlog → clarification` (Aktion `clarify`) startet den Klärungslauf in der neuen Spalte, die Karte bleibt dort (`clarification → todo` schließt den Schritt, `clarification → backlog` schickt zurück, `todo → clarification` öffnet dieselbe Konversation erneut); `backlog → todo` gibt es nicht mehr, ebenso keine Transition aus Backlog/Klärung direkt nach „In progress“. Die Spalte ist WIP-frei, wartende Fragen werden dort erkannt, und ein Gruppen-Drop in die Klärungsspalte wird abgelehnt (er würde die Runde überspringen) |
+| 22 | **Mehr können** | *(durch 30 abgelöst)* **Spec-Freigabe-Gate vor jedem Implementierungslauf**: `specApprovedAt` wird ausschließlich von der Host-Aktion `approve-spec` gesetzt (Knopf „Spezifikation freigeben" in der Kartendetailansicht). Jeder `run`-Weg prüft sie serverseitig — der Zug auf die Laufspalte, der Ausführen-Knopf und `rerun` werden mit `spec-approval-required` abgelehnt, Cron überspringt die Karte und rollt den nächsten Termin; der Klärungslauf (`clarify`) ist nicht betroffen. Eine Inhaltsänderung (Titel/Beschreibung/Prompt/Parse-Text) entwaffnet die Freigabe wieder, ebenso ein Import |
+| 23 | **Mehr können** | *(durch 30 abgelöst)* **Eigene Klärungsspalte**: `backlog → clarification` (Aktion `clarify`) startet den Klärungslauf in der neuen Spalte, die Karte bleibt dort (`clarification → todo` schließt den Schritt, `clarification → backlog` schickt zurück, `todo → clarification` öffnet dieselbe Konversation erneut); `backlog → todo` gibt es nicht mehr, ebenso keine Transition aus Backlog/Klärung direkt nach „In progress“. Die Spalte ist WIP-frei, wartende Fragen werden dort erkannt, und ein Gruppen-Drop in die Klärungsspalte wird abgelehnt (er würde die Runde überspringen) |
 | 24 | **Mehr können** | **Git-Worktree pro Karte**: `git.openBranch` legt neben dem Feature-Branch einen eigenen Checkout unter `$DSH_HOME/task-board/worktrees/<Karten-Id>` an (`TaskGit.worktreePath`), und die Ausführungssitzung wird mit diesem Verzeichnis als `cwd` erstellt — die Hauptcheckout des Menschen bleibt auf ihrem Branch und unangetastet, zwei Karten eines Workspace teilen sich kein Verzeichnis mehr. `useBranch` ist dort ein No-op, Commit und Review-Gate arbeiten im Worktree, nur der Merge läuft in der Hauptcheckout und entfernt danach den Wegwerf-Worktree. Wo `git worktree` verweigert, fällt das Board auf die alte gemeinsame Checkout zurück |
 | 25 | **Mehr können** | **Eigene Container pro Karte (Docker Compose)**: liegt im Worktree der Karte eine Compose-Datei (Einstellung `composeFile`, Default `docker-compose.yml`, leer = aus), bringt der Host vor jedem Implementierungslauf eine **eigene Stack-Instanz** hoch — Projektname `dsh-tb-<Karten-Id>`, alles im Worktree der Karte, Ports werden aus `docker compose ps` zurückgelesen und auf der Karte angezeigt. Die Umgebung lebt, solange die Karte läuft oder im Review steht, und wird beim Verlassen dieser Spalten, beim Löschen und beim Archivieren mit `docker compose down -v` gestoppt; ein fehlgeschlagener Start lässt den Lauf scheitern und zeigt dockers Ausgabe auf der Karte |
 
 | 26 | **Mehr können** | **Prüf-Block auf „Ready for test"-Karten**: die Karte nennt ihr eigenes Verzeichnis (Worktree, sonst gekennzeichnet das Haupt-Checkout) und öffnet es per Klick in VS Code (`code -n`, bevorzugt die `.code-workspace`), zeigt die URLs der laufenden Version (Template `url` + karten-eigene Ports, plus je veröffentlichter Compose-Port) und bietet Start/Stop/Restart/Logs für **genau diese Karte** — Compose-Projekt `dsh-tb-<Id>` wenn vorhanden, sonst die pro Workspace konfigurierten Befehle (`reviewEnvironments`). Kein Auto-Start; beim Verlassen der Spalte wird nur gestoppt, was das Board selbst gestartet hat. Andere Spalten zeigen nichts. |
 | 27 | **Mehr können** | **Merge-Freigabe je Karte (Release)**: `ready_for_test → done` ist die Freigabe und läuft für den Zug auf Done und den neuen Knopf „Freigeben (Merge)" (Host-Aktion `approve-merge`) durch dieselbe Routine. Ohne Branch wird die Karte ohne Merge nach Done verschoben und das als `skipped` vermerkt; ein erfolgreicher Merge stempelt `TaskGit.mergedAt` und `TaskMerge.mergedAt`; eine Verweigerung (schmutziger Worktree, Branch über den Prüf-Commit hinaus, kein Prüf-Commit) oder ein git-Fehler schickt die Karte nach `failed` mit dem Grund auf `TaskMerge.error`. Ein **Konflikt** wird nicht dem Menschen zugemutet: der Host rollt den halben Merge im Haupt-Checkout zurück (`git merge --abort`), merged den Basis-Branch **im Worktree der Karte** und lässt den Konflikt dort stehen — die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git commit`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): löst er den Konflikt, merged der Host von selbst nach und die Karte geht nach Done; sonst (zweiter Konflikt, fehlgeschlagener Lauf, oder erfolgreich mit noch ungemergten Dateien) nach `failed`. Der Freigabe-Stempel erlaubt dabei einen HEAD, dessen Vorfahre der Prüf-Commit ist. *Der Konflikt-Weg ist seit 29 ein Rebase auf die aktuelle Basis: die Spiegel-Merge-Maschinerie und die Vorfahren-Ausnahme des Gates sind entfallen.* Die Karte zeigt den Merge-Zustand (`src/core/merge.ts`: merged / unmerged / released / resolving / failed / no-branch) als Badge, der Prüf-Block nennt Commit, Zeitpunkt, Konflikt und Fehler |
 | 28 | **Mehr können** | **`repoSubpath`: Repository-Erkennung je Workspace**: eine Einstellung (JSON-Array `[{ "path": …, "repo": … }]`, längster Präfix gewinnt, relative oder absolute `repo`) nennt das Repository innerhalb eines Workspace-Ordners, der selbst kein Repository ist. Branch, Worktree, Commit und Merge laufen dann dort, und der Prüf-Block fällt für Karten ohne Git-Zustand auf dasselbe Verzeichnis zurück. Geparst/validiert mit `core/repo-config.ts` — dieselbe Funktion für Browser-Feld und Host |
+| 30 | **Mehr können** | **To-do-Spalte und Spec-Freigabe entfernt: Klärung → In progress ist der direkte Weg** — die Default-Maschine hat sechs Spalten (Backlog → Klärung → In progress → Ready for test → Failed → Done), `clarification → running` trägt `run` und schließt den offenen Klärungslauf, `ready_for_test`/`failed` gehen beim Rework zurück nach `clarification`, und `approve-spec`/`specApprovedAt` samt Knopf „Release specification“ sind vollständig entfallen; bestehende To-do-Karten migrieren beim Laden nach `clarification` |
 | 29 | **Mehr können** | **Merge-Freigabe setzt den Branch erst auf die aktuelle Basis neu auf (Rebase)**: `git.mergeBranch` prüft weiterhin das Gate (sauberer Worktree, HEAD exakt `reviewedCommit`) und **rebased den Feature-Branch dann auf den Basis-Branch, wie er jetzt steht** — in der Zwischenzeit können andere Karten in die Basis gemergt worden sein, und ohne diesen Schritt träfe die geprüfte Arbeit die neue Basis erst im Merge-Commit, den nie jemand auf ihr gebaut oder getestet hat. Ein Konflikt wird nicht dem Menschen zugemutet: der halb fertige Rebase bleibt **im Worktree der Karte** stehen (Marker, `rebase-merge`), der Haupt-Checkout wird nie angefasst, und die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git -c core.editor=true rebase --continue`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): danach stempelt der Settle des Laufs den rebasten HEAD als Prüf-Commit und der Host merged von selbst nach; ein zweiter Konflikt, ein fehlgeschlagener Lauf oder ein danach noch offener Rebase bricht ihn ab (der Branch steht wieder auf dem geprüften Commit) und schickt die Karte nach `failed`. Die alte Spiegel-Merge-Maschinerie (`beginMergeResolution`, `MergeResolutionStart`, Gate-Ausnahme „Prüf-Commit ist Vorfahre") ist entfallen; `commitBranch`, `hasUnresolvedMerge` und `abortUnresolvedMerge` kennen den unfertigen Rebase |
 
 Die englische Fassung dieser Übersicht steht im README unter
@@ -71,9 +72,9 @@ Die englische Fassung dieser Übersicht steht im README unter
      frei: der Roster sagt nur, ob gerade ein Turn läuft, nicht ob der Lauf fertig
      ist (siehe Punkt 18).
    - Die Grenze gilt nur für **Implementierungsläufe** (Spalte „In progress",
-     Cron). Ein Klärungslauf aus „To do" läuft zwar durch dieselbe
+     Cron). Ein Klärungslauf aus „Klärung" läuft zwar durch dieselbe
      Start-Queue, wartet aber nie auf einen Platz und belegt auch keinen:
-     „To do" ist WIP-frei, er startet sofort — auch neben einem arbeitenden
+     „Klärung" ist WIP-frei, er startet sofort — auch neben einem arbeitenden
      Lauf derselben Lane (siehe Punkt 14).
    - Ein wartender Lauf ist im Ledger bereits `running` **ohne** Session, damit
      seine Karte nicht doppelt geöffnet werden kann.
@@ -111,10 +112,11 @@ Die englische Fassung dieser Übersicht steht im README unter
    gebaute `lib/` mitcommitten.
 6. **Agentic-Programming-Defaults** — der Board-Ablauf ist auf agentische
    Programmierung zugeschnitten:
-   - Spaltenreihenfolge: `backlog → todo → running → ready_for_test → failed →
-     done`; „Ready for test" sitzt direkt vor „Failed", „Done" ist die letzte Spalte.
-   - Neue Tasks landen im **Backlog** und müssen manuell nach „Todo" gezogen
-     werden. Der Backlog→Todo-Zug ist der Startschuss des Workflows.
+   - Spaltenreihenfolge: `backlog → clarification → running → ready_for_test →
+     failed → done`; „Ready for test" sitzt direkt vor „Failed", „Done" ist die
+     letzte Spalte.
+   - Neue Tasks landen im **Backlog** und müssen manuell nach „Klärung" gezogen
+     werden. Der Backlog→Klärung-Zug ist der Startschuss des Workflows.
    - Ein erfolgreicher Lauf (`succeeded`) parkt die Karte in **Ready for test**;
      „Done" wird ausschließlich manuell erreicht (Runner-Settles erzeugen es nie).
      Der Park ist eine **Session-Ende-Aussage**: gesettled wird erst, wenn die
@@ -128,10 +130,10 @@ Die englische Fassung dieser Übersicht steht im README unter
      bleibt die Karte in „In progress".
    - **Git-Integration** (`src/git-workflow.ts`, nur wenn die gepinnte
      Workspace ein git-Worktree ist, sonst überall No-op):
-     Backlog→Todo legt den Feature-Branch `task/<titel-slug>-<id8>` an
+     Backlog→Klärung legt den Feature-Branch `task/<titel-slug>-<id8>` an
      (Basis: aktueller Branch bzw. `main`/`master`, damit eine zweite Karte
      nicht auf der ersten aufsetzt); fehlt der Branch bei einem Start, der den
-     Todo-Zug übersprungen hat (Cron oder Run-Knopf), wird
+     Klärung-Zug übersprungen hat (Cron oder Run-Knopf), wird
      er beim Start nachgeholt; vor jedem **Implementierungslauf** wird dieser
      Branch ausgecheckt („In progress" arbeitet darauf) — ein Klärungslauf
      checkt **keinen** Branch aus (`git.useBranch` entfällt): er implementiert
@@ -183,16 +185,16 @@ Die englische Fassung dieser Übersicht steht im README unter
      `states` (Spalten inkl. `label`, `order`, `drop`), `transitions`
      (`from`/`to`/`trigger`) und je Übergang `actions`.
    - Aktionen: `git.openBranch` (Feature-Branch öffnen, hängt am Übergang
-     Backlog → To Do), `git.commitBranch` (den Worktree auf den Feature-Branch
+     Backlog → Klärung), `git.commitBranch` (den Worktree auf den Feature-Branch
      committen, hängt an **allen** manuellen Übergängen nach „Ready for test";
      ohne Repo oder bei sauberem Worktree No-op), `git.mergeBranch` (Reste
      committen + zurückmergen, hängt an
      Ready for test → Done), `run` (Ausführung starten, auf dem Weg nach
-     „In Arbeit"; nur von To Do aus, gibt ungeklärte offene Fragen frei und
+     „In Arbeit"; von Klärung aus, gibt ungeklärte offene Fragen frei und
      setzt die Klärungssession fort), `clarify` (den Lauf der Karte über
      dieselbe Start-Queue, aber WIP-frei starten — echte Execution mit
      Klärungs-Prompt, ohne Branch-Auscheck, bleibt in der Spalte, hängt
-     ebenfalls an Backlog → To Do) und
+     ebenfalls an Backlog → Klärung) und
      `{ kind: "stamp", field: "doneAt" }`. Pro Übergang wirkt nur die **erste**
      Git-Aktion, `"git": false` überspringt sie ganz.
    - Durchgesetzt wird die Maschine im **Host**: `HostTaskLedger` lehnt jeden
@@ -219,12 +221,12 @@ Die englische Fassung dieser Übersicht steht im README unter
    - „Läuft jetzt" heißt: die letzte Ausführung ist offen **und** hat schon ihre
      Session angehängt (`isTaskExecuting` in `src/core/tasks.ts`) — bei einem
      Implementierungslauf genau die Bedingung, unter der der Host einen
-     WIP-Platz hält; ein Klärungslauf in Todo hält keinen. Nur diese Karte
+     WIP-Platz hält; ein Klärungslauf in Klärung hält keinen. Nur diese Karte
      bekommt fetten Warn-Rahmen, Warn-Hintergrund, pulsierenden Ring, Spinner
      und das Abzeichen „Running now".
    - Offene Ausführungen **ohne** Session (WIP-Queue eines vollen Workspace)
      sind in derselben Spalte, bleiben aber klar unterscheidbar: dünner
-     Spaltenrahmen, kein Ring, Abzeichen „Queued". Eine Karte in **Todo** steht
+     Spaltenrahmen, kein Ring, Abzeichen „Queued". Eine Karte in **Klärung** steht
      nie in dieser Queue: ihr Klärungslauf startet ohne WIP-Platz sofort.
    - Die Spalte ist wie die Warteschlange sortiert: die laufende Karte steht
      oben, danach die wartenden in Ankunftsreihenfolge — die zuletzt
@@ -345,9 +347,9 @@ Die englische Fassung dieser Übersicht steht im README unter
       `tests/session-reuse.spec.ts`, Rework-Prompt und Launch-Verdrahtung in
       `tests/host-runner.spec.ts` und die UI in `tests/rework-ui.spec.tsx`.
 
-13. **Inhalte editierbar in „Backlog"/„To do" — mit dem Parse-Text an der Karte** —
+13. **Inhalte editierbar in „Backlog"/„Klärung" — mit dem Parse-Text an der Karte** —
     Upstream sperrte den Inhalt nach dem **ersten Lauf**; eine Karte, die
-    fehlgeschlagen und zurück ins Backlog/To do gezogen wurde, blieb damit für
+    fehlgeschlagen und zurück ins Backlog/Klärung gezogen wurde, blieb damit für
     immer gesperrt.
     - `canEditTaskContent` fragt jetzt den **Status**: editierbar ist eine Karte
       genau dann, wenn sie nicht archiviert ist und in `backlog` oder `todo`
@@ -397,10 +399,10 @@ Die englische Fassung dieser Übersicht steht im README unter
       Karte.** Die Transition trägt neben `git.openBranch` die Aktion
       **`clarify`**: der Host legt eine Execution mit `kind: 'clarify'` an, die
       **wie ein Lauf der In-Progress-Spalte** durch dieselbe Start-Queue geht,
-      aber **nicht** durch deren WIP-Grenze: „To do" ist WIP-frei, der
+      aber **nicht** durch deren WIP-Grenze: „Klärung" ist WIP-frei, der
       Klärungslauf startet also sofort — auch neben einem arbeitenden Lauf
       derselben Lane — und liest sich nie als „Queued" (die Karte bleibt in
-      **Todo** — der Klärungslauf wechselt die Spalte nie — und zeigt sich wie
+      **Klärung** — der Klärungslauf wechselt die Spalte nie — und zeigt sich wie
       jeder andere Lauf: **Running** sobald die Session hängt, plus
       Session-Link in der Ecke und demselben Pause-/Play-Knopf). Er checkt
       außerdem keinen Branch aus (er implementiert nichts und darf einem
@@ -435,7 +437,7 @@ Die englische Fassung dieser Übersicht steht im README unter
       ihrer Spalte — auch ein fehlgeschlagener Klärungslauf parkt sie nicht in
       `failed`.
     - **Anzeige:** die Karte liest sich wie ein laufender Task (Running;
-      „Queued" gibt es in Todo nicht)
+      „Queued" gibt es in Klärung nicht)
       und verlinkt über die Ecke direkt den Klärungs-Chat; die Detail-Ansicht
       zeigt denselben Lauf samt Historie. Ein Fragen-Abzeichen gibt es nicht
       mehr.
@@ -534,9 +536,9 @@ Die englische Fassung dieser Übersicht steht im README unter
       dauerhaft als laufend, bleibt die Karte in „In progress"; Pausieren bewegt
       sie weiterhin von Hand, und der WIP-Platz der Lane bleibt bis zum
       `settle()` bei ihr (Punkt 18).
-    - **Klärungsläufe:** brauchen keine Sonderregel mehr — die Runde in „To do"
+    - **Klärungsläufe:** brauchen keine Sonderregel mehr — die Runde in „Klärung"
       endet nach jeder Fragerunde, ohne dass die Arbeit fertig ist, und ihr
-      Chat-Verlauf kann die Karte gar nicht mehr bewegen; sie bleibt in „To do",
+      Chat-Verlauf kann die Karte gar nicht mehr bewegen; sie bleibt in „Klärung",
       bis der Mensch sie auf die Laufspalte zieht.
     - **Prompt-Regel:** `COMPLETION_MARKER`/`COMPLETION_INSTRUCTION`
       (`src/host-runner.ts`) hängen als letzter Block an **jedem**
@@ -559,12 +561,12 @@ Die englische Fassung dieser Übersicht steht im README unter
       angehängter Session. Ein fertiger, aber noch nicht abgerechneter Lauf (der
       alte Fehler aus Punkt 16) oder ein Klärungslauf, der auf die Antwort des
       Menschen wartete, hielt damit den einzigen Platz der Workspace — jede
-      weitere nach „To do" oder „In progress" gezogene Karte landete als „Queued",
+      weitere nach „Klärung" oder „In progress" gezogene Karte landete als „Queued",
       obwohl nichts lief.
     - **Jetzt:** die Platzbelegung überspringt Sessions, die der letzte
       Roster-Poll (`session/list`) als untätig gemeldet hat
       (`idleSessionIds`). Ein **echt arbeitender Implementierungslauf** hält den
-      Platz weiter. Ein Klärungslauf in „To do" belegt dagegen **gar keinen**
+      Platz weiter. Ein Klärungslauf in „Klärung" belegt dagegen **gar keinen**
       Platz — die Spalte ist WIP-frei, er wartet nie und startet sofort
       (Punkt 14). Ist der Roster unbekannt (`idleSessionIds === undefined`),
       wird für Implementierungsläufe **nichts** gefiltert: eine unlesbare Liste
@@ -574,10 +576,10 @@ Die englische Fassung dieser Übersicht steht im README unter
       Settlen eines Laufs tat das schon vorher (Ledger-Subscription).
     - Abgedeckt durch `tests/host-service.spec.ts` (`lane occupancy`: Start trotz
       angehängter, aber untätiger Ausführung; Queue hinter einem arbeitenden Lauf
-      und Start, sobald er ruht; Klärungslauf in Todo startet neben dem
+      und Start, sobald er ruht; Klärungslauf in Klärung startet neben dem
       arbeitenden Lauf, während der Zug nach „In progress" — der
       Implementierungslauf — weiterhin wartet) und `tests/wip-limit.spec.ts`
-      (Todo-Karte startet ohne Platz, ihr Implementierungslauf bleibt begrenzt).
+      (Klärung-Karte startet ohne Platz, ihr Implementierungslauf bleibt begrenzt).
 
 18. **WIP 1 strikt je Workspace/Lane: der Platz gehört dem offenen Lauf, nicht
     dem laufenden Turn** — die im Betrieb beobachtete Kollision (zwei Tasks
@@ -598,7 +600,7 @@ Die englische Fassung dieser Übersicht steht im README unter
       also frei und „Weiter" hängt die Karte wieder in die Queue). Die
       Roster-Ausnahme für Implementierungsläufe ist entfernt; `idleSessionIds`
       dient nur noch der Session-Wiederverwendung (`reusableSessionId`).
-      Klärungsläufe in „To do" bleiben WIP-frei (Punkt 14), die Todo- und
+      Klärungsläufe in „Klärung" bleiben WIP-frei (Punkt 14), die Klärungs- und
       Ready-for-Test-Spalten haben weiterhin kein Limit.
     - **Wartezustand bleibt sichtbar und erklärbar:** eine blockierte Karte
       bleibt in „In progress" (ohne Session) und startet automatisch, sobald der
@@ -653,7 +655,7 @@ Die englische Fassung dieser Übersicht steht im README unter
     - **Erkennung im Host, nicht im Browser:** der 5-Sekunden-Session-Poll liest
       für die Kandidaten aus `ledger.awaitingAnswerWatch()` — jede Karte mit
       **offenem, nicht abgerechnetem Lauf** (der Agent kann mitten im Lauf fragen)
-      plus jede **Todo-Karte mit Klärungssession** (deren Klärungslauf ist
+      plus jede **Klärung-Karte mit Klärungssession** (deren Klärungslauf ist
       abgerechnet, die Karte bleibt stehen, die Antwort gehört in genau diese
       Konversation) — den Kopf der Konversation (`session/follow`) und entscheidet
       über `runner.awaitingAnswer(sessionId, running)`. Zwei Formen zählen:
@@ -714,7 +716,7 @@ Die englische Fassung dieser Übersicht steht im README unter
       den Grund.
     - **Neubewertung:** erneutes Parken stempelt den neuen HEAD. Der übliche Weg,
       nachgearbeiteten Code reviewen zu lassen, ist damit unverändert
-      `ready_for_test → todo` (Rework-Rückgabe), Korrektur im Karten-Chat,
+      `ready_for_test → clarification` (Rework-Rückgabe), Korrektur im Karten-Chat,
       nächster Lauf, nächstes Parken.
     - `reviewedCommit` ist ein Bindungswert, kein Anzeigefeld: er geht durch
       `normalizeGit` (ein kaputter Stempel wird verworfen, damit keine Karte eine
@@ -723,7 +725,7 @@ Die englische Fassung dieser Übersicht steht im README unter
       fehlender Stempel, Ende-zu-Ende mit erneutem Parken) und
       `tests/store.spec.ts`.
 
-22. **Spec-Freigabe-Gate: erst nach deiner Freigabe wird implementiert** — der
+22. **Spec-Freigabe-Gate: erst nach deiner Freigabe wird implementiert** *(durch Eintrag 30 abgelöst)* — der
     Agent arbeitet nie an einer Spezifikation, die der Mensch nicht freigegeben
     hat, und kein Browser-Weg kann das umgehen.
     - **Ein Schreiber:** die Host-Aktion `approve-spec` setzt `specApprovedAt`
@@ -752,7 +754,7 @@ Die englische Fassung dieser Übersicht steht im README unter
       Run-Wege, Cron, Entwaffnen, Import, Store-Reparatur) und
       `tests/spec-approval-ui.spec.tsx`.
 
-23. **Eigene Klärungsspalte: Backlog → Klärung → Todo → In progress** — der
+23. **Eigene Klärungsspalte: Backlog → Klärung → Todo → In progress** *(durch Eintrag 30 abgelöst)* — der
     Klärungsschritt ist eine eigene Spalte statt eines Zwischenzustands in Todo.
     - **Maschine:** `backlog → clarification` trägt `git.openBranch` + `clarify`,
       `clarification → todo` schließt den Schritt (einfacher Zug, keine Aktion),
@@ -1048,6 +1050,12 @@ schreibt dasselbe Ledger, bestehende Tasks bleiben erhalten. Upstream-Plugin und
 Fork dürfen **nicht** parallel installiert sein — beide mounten dieselbe
 Host-Route und denselben System-Prompt-Abschnitt.
 
+30. **To-do-Spalte entfernt, Klärung startet die Implementierung direkt, Spec-Gate entfällt** — der Workflow hat eine Spalte weniger und eine Bestätigung weniger.
+    - **Maschine:** die Default-Spalten sind `backlog | clarification | running | ready_for_test | failed | done`. `clarification → running` trägt `run`; der Zug (oder der Ausführen-Knopf) schließt den offenen Klärungslauf und setzt dieselbe Session mit „Bitte jetzt implementieren.“ fort. `backlog → running` bleibt ohne Transition. Alle früheren `→ todo`-Ziele (Rework aus `ready_for_test`/`failed`, `done →`, `failed →`) zeigen jetzt auf `clarification`; `clarification → ready_for_test` committet weiterhin.
+    - **Spec-Gate entfernt:** Host-Aktion `approve-spec`, Feld `specApprovedAt`, alle Prüfungen auf Drag/Run/Rerun/Cron und der Knopf „Release specification“ samt „Specification released“-Zeile sind gelöscht. Der Start selbst ist die Freigabe; ein Inhalts-Edit muss nichts mehr entwaffnen.
+    - **Migration:** bestehende To-do-Karten (aktiv und archiviert) werden beim Laden des Ledgers nach `clarification` migriert; ein v2-Dokument wird vor der strukturellen Prüfung ebenso umgeschrieben. `todo` ist kein gültiger `TaskStatus` mehr.
+    - **Doku/Tests:** `docs/state-machine.md`, README, `AGENTS.md`, Settings-Beispiel und `TASK_BOARD_GUIDANCE` beschreiben den neuen Ablauf; `tests/spec-approval*.spec.ts(x)` sind entfallen, die Migrations- und Übergangsfälle sind in `tests/state-machine.spec.ts`, `tests/host-ledger.spec.ts`, `tests/store.spec.ts` und `tests/clarification-step.spec.ts` abgedeckt.
+
 ## Installation
 
 ```sh
@@ -1080,7 +1088,7 @@ dsh plugin --profile web remove @linxin666/dsh-client-ui-task-board
   Behandlung wie bisher für abgebrochene Starts. Diese Tasks müssen erneut
   gestartet werden.
 - Das WIP-Limit gilt je Workspace/Lane für alle **Implementierungs**läufe
-  (manuell, per Cron); Klärungsläufe in „To do" nicht — die Spalte ist WIP-frei,
+  (manuell, per Cron); Klärungsläufe in „Klärung" nicht — die Spalte ist WIP-frei,
   sie starten sofort (Punkt 14). Verschiedene Workspaces laufen parallel. Den Platz belegt nur ein Lauf, dessen Session der Roster-Poll als
   arbeitend sieht — ein angehängter, aber untätiger Lauf (fertig, wartend) tut
   das nicht (Punkt 17). Ein Lauf, dessen Session untätig ist, aber noch

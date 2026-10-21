@@ -12,10 +12,11 @@ export interface LedgerState {
 /**
  * A card whose execution the Host still has to start. The execution is either
  * the card's run (`execution.kind` undefined — the `run` action, cron) or its
- * clarification run (`execution.kind === 'clarify'`, the `backlog → todo`
- * step): the two share the launch queue, but only the implementation run obeys
- * the lane WIP limit — `todo` is WIP-free; they also differ in the prompt and
- * in whether settling moves the card.
+ * clarification run (`execution.kind === 'clarify'`, the `backlog →
+ * clarification` step): the two share the launch queue, but only the
+ * implementation run obeys the lane WIP limit — the clarification column is
+ * WIP-free; they also differ in the prompt and in whether settling moves the
+ * card.
  */
 export interface OpenedRun {
     task: TaskRecord;
@@ -199,10 +200,10 @@ export declare class HostTaskLedger {
      *
      * Two kinds qualify. A card with an open, unsettled run: the agent may ask
      * inside it (a blocking `ask_user_question`, or a prose question it stopped
-     * on). And a `todo` card that already ran its clarification round: that run
-     * settles without moving the card, so the questions it asked are still
-     * unanswered in the very conversation the card keeps. Paused cards are left
-     * out — their session was stopped deliberately, which is not a wait.
+     * on). And a `clarification` card that already ran its clarification round:
+     * that run settles without moving the card, so the questions it asked are
+     * still unanswered in the very conversation the card keeps. Paused cards are
+     * left out — their session was stopped deliberately, which is not a wait.
      */
     awaitingAnswerWatch(): AnswerWatchEntry[];
     /** Whether the card's open run is currently suspended by a pause. */
@@ -235,10 +236,10 @@ export declare class HostTaskLedger {
      */
     private supersedeClarification;
     /**
-     * Ensure the card has a feature branch before it starts. The backlog → todo
-     * pull normally opens it; a cron trigger or the detail Run button may bypass
-     * that, and those runs must not land on the base branch. No-op without a
-     * repository or when a branch already exists.
+     * Ensure the card has a feature branch before it starts. The backlog →
+     * clarification pull normally opens it; a cron trigger or the detail Run
+     * button may bypass that, and those runs must not land on the base branch.
+     * No-op without a repository or when a branch already exists.
      */
     private withFeatureBranch;
     /**
@@ -355,10 +356,12 @@ export declare class HostTaskLedger {
     private repairSchedules;
     private reconcileInterruptedStarts;
     /**
-     * Field-preserving v2 to v3 migration. v3 adds no fields yet, so the
-     * migration reuses the v3 normalization, but it first proves every task
-     * row is structurally valid: a v2 document that would silently drop or
-     * coerce rows fails loudly instead (no quarantined-empty restart).
+     * Field-preserving v2 to v3 migration. The migration reuses the v3
+     * normalization, but it first proves every task row is structurally valid: a
+     * v2 document that would silently drop or coerce rows fails loudly instead
+     * (no quarantined-empty restart). The retired `todo` column is mapped to
+     * `clarification` before that check, because its role — the waiting column
+     * before implementation — moved there.
      */
     private migrateLegacyDocument;
     private load;

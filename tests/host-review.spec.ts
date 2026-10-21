@@ -141,14 +141,14 @@ describe('review environments on the Host', () => {
     expect(service.snapshot().reviewPlans?.card?.available).toBe(true)
 
     // Leaving the review column drops the plan entirely.
-    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(service.snapshot().reviewPlans?.card).toBeUndefined()
     service.dispose()
   })
 
   it('refuses the action outside the review column', () => {
     const { service, ledger } = harness()
-    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(() => service.apply('late', { kind: 'review-start', taskId: 'card' }))
       .toThrow(/review-action-requires-ready-for-test/)
     service.dispose()
@@ -208,7 +208,7 @@ describe('review environments on the Host', () => {
     // record (an earlier Host process started it): leaving the review column
     // must still stop it, i.e. the seed really re-attached it.
     const { ledger, runner, flush, poll } = harness({ preStartedReview: true })
-    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     await poll()
     expect(runner.calls.map(call => call.command)).toEqual(['./start.sh --stop'])
     expect(runner.calls[0]!.env.DSH_COMPOSE_PORT).toBe('8678')
@@ -218,7 +218,7 @@ describe('review environments on the Host', () => {
   it('stops only what the board started when the card leaves the review column', async () => {
     const { service, ledger, runner, flush, poll } = harness()
     // A version the board never started: nothing to stop.
-    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     await poll()
     expect(runner.calls).toEqual([])
 
@@ -228,7 +228,7 @@ describe('review environments on the Host', () => {
     expect(runner.calls).toHaveLength(1)
 
     // Leaving the column stops it and marks the record stopped.
-    ledger.applyRequest('back-again', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('back-again', { kind: 'move', taskId: 'card', status: 'clarification' })
     await poll()
     expect(runner.calls.map(call => call.command)).toEqual(['./start.sh', './start.sh --stop'])
     expect(ledger.state().tasks[0]!.review?.startedAt).toBeUndefined()
@@ -249,7 +249,7 @@ describe('review environments on the Host', () => {
     const failing = harness({ runner: fakeRunner({ './start.sh --stop': 'no such container' }) })
     failing.service.apply('start', { kind: 'review-start', taskId: 'card' })
     await failing.flush()
-    failing.ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' })
+    failing.ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     await failing.poll()
     await failing.poll()
     expect(failing.runner.calls.filter(call => call.command === './start.sh --stop')).toHaveLength(1)

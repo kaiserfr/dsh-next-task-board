@@ -6,7 +6,7 @@ import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
 import type { TaskCompose, TaskMerge, TaskReview } from './core/tasks.ts'
-import { DEFAULT_MAX_DONE_TASKS, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, isReworkReturn, openExecution, requiresSpecApproval, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, isReworkReturn, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -47,10 +47,11 @@ export interface LedgerState {
 /**
  * A card whose execution the Host still has to start. The execution is either
  * the card's run (`execution.kind` undefined — the `run` action, cron) or its
- * clarification run (`execution.kind === 'clarify'`, the `backlog → todo`
- * step): the two share the launch queue, but only the implementation run obeys
- * the lane WIP limit — `todo` is WIP-free; they also differ in the prompt and
- * in whether settling moves the card.
+ * clarification run (`execution.kind === 'clarify'`, the `backlog →
+ * clarification` step): the two share the launch queue, but only the
+ * implementation run obeys the lane WIP limit — the clarification column is
+ * WIP-free; they also differ in the prompt and in whether settling moves the
+ * card.
  */
 export interface OpenedRun {
   task: TaskRecord
@@ -573,10 +574,10 @@ export class HostTaskLedger {
    *
    * Two kinds qualify. A card with an open, unsettled run: the agent may ask
    * inside it (a blocking `ask_user_question`, or a prose question it stopped
-   * on). And a `todo` card that already ran its clarification round: that run
-   * settles without moving the card, so the questions it asked are still
-   * unanswered in the very conversation the card keeps. Paused cards are left
-   * out — their session was stopped deliberately, which is not a wait.
+   * on). And a `clarification` card that already ran its clarification round:
+   * that run settles without moving the card, so the questions it asked are
+   * still unanswered in the very conversation the card keeps. Paused cards are
+   * left out — their session was stopped deliberately, which is not a wait.
    */
   awaitingAnswerWatch(): AnswerWatchEntry[] {
     const entries: AnswerWatchEntry[] = []
@@ -669,10 +670,10 @@ export class HostTaskLedger {
   }
 
   /**
-   * Ensure the card has a feature branch before it starts. The backlog → todo
-   * pull normally opens it; a cron trigger or the detail Run button may bypass
-   * that, and those runs must not land on the base branch. No-op without a
-   * repository or when a branch already exists.
+   * Ensure the card has a feature branch before it starts. The backlog →
+   * clarification pull normally opens it; a cron trigger or the detail Run
+   * button may bypass that, and those runs must not land on the base branch.
+   * No-op without a repository or when a branch already exists.
    */
   private withFeatureBranch(task: TaskRecord): TaskRecord {
     if (task.git !== undefined) return task
@@ -919,13 +920,6 @@ export class HostTaskLedger {
       this.commit()
       return undefined
     }
-    if (requiresSpecApproval(task)) {
-      // An unreleased specification must never be implemented unattended
-      // either: the card waits for the human's release, and cron rolls on.
-      this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, task.schedule?.lastTriggeredAt, triggeredAt)]
-      this.commit()
-      return undefined
-    }
     if (task.status === 'running' || hasOpenExecution(task)) {
       this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, task.schedule?.lastTriggeredAt, triggeredAt)]
       this.commit()
@@ -1032,8 +1026,8 @@ export class HostTaskLedger {
     const now = this.now()
     this.document.tasks = this.document.tasks.map(task => {
       // A paused run is not settled: the aborted turn the pause produced must
-      // not park the card in `failed`/`todo`. This also closes the race where an
-      // inspection started just before the pause was written.
+      // not park the card in `failed`/`clarification`. This also closes the race
+      // where an inspection started just before the pause was written.
       if (task.id !== taskId || task.pausedAt !== undefined) return task
       const execution = task.executions.find(entry => entry.id === executionId)
       const settled = settleExecution(task, executionId, outcome, now, error)
@@ -1102,7 +1096,7 @@ export class HostTaskLedger {
         // ready_for_test/done/failed keeps the content that ran. Execution
         // targets stay editable (they only affect future runs).
         if (hasContentPatch(action.patch) && !canEditTaskContent(task)) {
-          throw new Error('task content is locked outside backlog and todo')
+          throw new Error('task content is locked outside backlog and clarification')
         }
         if ('title' in action.patch && action.patch.title?.trim() === '') throw new Error('title is required')
         // A replaced snapshot is re-stamped with the updating session (the
@@ -1155,20 +1149,20 @@ export class HostTaskLedger {
         // transition's actions build on, in their configured order.
         let next: TaskRecord = released?.task ?? withStatus(gitted, action.status, now)
         if (released?.run !== undefined) run = released.run
-        // Leaving the review column (or a failed run) for `todo` is a rework —
-        // whether the human dragged the card or the Host noticed a correction in
-        // its chat. Only the stamp is written; the correction lives in the card's
-        // conversation, not in a board field.
+        // Leaving the review column (or a failed run) for `clarification` is a
+        // rework — whether the human dragged the card or the Host noticed a
+        // correction in its chat. Only the stamp is written; the correction lives
+        // in the card's conversation, not in a board field.
         if (isReworkReturn(task.status, action.status)) next = withReworkStamp(next, now)
         // The clarification step: a transition carrying `clarify` opens the
         // card's clarification run — the same execution the run column starts
         // (it goes through the launch queue, but not the lane's WIP limit: the
         // card starts right away and links its session), only its prompt asks
         // first and stops. The card keeps the clarification column: the human
-        // answers in the chat and pulls it on to `todo` (or re-opens the
-        // questions from `todo`), and the implementation continues this very
-        // session. A card that already has a clarification conversation
-        // re-enters it instead, so a round trip never mints a second session.
+        // answers in the chat and pulls it straight on to the run column, and
+        // the implementation continues this very session. A card that already
+        // has a clarification conversation re-enters it instead, so a round trip
+        // never mints a second session.
         if (actions.includes('clarify') && !hasOpenExecution(task)) {
           const opened = startExecution(next, now, crypto.randomUUID(), initiator, 'clarify')
           next = opened.task
@@ -1181,9 +1175,6 @@ export class HostTaskLedger {
         if (actions.includes('run')) {
           if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
             throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
-          }
-          if (requiresSpecApproval(task)) {
-            throw new Error('spec-approval-required: the card has no released specification; release it before implementing')
           }
           // Starting the work is the go-ahead and supersedes the card's open
           // clarification round: that execution is closed here, so the card
@@ -1261,20 +1252,6 @@ export class HostTaskLedger {
           : item)
         break
       }
-      case 'approve-spec': {
-        // The human's release of the card's specification: the only writer of
-        // `specApprovedAt`, and the gate every `run` action checks. Idempotent —
-        // a second release keeps the first instant, so the stamp always names
-        // the release the work was actually authorized by.
-        const task = this.document.tasks.find(item => item.id === action.taskId)
-        if (task === undefined) throw new Error('task not found')
-        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-        if (task.specApprovedAt !== undefined) break
-        this.document.tasks = this.document.tasks.map(item => item.id === action.taskId
-          ? { ...item, specApprovedAt: now, updatedAt: now }
-          : item)
-        break
-      }
       case 'approve-merge': {
         // The human's release for the merge (the card's "Freigeben (Merge)"
         // button). Deliberately not a plain `move`: the release merges, may hand
@@ -1328,8 +1305,8 @@ export class HostTaskLedger {
         // its column and its execution record, it just stops being worked on.
         // The service stops the attached sessions from the returned list. Cards
         // without an open run are skipped, so a batch is robust against a card
-        // that settled in the meantime. A clarification run in `todo` is
-        // suspended like any other run.
+        // that settled in the meantime. A clarification run in `clarification`
+        // is suspended like any other run.
         const ids = new Set(action.taskIds)
         const suspended: PausedRun[] = []
         this.document.tasks = this.document.tasks.map(task => {
@@ -1368,17 +1345,13 @@ export class HostTaskLedger {
         if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
           throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
         }
-        if (requiresSpecApproval(task)) {
-          throw new Error('spec-approval-required: the card has no released specification; release it before implementing')
-        }
-        const base = action.kind === 'rerun' ? withStatus(task, 'todo', now) : task
         // The Run button is the same go-ahead as the drag onto the run column:
         // it closes the card's open clarification round, and the run continues
         // that conversation with the implementation.
-        const released: TaskRecord = this.supersedeClarification(base, now)
-        // Safety net for a card started without the backlog → todo pull (the
-        // detail Run button or a cron trigger): still work on a feature branch
-        // when the workspace has a repository.
+        const released: TaskRecord = this.supersedeClarification(task, now)
+        // Safety net for a card started without the backlog → clarification
+        // pull (the detail Run button or a cron trigger): still work on a
+        // feature branch when the workspace has a repository.
         run = startExecution(this.withFeatureBranch(released), now, crypto.randomUUID(), initiator)
         this.document.tasks = this.document.tasks.map(item => item.id === task.id ? run!.task : item)
         break
@@ -1439,16 +1412,25 @@ export class HostTaskLedger {
   }
 
   /**
-   * Field-preserving v2 to v3 migration. v3 adds no fields yet, so the
-   * migration reuses the v3 normalization, but it first proves every task
-   * row is structurally valid: a v2 document that would silently drop or
-   * coerce rows fails loudly instead (no quarantined-empty restart).
+   * Field-preserving v2 to v3 migration. The migration reuses the v3
+   * normalization, but it first proves every task row is structurally valid: a
+   * v2 document that would silently drop or coerce rows fails loudly instead
+   * (no quarantined-empty restart). The retired `todo` column is mapped to
+   * `clarification` before that check, because its role — the waiting column
+   * before implementation — moved there.
    */
   private migrateLegacyDocument(parsed: ParsedLedgerDocument): LedgerDocument {
-    if (!Array.isArray(parsed.tasks) || !parsed.tasks.every(row => isTaskRecord(row))) {
+    const tasks: unknown[] | undefined = Array.isArray(parsed.tasks)
+      ? parsed.tasks.map((row) => {
+          if (typeof row !== 'object' || row === null) return row
+          const record = row as unknown as Record<string, unknown>
+          return record.status === 'todo' ? { ...record, status: 'clarification' } : row
+        })
+      : parsed.tasks
+    if (tasks === undefined || !tasks.every((row): row is TaskRecord => isTaskRecord(row))) {
       throw new Error('v2 document contains structurally invalid task rows')
     }
-    return this.normalizeDocument(parsed)
+    return this.normalizeDocument({ ...parsed, tasks })
   }
 
   private load(dir: string): LedgerDocument {

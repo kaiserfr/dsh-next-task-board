@@ -170,7 +170,6 @@ describe('continuation card: vertical action -> controller -> ledger -> snapshot
     const id = created?.id
     if (id === undefined) return
     // Settle the task so it becomes archivable.
-    ledger.applyRequest(uuid(), { kind: 'approve-spec', taskId: id })
     ledger.applyRequest(uuid(), { kind: 'run', taskId: id })
     ledger.settle(id, ledger.state().tasks[0]!.executions[0]!.id, 'failed')
     await new Promise(resolve => { setTimeout(resolve, 0) })

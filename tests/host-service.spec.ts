@@ -83,7 +83,6 @@ describe('TaskBoardHostService scheduling without a browser', () => {
       },
     })
     // Cron implements released specifications only.
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'scheduled' })
     const create = vi.fn(async (_request: GatewayRequest) => ({ sessionId: 'session-scheduled' }))
     const prompt = vi.fn(async (_request: GatewayRequest) => ({ accepted: true }))
     const { gateway } = makeGateway(request => {
@@ -200,7 +199,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     const opened = startExecution(base, 1_100, 'execution-a').task
     const imported = {
       ...opened,
-      status: 'todo' as const,
+      status: 'clarification' as const,
       executions: opened.executions.map(execution => ({ ...execution, sessionId: 'session-a' })),
     }
     ledger.applyRequest('import', { kind: 'import', sourceId: 'browser', tasks: [imported] })
@@ -255,21 +254,20 @@ describe('TaskBoardHostService clarification runs', () => {
   }
 
   /**
-   * The todo-column clarification is a real execution, but `todo` is WIP-free:
-   * it starts right away even while the lane's slot is held by a working run,
-   * and the later run continues exactly its session with the short go-ahead.
+   * The clarification column's run is a real execution, but the column is
+   * WIP-free: it starts right away even while the lane's slot is held by a
+   * working run, and the later run continues exactly its session with the short
+   * go-ahead.
    */
   it('starts next to a busy lane and wakes the same session with the go-ahead', async () => {
     const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-busy', { kind: 'create', id: 'busy', input: { title: 'Busy', description: '', prompt: 'work' } })
-    ledger.applyRequest('approve-busy', { kind: 'approve-spec', taskId: 'busy' })
     const busy = ledger.applyRequest('run-busy', { kind: 'run', taskId: 'busy' }).run!
     ledger.attachSession('busy', busy.execution.id, 'session-busy')
     ledger.applyRequest('create-card', {
       kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' },
     })
-    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
 
     const prompts: Array<{ sessionId: string; text: string }> = []
     let created = 0
@@ -315,9 +313,6 @@ describe('TaskBoardHostService clarification runs', () => {
     // short prompt (plus the completion contract). The *implementation* run is
     // an ordinary run: it needs the lane's slot, which `busy` still holds.
     service.setMaxConcurrentRuns(2)
-    // Out of the clarification column and on to `todo`: that is where the run
-    // column becomes reachable.
-    service.apply('card-through-todo', { kind: 'move', taskId: 'card', status: 'todo' })
     service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(prompts[1]?.sessionId).toBe('session-clarify')
@@ -334,7 +329,7 @@ describe('TaskBoardHostService clarification runs', () => {
 
   /**
    * The hazard the go-ahead creates for a round whose session is still being
-   * created: `todo` starts without waiting for a slot, so the human can pull the
+   * created: the clarification column starts without waiting for a slot, so the human can pull the
    * card on to the run column while the round is mid-launch. The round is closed
    * with the go-ahead, so its late session must not be attached as the card's
    * conversation — it is stopped instead, and the card owns exactly one.
@@ -343,13 +338,11 @@ describe('TaskBoardHostService clarification runs', () => {
     const now = new Date(2026, 7, 16, 10, 2, 0).getTime()
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-busy', { kind: 'create', id: 'busy', input: { title: 'Busy', description: '', prompt: 'work' } })
-    ledger.applyRequest('approve-busy', { kind: 'approve-spec', taskId: 'busy' })
     const busy = ledger.applyRequest('run-busy', { kind: 'run', taskId: 'busy' }).run!
     ledger.attachSession('busy', busy.execution.id, 'session-busy')
     ledger.applyRequest('create-card', {
       kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' },
     })
-    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
 
     const prompts: Array<{ sessionId: string; text: string }> = []
     const cancelled: string[] = []
@@ -380,7 +373,6 @@ describe('TaskBoardHostService clarification runs', () => {
     // session could attach; the implementation is an ordinary run, so the busy
     // lane keeps it queued until the limit is raised.
     service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
-    service.apply('card-through-todo', { kind: 'move', taskId: 'card', status: 'todo' })
     service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(created).toBe(1)
@@ -418,14 +410,13 @@ describe('TaskBoardHostService rework continuation', () => {
     let clock = now
     const ledger = new HostTaskLedger(root(), () => clock)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     // A first run that finished, then a review that did not accept it: the card
     // goes back to todo and is stamped.
     const first = ledger.applyRequest('run-first', { kind: 'run', taskId: 'card' }).run
     ledger.attachSession('card', first!.execution.id, 'session-first')
     clock += 1_000
     ledger.settle('card', first!.execution.id, 'succeeded', undefined)
-    ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(ledger.state().tasks[0].reworkAt).toBe(now + 1_000)
     expect(ledger.state().tasks[0].reuseSession).toBeUndefined()
 
@@ -676,9 +667,9 @@ describe('TaskBoardHostService poll heartbeat', () => {
 
   it('hands the enforced state machine to the browser in the snapshot', () => {
     const machine = {
-      initial: 'todo',
-      states: [{ status: 'backlog' }, { status: 'todo' }, { status: 'done' }],
-      transitions: [{ from: 'todo', to: 'done' }],
+      initial: 'clarification',
+      states: [{ status: 'backlog' }, { status: 'clarification' }, { status: 'done' }],
+      transitions: [{ from: 'clarification', to: 'done' }],
     }
     const ledger = new HostTaskLedger(root(), Date.now, { stateMachine: machine })
     const service = new TaskBoardHostService({} as TypertGateway, { ledger })
@@ -717,7 +708,7 @@ describe('TaskBoardHostService poll heartbeat', () => {
  * settles (or its card is paused): an idle roster entry means "no turn right
  * now", not "the run is over", so it must not push the lane's following cards
  * out of the queue. Only the settle (or pause) frees the lane, and a
- * clarification run in `todo` never needs a slot at all.
+ * clarification run never needs a slot at all.
  */
 describe('TaskBoardHostService lane occupancy', () => {
   /** Let the fire-and-forget launch chains settle (they only await gateway microtasks). */
@@ -762,12 +753,10 @@ describe('TaskBoardHostService lane occupancy', () => {
   function laneLedger(now: number): HostTaskLedger {
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-busy', { kind: 'create', id: 'busy', input: { title: 'Busy', description: '', prompt: 'work' } })
-    ledger.applyRequest('approve-busy', { kind: 'approve-spec', taskId: 'busy' })
     ledger.applyRequest('run-busy', { kind: 'run', taskId: 'busy' })
     const occupant = ledger.state().tasks.find(task => task.id === 'busy')!.executions.at(-1)!
     ledger.attachSession('busy', occupant.id, 'session-busy')
     ledger.applyRequest('create-card', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' } })
-    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
     return ledger
   }
 
@@ -847,10 +836,9 @@ describe('TaskBoardHostService lane occupancy', () => {
     expect(created()).toBe(1)
     expect(prompts[0]?.text).toContain('Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.')
 
-    // The go-ahead is an implementation run: the card goes on to `todo` first
-    // (that is where the run column is reachable), and the run queues behind
-    // the occupant instead of opening a second session.
-    service.apply('card-through-todo', { kind: 'move', taskId: 'card', status: 'todo' })
+    // The go-ahead is an implementation run: the card is pulled straight from
+    // clarification on to the run column, and the run queues behind the occupant
+    // instead of opening a second session.
     service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(created()).toBe(1)
@@ -883,7 +871,6 @@ describe('TaskBoardHostService completion report', () => {
     const now = new Date(2026, 7, 16, 10, 6, 0).getTime()
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create-card', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'do work' } })
-    ledger.applyRequest('approve-card', { kind: 'approve-spec', taskId: 'card' })
     const opened = ledger.applyRequest('run-card', { kind: 'run', taskId: 'card' }).run!
     ledger.attachSession('card', opened.execution.id, 'session-card')
 
@@ -929,7 +916,6 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
   function parked(now: number): HostTaskLedger {
     const ledger = new HostTaskLedger(root(), () => now)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
-    ledger.applyRequest('approve', { kind: 'approve-spec', taskId: 'card' })
     const run = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
     ledger.attachSession('card', run!.execution.id, 'session-card')
     ledger.settle('card', run!.execution.id, 'succeeded', undefined)
@@ -966,7 +952,7 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
     await poll(instance)
 
     const card = ledger.state().tasks.find(task => task.id === 'card')!
-    expect(card.status).toBe('todo')
+    expect(card.status).toBe('clarification')
     expect(card.reworkAt).toBe(now)
     expect(card.reworkCount).toBe(1)
     // The correction itself is not copied anywhere: it stays in that chat.
@@ -1028,14 +1014,14 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
     expect(ledger.state().tasks[0].status).toBe('ready_for_test')
     readable = true
     await poll(instance)
-    expect(ledger.state().tasks[0].status).toBe('todo')
+    expect(ledger.state().tasks[0].status).toBe('clarification')
     instance.dispose()
   })
 
   it('does not watch a card that is not waiting for a review', async () => {
     const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
     const ledger = parked(now)
-    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'todo' })
+    ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     const { service: instance, stream } = service(ledger, now, () => ({
       async *[Symbol.asyncIterator]() {
         yield snapshot([sessionEvent('user/message', 11, now + 1_000, { message: { content: [] } })], 11, false)

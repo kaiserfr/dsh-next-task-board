@@ -61,7 +61,7 @@ export class TaskBoardHostService {
   private readonly launchesInFlight = new Map<string, number>()
   /**
    * WIP limit per workspace/lane: how many implementation runs may hold a
-   * session at once (always >= 1). Clarification runs (`todo`) are exempt.
+   * session at once (always >= 1). Clarification runs are exempt.
    */
   private maxConcurrentRuns = 1
   /**
@@ -518,8 +518,8 @@ export class TaskBoardHostService {
     // must never have).
     if (!this.ledger.isOpenExecution(opened.task.id, opened.execution.id)) return
     // The card's clarification run goes through this very queue, but not
-    // through the lane limit: `todo` is WIP-free, so it may start next to a
-    // working run of the same workspace. Its session is the card's
+    // through the lane limit: the clarification column is WIP-free, so it may
+    // start next to a working run of the same workspace. Its session is the card's
     // clarification conversation, so it is continued rather than duplicated,
     // and its prompt is the run prompt plus the clarification addendum
     // (composed by the runner).
@@ -589,10 +589,10 @@ export class TaskBoardHostService {
         }
       }
       // Closed while the session was being created — a clarification round the
-      // go-ahead superseded, which is the normal race now that `todo` starts
-      // without waiting for a slot: the card owns exactly one conversation, so
-      // this late session is stopped and never attached. The implementation
-      // meanwhile opened its own.
+      // go-ahead superseded, which is the normal race because the clarification
+      // column starts without waiting for a slot: the card owns exactly one
+      // conversation, so this late session is stopped and never attached. The
+      // implementation meanwhile opened its own.
       if (!this.ledger.isOpenExecution(opened.task.id, opened.execution.id)) {
         try {
           await this.runner.cancel(sessionId)
@@ -797,8 +797,8 @@ export class TaskBoardHostService {
     // ledger subscription (settles) and the gated power listener above.
     await this.reconcileExecutions(running.items, runtime.openExecutions)
     // A card that parked in the review/failed column and whose human then wrote
-    // in its own chat is a rework: the Host sends it back to `todo` and stamps
-    // it, and the correction itself stays in that conversation.
+    // in its own chat is a rework: the Host sends it back to `clarification` and
+    // stamps it, and the correction itself stays in that conversation.
     await this.watchReworkChats(running.items)
     // Read after the settles above: a clarification round that just settled is
     // exactly the moment its card starts waiting for the human's answer.
@@ -887,11 +887,11 @@ export class TaskBoardHostService {
       if (scannedAt !== undefined) this.reworkScans.set(taskId, scannedAt)
       if (human.at === undefined) continue
       try {
-        this.ledger.applyRequest(`rework:${taskId}:${human.at}`, { kind: 'move', taskId, status: 'todo' })
+        this.ledger.applyRequest(`rework:${taskId}:${human.at}`, { kind: 'move', taskId, status: 'clarification' })
       } catch (error) {
         // A card whose machine declares no way back (or that changed column in
         // between) simply stays put; the next human turn tries again.
-        console.warn(`[dsh-task-board] could not send task ${taskId} back to todo for rework`, error)
+        console.warn(`[dsh-task-board] could not send task ${taskId} back to clarification for rework`, error)
       }
     }
     for (const id of [...this.reworkScans.keys()]) if (!watching.has(id)) this.reworkScans.delete(id)
@@ -959,7 +959,7 @@ export class TaskBoardHostService {
    * runs within one lane still start FIFO. A run above its lane's limit stays
    * queued: its ledger execution is already open without a session, so the card
    * reads as waiting and cannot be opened twice. A clarification run is never
-   * held back — `todo` has no WIP limit. Called on enqueue, on every ledger
+   * held back — the clarification column has no WIP limit. Called on enqueue, on every ledger
    * change (a settle frees a slot), after a launch attaches a session or fails,
    * and when the limit changes.
    */
@@ -988,10 +988,11 @@ export class TaskBoardHostService {
       // worktree and branch. Counting idle-but-open sessions here is what keeps
       // a lane strictly at WIP 1 instead of merely throttling its launch rate.
       //
-      // A clarification run (the `todo` column's execution) holds no slot at
-      // all: `todo` is WIP-free, so a card pulled in always starts right away —
-      // next to a working run of the same workspace if need be. Its prompt
-      // forbids implementing anything, which is what makes the overlap safe.
+      // A clarification run (the `clarification` column's execution) holds no
+      // slot at all: the clarification column is WIP-free, so a card pulled in
+      // always starts right away — next to a working run of the same workspace
+      // if need be. Its prompt forbids implementing anything, which is what
+      // makes the overlap safe.
       const holding = new Map<string, number>()
       for (const execution of open) {
         if (execution.kind === 'clarify') continue

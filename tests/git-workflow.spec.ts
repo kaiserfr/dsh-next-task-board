@@ -274,9 +274,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       })
       expect(ledger.state().tasks[0].status).toBe('backlog')
       expect(ledger.state().tasks[0].git).toBeUndefined()
-
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       const opened = ledger.state().tasks[0]
       expect(opened.git?.branch).toBe('task/fix-login-card1')
       expect(opened.git?.base).toBe('main')
@@ -286,7 +284,6 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(opened.git!.branch)
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
 
-      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       expect(run).toBeDefined()
       expect(ledger.state().tasks[0].status).toBe('running')
@@ -323,15 +320,13 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
           id,
           input: { title: `Fix ${id}`, description: '', prompt: 'p', workspaceId: 'ws-1' },
         })
-        ledger.applyRequest(`r-todo-${id}`, { kind: 'move', taskId: id, status: 'clarification' })
-        ledger.applyRequest(`r-step-on-${id}`, { kind: 'move', taskId: id, status: 'todo' })
-        ledger.applyRequest(`r-approve-${id}`, { kind: 'approve-spec', taskId: id })
+        ledger.applyRequest(`r-step-on-${id}`, { kind: 'move', taskId: id, status: 'clarification' })
         const run = ledger.applyRequest(`r-run-${id}`, { kind: 'run', taskId: id }).run
         const dir = cardDir(ledger, repo, id)
         writeFileSync(join(dir, `work-${id}.txt`), `${outcome}\n`)
         ledger.settle(id, run!.execution.id, outcome)
         const task = ledger.state().tasks.find(entry => entry.id === id)!
-        expect(task.status).toBe(outcome === 'failed' ? 'failed' : 'todo')
+        expect(task.status).toBe(outcome === 'failed' ? 'failed' : 'clarification')
         expect(task.git?.committedAt).toBe(NOW)
         expect(git(dir, ['log', '-1', '--pretty=%s'])).toBe(`task: Fix ${id}`)
       }
@@ -351,8 +346,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       // Backlog → Todo opens the branch and the clarification round.
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       const clarification = ledger.state().tasks[0].executions.at(-1)!
       expect(clarification.kind).toBe('clarify')
       const dir = cardDir(ledger, repo)
@@ -365,7 +359,6 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
 
       // A run interrupted before its session was recorded is cancelled on the
       // next Host start — and that cancellation commits the work.
-      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       expect(run).toBeDefined()
       writeFileSync(join(dir, 'interrupted.txt'), 'work of the interrupted run\n')
@@ -375,7 +368,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     const restarted = new HostTaskLedger(dir, () => NOW, { git: workflowFor(repo) })
     try {
       const task = restarted.state().tasks[0]
-      expect(task.status).toBe('todo')
+      expect(task.status).toBe('clarification')
       expect(task.executions.at(-1)?.result).toBe('cancelled')
       expect(task.git?.committedAt).toBe(NOW)
       const restartedDir = task.git!.worktreePath!
@@ -397,9 +390,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
-      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'agent output\n')
@@ -414,7 +405,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
 
       // The same holds for a manual drag into the review column: the move goes
       // through, the refused commit is recorded on the newest settled execution.
-      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       writeFileSync(join(dir, 'second.txt'), 'more work\n')
       ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
       const again = ledger.state().tasks[0]
@@ -445,7 +436,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(parked.git?.committedAt).toBeUndefined()
       writeFileSync(join(dir, 'feature.txt'), 'no run at all\n')
       // Back out and in again: that park commits the work.
-      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
       const again = ledger.state().tasks[0]
       expect(again.git?.committedAt).toBe(NOW)
@@ -491,7 +482,6 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       expect(run).toBeDefined()
       const task = ledger.state().tasks[0]
@@ -517,7 +507,6 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         taskId: 'card-1',
         patch: { enabled: true, cron: '0 9 * * *' },
       })
-      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
       expect(ledger.openScheduled('card-1', undefined, NOW)).toBeDefined()
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('running')
@@ -538,8 +527,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       // The same file changed on both sides: the replay onto the base conflicts.
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
@@ -584,8 +572,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -628,8 +615,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -668,8 +654,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -738,9 +723,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'todo' })
-      ledger.applyRequest('r-approve', { kind: 'approve-spec', taskId: 'card-1' })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' })
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'reviewed\n')
@@ -766,7 +749,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
 
       // Re-parking rebinds the approval to the new head and drops the failed
       // release record; the next release then goes through.
-      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'todo' })
+      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
       const rebound = ledger.state().tasks[0].git!.reviewedCommit
       expect(rebound).toBe(git(dir, ['rev-parse', 'HEAD']))

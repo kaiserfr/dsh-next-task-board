@@ -21,11 +21,11 @@ const defaultMachine = new StateMachine(DEFAULT_STATE_MACHINE)
 
 /** A minimal valid override built from JSON, i.e. what a settings draft holds. */
 const custom = {
-  initial: 'todo',
-  states: [{ status: 'backlog' }, { status: 'todo' }, { status: 'done' }],
+  initial: 'clarification',
+  states: [{ status: 'backlog' }, { status: 'clarification' }, { status: 'done' }],
   transitions: [
-    { from: 'todo', to: 'done', actions: ['git.mergeBranch'] },
-    { from: 'done', to: 'todo' },
+    { from: 'clarification', to: 'done', actions: ['git.mergeBranch'] },
+    { from: 'done', to: 'clarification' },
   ],
 }
 
@@ -37,8 +37,8 @@ describe('state machine config', () => {
   it('builds a machine from a settings JSON document', () => {
     const { machine, errors } = resolveStateMachine(custom)
     expect(errors).toEqual([])
-    expect(machine?.states.map(state => state.status)).toEqual(['backlog', 'todo', 'done'])
-    expect(machine?.initialStatus).toBe('todo')
+    expect(machine?.states.map(state => state.status)).toEqual(['backlog', 'clarification', 'done'])
+    expect(machine?.initialStatus).toBe('clarification')
   })
 
   it('refuses unknown states, unknown actions, self-transitions, bad triggers and duplicates', () => {
@@ -46,7 +46,7 @@ describe('state machine config', () => {
       states: [{ status: 'backlog' }, { status: 'nope' }, { status: 'backlog' }],
       transitions: [
         { from: 'backlog', to: 'backlog' },
-        { from: 'backlog', to: 'todo' },
+        { from: 'backlog', to: 'clarification' },
         { from: 'backlog', to: 'done', actions: ['git.rebase'] },
         { from: 'backlog', to: 'failed', trigger: 'sometimes' },
       ],
@@ -56,7 +56,7 @@ describe('state machine config', () => {
       'stateMachine.states[1]: unknown status',
       'stateMachine.states[2]: duplicate status backlog',
       'stateMachine.transitions[0]: backlog → backlog is not a transition',
-      'stateMachine.transitions[1].to: todo is not a column',
+      'stateMachine.transitions[1].to: clarification is not a column',
       'stateMachine.transitions[2].to: done is not a column',
       'stateMachine.transitions[2].actions: unknown action "git.rebase"',
       'stateMachine.transitions[3].to: failed is not a column',
@@ -71,18 +71,18 @@ describe('state machine config', () => {
   })
 
   it('requires an explicit initial state once backlog is not a column', () => {
-    const withoutInitial = normalizeStateMachine({ states: [{ status: 'todo' }], transitions: [] })
+    const withoutInitial = normalizeStateMachine({ states: [{ status: 'clarification' }], transitions: [] })
     expect(withoutInitial.errors).toEqual(['stateMachine.initial: required when "backlog" is not a column'])
-    const withInitial = normalizeStateMachine({ initial: 'todo', states: [{ status: 'todo' }], transitions: [] })
+    const withInitial = normalizeStateMachine({ initial: 'clarification', states: [{ status: 'clarification' }], transitions: [] })
     expect(withInitial.errors).toEqual([])
   })
 
   it('orders columns by `order`, with unset columns keeping their declared slot', () => {
     const machine = normalizeStateMachine({
-      states: [{ status: 'backlog' }, { status: 'done', order: -1 }, { status: 'todo' }],
+      states: [{ status: 'backlog' }, { status: 'done', order: -1 }, { status: 'clarification' }],
       transitions: [],
     }).machine!
-    expect(machine.states.map(state => state.status)).toEqual(['done', 'backlog', 'todo'])
+    expect(machine.states.map(state => state.status)).toEqual(['done', 'backlog', 'clarification'])
   })
 })
 
@@ -96,39 +96,37 @@ describe('transitions are the drag & drop rule', () => {
       }
     }
     // `running` is entered by a run, never by a status move.
-    expect(canMoveManually('todo', 'running')).toBe(false)
+    expect(canMoveManually('clarification', 'running')).toBe(false)
     expect(defaultMachine.acceptsDrop('running')).toBe(false)
   })
 
   it('refuses a move the configured machine does not list', () => {
     const machine = resolveStateMachine(custom).machine!
-    expect(machine.canTransition('todo', 'done')).toBe(true)
+    expect(machine.canTransition('clarification', 'done')).toBe(true)
     expect(machine.canTransition('backlog', 'done')).toBe(false)
-    expect(machine.targets('todo')).toEqual(['done'])
+    expect(machine.targets('clarification')).toEqual(['done'])
   })
 
   it('separates manual targets from the runner transitions', () => {
     // `running` has only runner transitions; entering it is the `run` action.
     expect(defaultMachine.targets('running')).toEqual([])
-    expect(defaultMachine.targets('running', 'runner')).toEqual(['ready_for_test', 'failed', 'todo'])
+    expect(defaultMachine.targets('running', 'runner')).toEqual(['ready_for_test', 'failed', 'clarification'])
     expect(defaultMachine.canTransition('running', 'ready_for_test', 'runner')).toBe(true)
-    expect(defaultMachine.canTransition('running', 'todo', 'runner')).toBe(true)
-    // `todo` and the two corrected columns reach the run column: a card in
-    // `todo` may be dropped onto "In progress" (the action, not the status move,
-    // starts it), and a reviewed or failed card may be pulled straight back onto
-    // it. A card in `backlog` or in the clarification column may not — those
-    // drags have no transition at all.
-    expect(defaultMachine.actionsFor('todo', 'running')).toEqual(['run'])
+    expect(defaultMachine.canTransition('running', 'clarification', 'runner')).toBe(true)
+    // The clarification column and the two corrected columns reach the run
+    // column: a card in `clarification` may be dropped onto "In progress" (the
+    // action, not the status move, starts it), and a reviewed or failed card may
+    // be pulled straight back onto it. A card in `backlog` may not — that drag
+    // has no transition at all.
+    expect(defaultMachine.actionsFor('clarification', 'running')).toEqual(['run'])
     expect(defaultMachine.actionsFor('ready_for_test', 'running')).toEqual(['run'])
     expect(defaultMachine.actionsFor('failed', 'running')).toEqual(['run'])
     expect(defaultMachine.canTransition('backlog', 'running')).toBe(false)
-    expect(defaultMachine.canTransition('clarification', 'running')).toBe(false)
     expect(defaultMachine.targets('backlog')).not.toContain('running')
-    expect(defaultMachine.targets('clarification')).not.toContain('running')
   })
 
   it('treats a same-state move as no transition', () => {
-    expect(defaultMachine.canTransition('todo', 'todo')).toBe(false)
+    expect(defaultMachine.canTransition('clarification', 'clarification')).toBe(false)
   })
 })
 
@@ -136,19 +134,18 @@ describe('actions hang off transitions', () => {
   it('fires the git hooks on exactly the workflow transitions', () => {
     // `clarify` rides the same transition: pulling a card out of the backlog
     // lands it in the clarification column and opens its round, not just a
-    // branch cut. Closing the step is a plain move, and re-opening the questions
-    // from `todo` fires `clarify` again.
+    // branch cut. Leaving the column is a plain move or the `run` go-ahead.
     expect(defaultMachine.actionsFor('backlog', 'clarification')).toEqual(['git.openBranch', 'clarify'])
-    expect(defaultMachine.actionsFor('clarification', 'todo')).toEqual([])
-    expect(defaultMachine.actionsFor('todo', 'clarification')).toEqual(['clarify'])
+    expect(defaultMachine.actionsFor('clarification', 'backlog')).toEqual([])
+    expect(defaultMachine.actionsFor('clarification', 'running')).toEqual(['run'])
     // Every manual way into the review column commits, so no run's work waits
     // uncommitted while the card is reviewed.
-    expect(defaultMachine.actionsFor('todo', 'ready_for_test')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('clarification', 'ready_for_test')).toEqual(['git.commitBranch'])
     expect(defaultMachine.actionsFor('backlog', 'ready_for_test')).toEqual(['git.commitBranch'])
     expect(defaultMachine.actionsFor('done', 'ready_for_test')).toEqual(['git.commitBranch'])
     expect(defaultMachine.actionsFor('failed', 'ready_for_test')).toEqual(['git.commitBranch'])
     expect(defaultMachine.actionsFor('ready_for_test', 'done')).toEqual(['git.mergeBranch'])
-    expect(defaultMachine.actionsFor('todo', 'done')).toEqual([])
+    expect(defaultMachine.actionsFor('clarification', 'done')).toEqual([])
   })
 
   it('carries the run action and stamp fields declaratively', () => {
@@ -184,10 +181,10 @@ describe('diagram', () => {
     const diagram = renderStateMachineMermaid(defaultMachine)
     for (const status of ALL_STATUSES) expect(diagram).toContain(status)
     expect(diagram).toContain('backlog --> clarification: manual: openBranch, clarify')
-    expect(diagram).toContain('clarification --> todo: manual')
-    expect(diagram).toContain('todo --> ready_for_test: manual: commitBranch')
+    expect(diagram).toContain('clarification --> running: manual: run')
+    expect(diagram).toContain('clarification --> ready_for_test: manual: commitBranch')
     expect(diagram).toContain('ready_for_test --> done: manual: mergeBranch')
-    expect(diagram).toContain('running --> ready_for_test, failed, todo: runner')
+    expect(diagram).toContain('running --> ready_for_test, failed, clarification: runner')
   })
 })
 

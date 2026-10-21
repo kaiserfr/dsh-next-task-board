@@ -46,12 +46,13 @@ export interface Config {
      * between them, and the actions fired by a transition (`git.openBranch`,
      * `git.commitBranch`, `git.mergeBranch`, `run`, `clarify`, `stamp`). Absent
      * keeps the shipped
-     * machine (backlog → todo → running → ready_for_test → failed → done, where
-     * `backlog → todo` is the clarification step: every card starts its run
-     * there, its prompt asks the agent's open questions and stops, and a human
-     * start on to `running` continues that same session with the
-     * implementation; every way into `ready_for_test` commits the card's
-     * worktree, and `ready_for_test → done` merges the branch). An invalid
+     * machine (backlog → clarification → running → ready_for_test → failed →
+     * done, where `backlog → clarification` is the clarification step: every card
+     * starts its run there, its prompt asks the agent's open questions and stops,
+     * and a human start on to `running` continues that same session with the
+     * implementation; there is no separate To do column; every way into
+     * `ready_for_test` commits the card's worktree, and `ready_for_test → done`
+     * merges the branch). An invalid
      * config is refused as a whole and the machine in force stays.
      * Shape: `{ initial?, states: [{ status, label?, order?, drop? }],
      * transitions: [{ from, to, trigger?, git?, actions? }] }`.

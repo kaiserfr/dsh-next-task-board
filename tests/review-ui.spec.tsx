@@ -114,7 +114,7 @@ describe('review block', () => {
   })
 
   it('stays hidden in every other column and for archived cards', () => {
-    for (const task of [card({ status: 'todo' }), card({ status: 'running' }), card({ status: 'done' }), card({ archivedAt: 1 })]) {
+    for (const task of [card({ status: 'clarification' }), card({ status: 'running' }), card({ status: 'done' }), card({ archivedAt: 1 })]) {
       const { controller } = harness({ task })
       const container = render(<TaskDetail controller={controller} task={task} />)
       expect(container.querySelector('[data-dsh-part="review"]'), task.status).toBeNull()

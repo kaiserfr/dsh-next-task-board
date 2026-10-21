@@ -24,7 +24,7 @@ describe('task-board duplicate and edit copy feature (Issue #1413)', () => {
     title: '每周 AI 资讯周报',
     description: '自动收集并整理 AI 资讯',
     prompt: '请抓取过去一周的热门 AI 项目并总结',
-    status: 'todo',
+    status: 'clarification',
     createdAt: 1000,
     updatedAt: 1000,
     workspaceId: 'ws-main',

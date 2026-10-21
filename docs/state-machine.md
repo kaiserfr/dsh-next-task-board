@@ -16,37 +16,31 @@ Host refuses any `move` the machine does not list.
 ```mermaid
 stateDiagram-v2
     [*] --> backlog
-    state "columns: backlog | clarification | todo | running | ready_for_test | failed | done" as columns
+    state "columns: backlog | clarification | running | ready_for_test | failed | done" as columns
     backlog --> clarification: manual: openBranch, clarify
     backlog --> ready_for_test: manual: commitBranch
     backlog --> done: manual
     backlog --> failed: manual
-    clarification --> todo: manual
+    clarification --> running: manual: run
     clarification --> backlog: manual
     clarification --> ready_for_test: manual: commitBranch
     clarification --> done: manual
     clarification --> failed: manual
-    todo --> clarification: manual: clarify
-    todo --> backlog: manual
-    todo --> ready_for_test: manual: commitBranch
-    todo --> done: manual
-    todo --> failed: manual
     ready_for_test --> backlog: manual
-    ready_for_test --> todo: manual
+    ready_for_test --> clarification: manual
     ready_for_test --> done: manual: mergeBranch
     ready_for_test --> failed: manual
     done --> backlog: manual
-    done --> todo: manual
+    done --> clarification: manual
     done --> ready_for_test: manual: commitBranch
     done --> failed: manual
     failed --> backlog: manual
-    failed --> todo: manual
+    failed --> clarification: manual
     failed --> ready_for_test: manual: commitBranch
     failed --> done: manual
     ready_for_test --> running: manual: run
     failed --> running: manual: run
-    todo --> running: manual: run
-    running --> ready_for_test, failed, todo: runner
+    running --> ready_for_test, failed, clarification: runner
 ```
 
 *Regenerate after changing the machine:*
@@ -63,12 +57,12 @@ definition.
 | Trigger  | Who fires it                                              |
 |----------|-----------------------------------------------------------|
 | `manual` | A human: drag & drop on the board, or a chip in the task detail. |
-| `runner` | The execution runner settling a run (success → `ready_for_test`, failure → `failed`, cancel → `todo`). |
+| `runner` | The execution runner settling a run (success → `ready_for_test`, failure → `failed`, cancel → `clarification`). |
 | `cron`   | A scheduled run.                                          |
 
 `running` is the runner's own state: it carries `"drop": false` and only
 `runner` transitions leave it. It is *entered* through the `run` action
-(`todo → running`), never by a plain status move.
+(`clarification → running`), never by a plain status move.
 
 ## Clarification column
 
@@ -97,25 +91,23 @@ every card — the column is where the agent asks before anything is implemented
   questions are settled. The wording of the block and the rule cannot drift: the
   rule interpolates the very lines the run sends (`CLARIFICATION_ADDENDUM`). It
   keeps the card in `clarification` — settling the run never changes the column.
-* **The human closes the step.** `clarification → todo` is an ordinary manual
-  move: the answers are settled, so the card goes on to the column where its
-  specification is released. `clarification → backlog` sends it back, and
-  `todo → clarification` fires `clarify` again — that re-enters the card's one
-  conversation instead of minting a second one.
-* The run lands in the card's one conversation (`clarificationSessionId`); the
-  run that implements the card continues that same session, so the answers stay
-  in context and no second conversation is opened. Passing the step again
-  re-enters that conversation.
-* A drag straight from `backlog` — or from `clarification` — to `running` has no
-  transition at all: the card must pass `todo` first.
-* Pulling the card from `todo` on to the run column — or its Run button — is the
+* **The human closes the step by starting the work.** Pulling the card from
+  `clarification` straight on to the run column — or its Run button — is the
   **go-ahead**: it closes the card's open clarification round (recorded as
   cancelled; a round whose launch has not started yet is dropped, and one whose
   session is still being created has that late session stopped instead of
   attached — so the card owns exactly one open execution and one conversation)
-  and continues that conversation with *"Bitte jetzt implementieren."*. The
-  implementation run itself is an ordinary run and still obeys the lane's WIP
-  limit — and it is gated by the released specification.
+  and continues that conversation with *"Bitte jetzt implementieren."*. There
+  is no separate To do column and no specification-release step in between. The
+  implementation run itself is an ordinary run and obeys the lane's WIP limit.
+  `clarification → backlog` sends the card back.
+* The run lands in the card's one conversation (`clarificationSessionId`); the
+  run that implements the card continues that same session, so the answers stay
+  in context and no second conversation is opened. Passing the step again
+  (`backlog → clarification`) re-enters that conversation.
+* A drag straight from `backlog` to `running` has no transition at all: the
+  card must pass `clarification` first. From `clarification` the run column is
+  reachable directly.
 * A **group drop** (`move-many`) never opens executions: a batch onto a
   transition that carries `run` *or* `clarify` is refused, so a batch can never
   start runs and never park a card in the clarification column without its
@@ -128,19 +120,19 @@ every card — the column is where the agent asks before anything is implemented
 | `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch **and its own worktree** under `$DSH_HOME/task-board/worktrees/<id>`: the run session is created on that directory, so the main checkout keeps the branch the human left it on. A branch that already exists is re-attached; where `git worktree` refuses, the historical shared checkout is used instead. No-op without a git repository. |
 | `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp) and stamps the resulting head as `reviewedCommit` — the commit the review column shows, cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
 | `git.mergeBranch`   | Replays the feature branch onto its base branch as that stands now (`git rebase` — other cards may have merged meanwhile) and merges it back — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused before anything is replayed. On the release into `done` this is the merge release: a refusal or a failure parks the card in `failed` with the reason, and a **conflict** in the replay is resolved by the card's own agent instead (see *Merge release*). |
-| `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start releases the clarification gate and continues the card's clarification session; only cron refuses an unresolved card. **Every** `run` (this move, the detail Run button, `rerun`, cron) is refused while the card has no released specification (see *Specification release*). |
+| `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start from `clarification` closes the open clarification round and continues the card's clarification session; the detail Run button and cron do the same. It never checks a specification release: starting the work *is* the go-ahead. |
 | `clarify`           | Opens the card's clarification run: the same execution as `run` (same queue, but WIP-free — the clarification column starts without waiting for a lane slot), its prompt asks the agent's open questions in the card's chat and stops, it checks no branch out, and settling it leaves the card in its column. |
 | `{ kind: "stamp", field: "doneAt" }` | Writes a timestamp into a task field.                    |
 
 In the shipped machine the git actions describe the agentic-programming flow:
 `backlog → clarification` opens the branch, every way into `ready_for_test` commits it
-(`backlog →`, `todo →`, `done →` and `failed → ready_for_test` all carry
+(`backlog →`, `clarification →`, `done →` and `failed → ready_for_test` all carry
 `git.commitBranch`), and `ready_for_test → done` merges it back. A branch or
 merge hook that refuses fails the move, so a card never claims a branch or a
 merge that did not happen; the commit hook is the deliberate exception — it
 records its failure on the card (below) instead of blocking the park, because
 uncommitted work must not keep a card out of the review column. The `run` action
-sits on the way into `running`: `todo → running` starts the card, and
+sits on the way into `running`: `clarification → running` starts the card, and
 `ready_for_test → running` / `failed → running` pull a reviewed or failed card
 straight back onto the run column (the run continues the card's conversation, so
 a correction written there is already in context). `clarify`
@@ -195,30 +187,6 @@ holding uncommitted card work:
 * The card's `TaskGit` records `committedAt` (the instant of the last commit, not
   shown in the UI) next to `mergedAt`.
 
-## Specification release: the gate in front of every run
-
-A card is implemented only after a human released its specification. The release
-is one ledger stamp, `TaskRecord.specApprovedAt`, written by exactly one action —
-`approve-spec` (the *Release specification* button in the card detail) — and
-checked by the Host on **every** `run` path:
-
-* the `run` transition (a drop onto the run column),
-* the detail view's Run button (`run`/`rerun`),
-* cron (`openScheduled`): an unreleased card is not started unattended; the
-  occurrence is skipped and the schedule rolls to the next one, exactly like the
-  permission gate.
-
-The refusal is a Host error, so no browser path can bypass it: manual runs throw
-`spec-approval-required`, cron skips silently and advances the schedule. A
-clarification run (`clarify`) is *not* gated — asking the questions is what
-happens before the release.
-
-The gate re-arms when the released text changes: editing the content (title,
-description, prompt) or the parse source clears the stamp, so a card whose
-instruction changed is never implemented on the old approval. The same holds for
-an imported card: the wire sanitizer whitelists an imported card's fields, so a
-release never travels with it.
-
 ## Review gate: the approval is bound to one commit
 
 Reaching `ready_for_test` does not only commit — it stamps the commit the branch
@@ -236,7 +204,7 @@ and `git.mergeBranch` (the way into `done`) takes **exactly** it:
 * Re-parking the card rebinds the approval: every route back into
   `ready_for_test` (`git.commitBranch` on the manual moves, and the runner's own
   settle) stamps the new head. The ordinary way to review new work is therefore
-  `ready_for_test → todo` (the rework return), correction in the card's chat,
+  `ready_for_test → clarification` (the rework return), correction in the card's chat,
   the next run, and the next park.
 * A card **without** a `reviewedCommit` is refused too (fail closed): cards
   parked before this gate existed, and cards a custom machine routes into
@@ -280,7 +248,7 @@ Host action) — go through the same Host routine, so the two can never disagree
   commit, no reviewed commit, git's own error): the card goes to `failed` with
   the Host's reason on its `merge` record. From there the ordinary rework path
   applies — the human writes the correction into the card's chat, the card
-  returns to `todo`, the next park rebinds the approval and clears the release
+  returns to `clarification`, the next park rebinds the approval and clears the release
   record, and the next release tries again.
 * **The replay conflicts.** The half-done rebase **stays in the card's own
   worktree**, markers and all, and is never handed to the human's checkout: the
@@ -333,12 +301,13 @@ and the merge all work exactly as they do for a workspace that *is* a repository
 An entry that names a directory that is not a repository changes nothing: the
 card keeps working without a branch.
 
-## Rework: back to `todo` from the review
+## Rework: back to `clarification` from the review
 
-A card that did not pass the review (or whose run failed) goes back to `todo`
-when the human writes the correction into the card's **own conversation**: the
-Host watches those chats, fires the ordinary `ready_for_test → todo` (or
-`failed → todo`) move on that human turn, and stamps the card (`reworkAt`,
+A card that did not pass the review (or whose run failed) goes back to
+`clarification` when the human writes the correction into the card's **own
+conversation**: the Host watches those chats, fires the ordinary
+`ready_for_test → clarification` (or `failed → clarification`) move on that
+human turn, and stamps the card (`reworkAt`,
 `reworkCount`). No note text is stored anywhere — the transcript *is* the note,
 and the send-back never starts a run. The card's next run is marked as the
 rework round, continues the corrected conversation, and opens with a short
@@ -402,7 +371,6 @@ containers:
   "states": [
     { "status": "backlog" },
     { "status": "clarification" },
-    { "status": "todo" },
     { "status": "running", "drop": false },
     { "status": "ready_for_test", "label": "Review" },
     { "status": "done" },
@@ -410,15 +378,14 @@ containers:
   ],
   "transitions": [
     { "from": "backlog", "to": "clarification", "actions": ["git.openBranch", "clarify"] },
-    { "from": "clarification", "to": "todo" },
-    { "from": "todo", "to": "running", "actions": ["run"] },
-    { "from": "todo", "to": "ready_for_test", "actions": ["git.commitBranch"] },
+    { "from": "clarification", "to": "running", "actions": ["run"] },
+    { "from": "clarification", "to": "ready_for_test", "actions": ["git.commitBranch"] },
     { "from": "ready_for_test", "to": "done", "actions": ["git.mergeBranch"] }
   ]
 }
 ```
 
-* `states[].status` — one of `backlog`, `clarification`, `todo`, `running`,
+* `states[].status` — one of `backlog`, `clarification`, `running`,
   `ready_for_test`, `done`, `failed` (the ledger's closed vocabulary). `label` overrides the
   column title, `order` moves the column, `drop: false` makes it a column that
   never accepts a card.
