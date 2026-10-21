@@ -7,11 +7,21 @@ import type { TaskRecord } from './core/tasks.ts';
 export interface TaskBoardWorkspaceRegistry {
     list(): readonly Workspace[];
 }
+/**
+ * Peer a Host-side gateway call speaks for. dsh 0.2.1 dropped the gateway's
+ * in-process operator fallback (`request.peer ?? this.operatorPeer()`), so a
+ * call without a Peer now fails in `assertPeerLive` with
+ * `Cannot read properties of undefined (reading 'signal')`. The board hands in
+ * the operator Peer it obtained from the Connection service; older runtimes
+ * ignore the field and keep their own fallback.
+ */
+export type GatewayPeer = NonNullable<Parameters<TypertGateway['invoke']>[0]['peer']>;
 interface GatewayRequest {
     namespace: string;
     method: string;
     args: Record<string, unknown>;
     signal?: AbortSignal;
+    peer?: GatewayPeer;
 }
 interface SessionGateway {
     invoke(request: GatewayRequest): Promise<unknown>;
@@ -165,6 +175,7 @@ export declare class HostExecutionRunner {
     private readonly gateway;
     private readonly commands?;
     private readonly workspaceRegistry?;
+    private readonly peer?;
     /** Newest scanned event sequence per session with no matching execution end. */
     private readonly scanMemos;
     private readonly unavailableAttempts;
@@ -175,7 +186,7 @@ export declare class HostExecutionRunner {
     constructor(gateway: SessionGateway | TypertGateway, commands?: SessionCommandDispatcher | undefined, workspaceRegistry?: TaskBoardWorkspaceRegistry | undefined, unavailableRetry?: {
         attempts?: number;
         backoffMs?: number;
-    });
+    }, peer?: GatewayPeer | undefined);
     private invoke;
     private stream;
     /**

@@ -1,6 +1,7 @@
 import { createServer, request, type Server } from 'node:http'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { makeTaskBoardRoutes } from '../src/host-routes.ts'
+import { isTrustedTaskBoardRequest, makeTaskBoardRoutes } from '../src/host-routes.ts'
+import type { IncomingMessage } from 'node:http'
 import type { TaskBoardHostService } from '../src/host-service.ts'
 import type { TaskBoardSnapshot } from '../src/protocol.ts'
 
@@ -378,5 +379,52 @@ describe('task-board review route', () => {
     })
     expect(notJson.status).toBe(415)
     expect(reviewOperation).not.toHaveBeenCalled()
+  })
+})
+
+
+/**
+ * A LAN-facing deployment: dsh 0.2.1 rejects the wildcard bind, so the profile
+ * binds one concrete address and serves no loopback socket. The fence then has
+ * to answer through the Connection service's own admission decision instead.
+ */
+describe('task-board route fence on a LAN-facing bind', () => {
+  const lanRequest = (overrides: Record<string, string> = {}): IncomingMessage => ({
+    headers: { host: '192.168.178.38:3099', 'sec-fetch-site': 'same-origin', ...overrides },
+    socket: { remoteAddress: '192.168.178.50' },
+  }) as unknown as IncomingMessage
+
+  const access = (hostCredential?: (request: IncomingMessage) => boolean) => ({
+    trustedProxyHosts: new Set<string>(),
+    ...(hostCredential === undefined ? {} : { hostCredential }),
+  })
+
+  it('refuses a LAN request when the deployment supplies no credential check', () => {
+    expect(isTrustedTaskBoardRequest(lanRequest(), access())).toBe(false)
+  })
+
+  it('accepts a LAN request Connection admits, and refuses one it rejects', () => {
+    expect(isTrustedTaskBoardRequest(lanRequest(), access(() => true))).toBe(true)
+    expect(isTrustedTaskBoardRequest(lanRequest(), access(() => false))).toBe(false)
+  })
+
+  it('keeps the browser tripwire ahead of the credential check', () => {
+    const bare = { headers: { host: '192.168.178.38:3099' }, socket: { remoteAddress: '192.168.178.50' } } as unknown as IncomingMessage
+    const credential = vi.fn(() => true)
+    expect(isTrustedTaskBoardRequest(bare, access(credential))).toBe(false)
+    expect(credential).not.toHaveBeenCalled()
+    // Cross-site is Connection's call, not the board's: the board hands the
+    // untouched request over so the deployment's fence stays the only rule.
+    const crossSite = lanRequest({ 'sec-fetch-site': 'cross-site', origin: 'http://evil.example' })
+    const seen: IncomingMessage[] = []
+    expect(isTrustedTaskBoardRequest(crossSite, access(request => { seen.push(request); return false }))).toBe(false)
+    expect(seen).toEqual([crossSite])
+  })
+
+  it('never asks the credential check for loopback requests', () => {
+    const loopback = { headers: { host: '127.0.0.1:3099', 'sec-fetch-site': 'same-origin' }, socket: { remoteAddress: '127.0.0.1' } } as unknown as IncomingMessage
+    const credential = vi.fn(() => false)
+    expect(isTrustedTaskBoardRequest(loopback, access(credential))).toBe(true)
+    expect(credential).not.toHaveBeenCalled()
   })
 })

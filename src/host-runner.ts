@@ -10,11 +10,22 @@ export interface TaskBoardWorkspaceRegistry {
   list(): readonly Workspace[]
 }
 
+/**
+ * Peer a Host-side gateway call speaks for. dsh 0.2.1 dropped the gateway's
+ * in-process operator fallback (`request.peer ?? this.operatorPeer()`), so a
+ * call without a Peer now fails in `assertPeerLive` with
+ * `Cannot read properties of undefined (reading 'signal')`. The board hands in
+ * the operator Peer it obtained from the Connection service; older runtimes
+ * ignore the field and keep their own fallback.
+ */
+export type GatewayPeer = NonNullable<Parameters<TypertGateway['invoke']>[0]['peer']>
+
 interface GatewayRequest {
   namespace: string
   method: string
   args: Record<string, unknown>
   signal?: AbortSignal
+  peer?: GatewayPeer
 }
 
 interface SessionGateway {
@@ -486,18 +497,19 @@ export class HostExecutionRunner {
     private readonly commands?: SessionCommandDispatcher,
     private readonly workspaceRegistry?: TaskBoardWorkspaceRegistry,
     unavailableRetry?: { attempts?: number; backoffMs?: number },
+    private readonly peer?: GatewayPeer,
   ) {
     this.unavailableAttempts = unavailableRetry?.attempts ?? SERVICE_UNAVAILABLE_ATTEMPTS
     this.unavailableBackoffMs = unavailableRetry?.backoffMs ?? SERVICE_UNAVAILABLE_BACKOFF_MS
   }
 
   private invoke(namespace: string, method: string, request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
-    return this.gateway.invoke({ namespace, method, args: invokeWireArgs(namespace, method, request), ...(signal === undefined ? {} : { signal }) })
+    return this.gateway.invoke({ namespace, method, args: invokeWireArgs(namespace, method, request), ...(signal === undefined ? {} : { signal }), ...(this.peer === undefined ? {} : { peer: this.peer }) })
   }
 
   private stream(namespace: string, method: string, request: Record<string, unknown>, signal?: AbortSignal): Promise<AsyncIterable<unknown>> {
     if (!('stream' in this.gateway) || this.gateway.stream === undefined) throw new Error('gateway stream is unavailable')
-    return this.gateway.stream({ namespace, method, args: invokeWireArgs(namespace, method, request), ...(signal === undefined ? {} : { signal }) })
+    return this.gateway.stream({ namespace, method, args: invokeWireArgs(namespace, method, request), ...(signal === undefined ? {} : { signal }), ...(this.peer === undefined ? {} : { peer: this.peer }) })
   }
 
   /**

@@ -6,7 +6,7 @@ import { HostTaskLedger, type OpenedRun, type OpenExecutionReference, type Pause
 import type { TaskCompose, TaskRecord as ComposeTaskRecord, TaskReview } from './core/tasks.ts'
 import { ComposeWorkflow, composeDir, composeProject, type TaskComposeController } from './compose-workflow.ts'
 import { ReviewWorkflow } from './review-workflow.ts'
-import { HostExecutionRunner, SessionLaunchError, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import { HostExecutionRunner, SessionLaunchError, type GatewayPeer, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
 import { GitWorkflow } from './git-workflow.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
 import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardReviewPlan, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts'
@@ -124,6 +124,8 @@ export class TaskBoardHostService {
     review?: ReviewWorkflow
     /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
     stateMachine?: unknown
+    /** Operator Peer the gateway calls speak for; dsh 0.2.1 requires one. */
+    peer?: GatewayPeer
   } = {}) {
     this.git = options.git ?? new GitWorkflow(options.workspaceRegistry)
     this.compose = options.compose ?? new ComposeWorkflow({ ...(options.composeFile === undefined ? {} : { file: options.composeFile }) })
@@ -137,7 +139,7 @@ export class TaskBoardHostService {
       repoDirectory: workspacePath => this.git.repositoryOf(workspacePath),
     })
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git, stateMachine: options.stateMachine })
-    this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry)
+    this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, options.peer)
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
     // Environments survive a Host restart (the review keeps its stack); the

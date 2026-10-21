@@ -2,7 +2,7 @@ import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway';
 import { HostTaskLedger } from './host-ledger.ts';
 import { type TaskComposeController } from './compose-workflow.ts';
 import { ReviewWorkflow } from './review-workflow.ts';
-import { HostExecutionRunner, type SessionCommandDispatcher, type TaskBoardWorkspaceRegistry } from './host-runner.ts';
+import { HostExecutionRunner, type GatewayPeer, type SessionCommandDispatcher, type TaskBoardWorkspaceRegistry } from './host-runner.ts';
 import { GitWorkflow } from './git-workflow.ts';
 import { PowerInhibitor } from './power-inhibitor.ts';
 import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts';
@@ -107,6 +107,8 @@ export declare class TaskBoardHostService {
         review?: ReviewWorkflow;
         /** Machine config applied to a freshly built ledger (settings `stateMachine`). */
         stateMachine?: unknown;
+        /** Operator Peer the gateway calls speak for; dsh 0.2.1 requires one. */
+        peer?: GatewayPeer;
     });
     start(): void;
     setConfiguration(active: boolean, preventIdleSleep: boolean): void;
