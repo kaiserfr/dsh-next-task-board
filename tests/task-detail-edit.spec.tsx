@@ -154,17 +154,17 @@ describe('task content editing before execution (issue #1110)', () => {
     expect(container.querySelector('[role="dialog"][aria-label="编辑任务"]')).not.toBeNull()
   })
 
-  it('stays open with the Host error when the update is rejected', async () => {
-    const { container, snapshot } = await renderDetail(task(), async () => {
-      snapshot.transportError = 'task has already been executed'
-      return false
-    })
+  it('closes immediately and leaves the rejection to the background outbox', async () => {
+    const updateTask = vi.fn(async () => false)
+    const { container } = await renderDetail(task(), updateTask)
     await act(async () => { editButtonOf(container)!.click() })
     const dialog = container.querySelector('[role="dialog"][aria-label="编辑任务"]')
     const save = dialog!.querySelector('button[type="submit"]') as HTMLButtonElement
     await act(async () => { save.click() })
-    expect(container.textContent).toContain('task has already been executed')
-    expect(container.querySelector('[role="dialog"][aria-label="编辑任务"]')).not.toBeNull()
+    // The popup no longer blocks on the Host: it closes at once, and the
+    // controller restores the draft and shows the reason when the answer lands.
+    expect(updateTask).toHaveBeenCalledOnce()
+    expect(container.querySelector('[role="dialog"][aria-label="编辑任务"]')).toBeNull()
   })
 })
 

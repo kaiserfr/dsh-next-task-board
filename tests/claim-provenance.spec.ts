@@ -131,6 +131,7 @@ describe('controller claim initiator (issue #6)', () => {
     controller.start()
     await controller.retryHostSync()
     await controller.runTask('card-1')
+    await controller.whenIdle()
     expect(initiators).toEqual(['session-claimer'])
     controller.dispose()
   })

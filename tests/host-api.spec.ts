@@ -54,7 +54,7 @@ describe('HttpTaskBoardHostTransport migration', () => {
     await new HttpTaskBoardHostTransport(storage).bootstrap([
       createTask({ title: 'backup', description: '', prompt: '' }, 1, 'backup'),
     ])
-    expect(fetchMock).toHaveBeenCalledWith('/api/task-board/state', expect.objectContaining({ cache: 'no-store', signal: expect.any(AbortSignal) }))
+    expect(fetchMock).toHaveBeenCalledWith('/api/task-board/state', expect.objectContaining({ cache: 'no-store' }))
   })
 
   it('imports the retained v1 backup again for a new Host ledger generation', async () => {
@@ -70,16 +70,20 @@ describe('HttpTaskBoardHostTransport migration', () => {
     expect(storage.getItem('dsh.taskBoard.v2.hostImported')).toBe('recovered-ledger')
   })
 
-  it('aborts a Host request that never settles', async () => {
+  it('does not turn a slow Host into a timeout for the user', async () => {
     vi.useFakeTimers()
     try {
-      vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => await new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => { reject(new DOMException('aborted', 'AbortError')) })
-      })))
+      let resolveFetch: ((value: Response) => void) | undefined
+      const fetchMock = vi.fn(async () => await new Promise<Response>(resolve => { resolveFetch = resolve }))
+      vi.stubGlobal('fetch', fetchMock)
       const pending = new HttpTaskBoardHostTransport(new MemoryStorage()).state()
-      const rejected = expect(pending).rejects.toMatchObject({ failure: 'timeout', message: expect.stringContaining('15') })
-      await vi.advanceTimersByTimeAsync(15_000)
-      await rejected
+      let settled = false
+      void pending.finally(() => { settled = true })
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      expect(settled).toBe(false)
+      expect(fetchMock).toHaveBeenCalledOnce()
+      resolveFetch?.(new Response(JSON.stringify(snapshot), { status: 200 }))
+      await expect(pending).resolves.toMatchObject({ revision: snapshot.revision })
     } finally {
       vi.useRealTimers()
     }

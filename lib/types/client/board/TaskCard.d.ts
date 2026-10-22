@@ -21,15 +21,19 @@ import type { TaskRecord, WaitingReason } from '../../core/tasks.ts';
 export declare function formatHostTimestamp(ms: number, timeZone?: string): string;
 export declare function formatTime(ms: number, timeZone?: string): string;
 /**
- * Whether a card may be dragged at all: archived cards are read-only, a card
- * the runner owns (`running`, or pending on the Host) must not be moved while
- * its execution settles. The board reuses this to decide which cards a group
- * drag may carry, so the payload and the `draggable` attribute never disagree.
+ * Whether a card may be dragged at all: archived cards are read-only and a card
+ * the runner owns (`running`) must not be moved while its execution settles.
+ * A card with an action in the outbox is deliberately **not** excluded any more:
+ * further actions queue behind it, so the user is never blocked by a running
+ * backend call. The board reuses this to decide which cards a group drag may
+ * carry.
  */
-export declare function isCardDraggable(task: TaskRecord, pending: boolean): boolean;
-declare function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+export declare function isCardDraggable(task: TaskRecord): boolean;
+declare function TaskCardInner({ task, pending, releasePending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
     task: TaskRecord;
     pending: boolean;
+    /** A merge release of this card runs in the Host's background. */
+    releasePending?: boolean;
     timeZone?: string;
     selected: boolean;
     dragging: boolean;

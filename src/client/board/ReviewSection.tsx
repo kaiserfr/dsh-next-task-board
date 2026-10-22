@@ -45,11 +45,9 @@ function shortCommit(commit: string): string {
   return commit.length > 10 ? commit.slice(0, 10) : commit
 }
 
-export function ReviewSection({ controller, task, pending, timeZone }: {
+export function ReviewSection({ controller, task, timeZone }: {
   controller: BoardController
   task: TaskRecord
-  /** A controller action for this card is in flight (buttons stay disabled). */
-  pending: boolean
   timeZone?: string
 }) {
   const [snapshot, setSnapshot] = useState(() => controller.getSnapshot())
@@ -64,7 +62,12 @@ export function ReviewSection({ controller, task, pending, timeZone }: {
   const canRead = snapshot.canReviewRead === true
   const review = task.review
   const running = review?.startedAt !== undefined
-  const busy = plan?.pending !== undefined || pending
+  // An action in flight is queued, not a fence: start/stop/restart and the
+  // release stay clickable (a second click waits behind the first on the Host).
+  // Only a status that really forbids the control (nothing running, a merge
+  // being resolved) disables it.
+  const busy = false
+  const releasePending = snapshot.host?.pendingReleases?.[task.id]
 
   const openEditor = useCallback(async (): Promise<void> => {
     setNotice(undefined)
@@ -124,6 +127,13 @@ export function ReviewSection({ controller, task, pending, timeZone }: {
       )}
       {task.merge?.error !== undefined && (
         <p className={css.formError}>{t('review.merge.error', { error: task.merge.error })}</p>
+      )}
+      {releasePending !== undefined && (
+        // The release runs in the background: the card stays in this column and
+        // this derived marker explains why, with or without a review environment.
+        <p className={css.detailMeta} data-dsh-part="release-pending" data-state="release" role="status">
+          {t('review.releasePending')}
+        </p>
       )}
       {inReview && (
         <div className={css.moveRow}>

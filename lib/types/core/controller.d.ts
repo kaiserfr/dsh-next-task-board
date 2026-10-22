@@ -21,8 +21,12 @@ export interface TaskBoardTransport {
     /**
      * Submit one action; the optional initiator is the current DSH session id
      * (issue #6 audit origin), asserted by the client and recorded by the Host.
+     * The optional requestId makes a retry idempotent: the outbox reuses the id
+     * when it resends an action after a connection failure, and the ledger's
+     * persisted request cache then returns the already-applied result instead of
+     * applying it twice.
      */
-    action(action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot>;
+    action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot>;
     subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void;
     /**
      * One-shot model parse of pasted text (issue #1540). Optional: a deployment
@@ -101,6 +105,27 @@ export interface ExecutionOptionsSnapshot {
     presets: readonly ExecutionPresetOption[];
     models?: readonly ExecutionModelOption[];
 }
+/**
+ * One user-facing message the board renders as a toast: a status refusal
+ * (a move the state machine does not allow, an archived/running card), a Host
+ * rejection returned by the ledger, or a derived Host notice (a background git
+ * failure). Messages are generated where the knowledge lives; the board only
+ * displays and dismisses them.
+ */
+export interface BoardNotice {
+    id: string;
+    kind: 'refused' | 'failed' | 'host';
+    message: string;
+    taskId?: string;
+    at: number;
+}
+/** The outbox's public face: how many actions wait, and why the last send failed. */
+export interface OutboxSnapshot {
+    /** Actions accepted by the UI but not yet confirmed by the Host. */
+    pending: number;
+    /** Last transport failure; the outbox keeps retrying and the banner explains it. */
+    error?: string;
+}
 /** Immutable controller snapshot for UI subscriptions. */
 export interface ControllerSnapshot {
     tasks: readonly TaskRecord[];
@@ -111,6 +136,10 @@ export interface ControllerSnapshot {
     /** Picker option sets (workspace list + agent-preset roster). */
     executionOptions: ExecutionOptionsSnapshot;
     pendingTaskIds: readonly string[];
+    /** Actions accepted locally and still waiting for the Host, plus the last transport error. */
+    outbox?: OutboxSnapshot;
+    /** Recent user-facing messages (refusals, Host rejections, background failures). */
+    notices?: readonly BoardNotice[];
     /**
      * Keys of the modal form drafts the controller currently holds (see
      * {@link BoardController.saveFormDraft}). The board marks "new task" while
@@ -133,7 +162,7 @@ export interface ControllerSnapshot {
      * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
      */
     sessionOpenError?: string;
-    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans'>;
+    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases'>;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
@@ -153,8 +182,23 @@ export declare class BoardController {
     private disposers;
     private readonly now;
     private readonly uuid;
-    private readonly pendingTaskIds;
-    private readonly taskQueues;
+    /**
+     * The outbox: user actions accepted immediately and handed to the Host in the
+     * background. This is what makes every UI action possible while the backend is
+     * busy — the board never waits on a request, never disables a control because
+     * of one, and never turns a slow Host into a "timeout" for the user.
+     */
+    private readonly outbox;
+    /** One FIFO drain per card (and one global drain for multi-card actions). */
+    private readonly outboxDrains;
+    private readonly outboxDraining;
+    /** A kick arrived while the same card's loop was still finishing. */
+    private readonly outboxKickPending;
+    /** Per-entry retry timers (keyed by requestId). */
+    private readonly outboxTimers;
+    private outboxError;
+    private readonly noticeList;
+    private readonly seenHostNotices;
     /**
      * Modal form drafts, keyed per modal (the client owns the key vocabulary).
      * They live here — not in the popup components — so closing a popup by an
@@ -178,6 +222,12 @@ export declare class BoardController {
     subscribe(fn: () => void): () => void;
     /** Whether production mutations are confirmed by the Host transport. */
     isHostBacked(): boolean;
+    /**
+     * Wait until every queued outbox chain has finished its current send. Waiting
+     * entries (a broken connection) are not awaited: they retry on their own.
+     * Tests and the host-sync retry use this instead of polling.
+     */
+    whenIdle(): Promise<void>;
     /** Retry initial migration/state synchronization after an explicit Host error. */
     retryHostSync(): Promise<boolean>;
     openBoard(): void;
@@ -207,6 +257,17 @@ export declare class BoardController {
     /** Create through the Host and expose the task only after confirmation. */
     createTaskConfirmed(input: NewTaskInput): Promise<TaskRecord | undefined>;
     /**
+     * Accept a new task immediately and hand it to the Host in the background.
+     * The card appears when the Host confirms it; a rejection restores the caller's
+     * draft through `onRejected`. The dialog can close at once — the user is never
+     * blocked by the round trip.
+     * @returns the id the card will have.
+     */
+    queueCreateTask(input: NewTaskInput, hooks?: {
+        onAccepted?: () => void;
+        onRejected?: (message: string) => void;
+    }): string;
+    /**
      * Apply an editable-field patch (task content + execution targets).
      * Host-backed: the Host ledger owns the fail-closed checks (the content of
      * an executed task is read-only) and confirms the mutation, so the resolved
@@ -215,6 +276,14 @@ export declare class BoardController {
      * @returns true when the patch was accepted by the authority.
      */
     updateTask(id: string, patch: TaskUpdatePatch): Promise<boolean>;
+    /**
+     * Accept an edit immediately and hand it to the Host in the background. The
+     * modal closes at once; a rejection restores the draft through `onRejected`.
+     */
+    queueUpdateTask(id: string, patch: TaskUpdatePatch, hooks?: {
+        onAccepted?: () => void;
+        onRejected?: (message: string) => void;
+    }): void;
     /**
      * Replace (a part of) the picker option sets the UI feeds (workspace list
      * and agent-preset roster come from the runtime, not the ledger).
@@ -236,6 +305,10 @@ export declare class BoardController {
      * phrases every failure for the user, so its message surfaces unchanged.
      */
     parseTaskDraft(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>;
+    /**
+     * Move one card. Host-backed: accepted immediately and queued per card; the
+     * card moves when the Host confirms (or the rejection arrives as a notice).
+     */
     moveTask(id: string, status: TaskStatus): void;
     /**
      * Move a group of cards to one status as a single ledger action (group drag).
@@ -243,8 +316,8 @@ export declare class BoardController {
      * all-or-nothing and the cards keep their order among themselves.
      * @param ids - the dragged cards; duplicates are ignored.
      * @param status - the target column.
-     * @returns whether the Host accepted the batch (always true on the legacy
-     * in-memory path); the board clears its selection on success only.
+     * @returns whether the batch was accepted locally (always true on the legacy
+     * in-memory path); the board clears its selection on that.
      */
     moveTasks(ids: readonly string[], status: TaskStatus): Promise<boolean>;
     deleteTask(id: string): void;
@@ -302,9 +375,9 @@ export declare class BoardController {
     private refreshAndSelectSession;
     /**
      * Request a Host execution for a task: the Host ledger owns the running
-     * transition, the execution record, and the settlement. A second call
-     * while the task is already running is ignored; without a Host transport
-     * the run is refused (returns false).
+     * transition, the execution record, and the settlement. The action is
+     * accepted immediately (queued per card); a status that forbids it is
+     * reported as a notice instead of silently doing nothing.
      */
     runTask(id: string): Promise<boolean>;
     /**
@@ -318,7 +391,7 @@ export declare class BoardController {
      * Start the card's version for the manual review. Only a card standing in the
      * review column may ask: the Host refuses anything else, and the board hides
      * the controls everywhere else anyway.
-     * @returns whether the Host accepted the action.
+     * @returns whether the action was accepted locally.
      */
     reviewStart(id: string): Promise<boolean>;
     /** Stop the card's review version again (compose project or configured command). */
@@ -335,11 +408,11 @@ export declare class BoardController {
      * merges the card's feature branch into its base branch and the card moves on
      * to `done`. A conflict is not the human's problem — the Host starts that merge
      * in the card's own worktree and lets the card's agent resolve it — while every
-     * other failure lands in `failed` with the reason.
+     * other failure lands in `failed` with the reason (and a notice).
      *
      * Only a card standing in the review column may ask; the Host is the authority
      * for that and refuses anything else.
-     * @returns whether the Host accepted the action.
+     * @returns whether the action was accepted locally.
      */
     approveMerge(id: string): Promise<boolean>;
     /**
@@ -362,14 +435,14 @@ export declare class BoardController {
      * column and its execution record, the Host stops the run's session. The
      * board's bulk button sends every in-progress card at once, so one click
      * suspends the whole column in a single ledger write.
-     * @returns whether the Host accepted the action.
+     * @returns whether the action was accepted locally.
      */
     pauseTasks(ids: readonly string[]): Promise<boolean>;
     /**
      * Resume paused runs: the Host clears the pause and writes the "continue"
      * turn into each run's own conversation (a run that never got a session goes
      * back into the launch queue).
-     * @returns whether the Host accepted the action.
+     * @returns whether the action was accepted locally.
      */
     resumeTasks(ids: readonly string[]): Promise<boolean>;
     /**
@@ -384,8 +457,43 @@ export declare class BoardController {
      */
     private onSessionsChanged;
     private persistAndNotify;
-    private commitRemote;
-    private performRemote;
+    /**
+     * Accept one action and hand it to the Host in the background. The UI is
+     * acknowledged immediately; the card's FIFO chain keeps actions in order and
+     * the same requestId is reused on retries, so a connection loss can never
+     * apply an action twice.
+     *
+     * A queued action never blocks the user: it does not disable any control, and
+     * a slow or unreachable Host only makes the banner count it. A repeated
+     * identical action is dropped (a double click expresses one intent).
+     */
+    private enqueue;
+    /** Await the Host's verdict for one action (compatibility seams and tests). */
+    private enqueueConfirmed;
+    /**
+     * Start draining one card's queue. The loop is intentionally **head-of-line
+     * blocking**: an action that is waiting for a retry keeps the later actions of
+     * the same card queued (otherwise a second move could overtake the first),
+     * while every other card keeps its own loop. A waiting head ends the loop; its
+     * retry timer starts it again.
+     */
+    private kick;
+    private drainKey;
+    private send;
+    private scheduleRetry;
+    private removeEntry;
+    /** Re-send every waiting action now (the banner's retry button). */
+    retryOutbox(): void;
+    /** Drop every waiting action (the banner's discard button). */
+    discardOutbox(): void;
+    /** Report a locally refused action (status-forbidden) as a notice. */
+    refuse(message: string, taskId?: string): void;
+    dismissNotice(id: string): void;
+    private pushNotice;
+    private taskRefusal;
+    private actionLabel;
+    /** Show Host-derived notices once (deduped by their Host-generated id). */
+    private ingestHostNotices;
     private initializeRemote;
     private doInitializeRemote;
     /**

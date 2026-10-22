@@ -94,6 +94,8 @@ export declare class TaskBoardHostService {
      * (the card stays in it until the directory is gone).
      */
     private readonly worktreeWarnings;
+    /** Per-card review action chain: a second review click waits for the first. */
+    private readonly reviewWork;
     /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
     private reviewPlans;
     private readonly now;
@@ -202,11 +204,12 @@ export declare class TaskBoardHostService {
     /** SSE frame payload; deliberately skips the tasks deep-clone of {@link snapshot}. */
     eventPayload(): TaskBoardEventPayload;
     subscribe(listener: () => void): () => void;
-    apply(requestId: string, action: TaskBoardAction, initiator?: string): TaskBoardSnapshot;
+    apply(requestId: string, action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot>;
     /**
-     * The branch of {@link TaskBoardHostService.apply} that answers a review
-     * action: the ledger already validated it, so this only starts the work and
-     * marks the card as busy.
+     * Queue one review action on the card's review chain: a second click on the
+     * same card waits for the first action instead of being refused. The card's
+     * derived plan shows `pending` while anything is queued, and the buttons stay
+     * usable (`reviewBusy` is only the UI's in-flight explanation, never a fence).
      */
     private scheduleReview;
     /**

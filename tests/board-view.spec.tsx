@@ -119,7 +119,7 @@ describe('TaskBoard L2 semantic attributes (#506)', () => {
 })
 
 describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
-  it('marks manual tasks as draggable and running/pending/archived tasks as not draggable', async () => {
+  it('marks manual and in-flight tasks as draggable but running/archived tasks as not draggable', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
@@ -146,9 +146,9 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     const runningCard = Array.from(cards).find(c => c.getAttribute('data-status') === 'running')
     expect(runningCard?.getAttribute('draggable')).toBe('false')
 
-    // Pending card is not draggable
+    // A card with an action in flight stays draggable: the next move queues.
     const pendingCard = Array.from(cards).find(c => c.getAttribute('data-pending') === 'true')
-    expect(pendingCard?.getAttribute('draggable')).toBe('false')
+    expect(pendingCard?.getAttribute('draggable')).toBe('true')
   })
 
   it('drops a backlog card onto the clarification column and triggers controller.moveTask', async () => {
@@ -285,6 +285,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     roots.push(root)
 
     const moveCalls: Array<{ id: string; status: string }> = []
+    const refused: Array<{ message: string; taskId: string | undefined }> = []
     const controller = fakeController(
       {
         tasks: [
@@ -294,6 +295,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
       },
       {
         moveTask: (id, status) => { moveCalls.push({ id, status }) },
+        refuse: (message, taskId) => { refused.push({ message, taskId }) },
       },
     )
     await act(async () => { root.render(<TaskBoard controller={controller} />) })
@@ -310,6 +312,9 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
       )
     })
     expect(moveCalls).toHaveLength(0)
+    // ... and the drop is no longer swallowed: the board names the reason.
+    expect(refused).toHaveLength(1)
+    expect(refused[0]!.taskId).toBe('t-todo')
 
     // Dropping a running task does nothing
     const runningTransfer = {
@@ -321,6 +326,8 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
       )
     })
     expect(moveCalls).toHaveLength(0)
+    expect(refused).toHaveLength(2)
+    expect(refused[1]!.taskId).toBe('t-running')
   })
 })
 

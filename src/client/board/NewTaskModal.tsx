@@ -2,7 +2,7 @@
  * New-task modal: title + description + the prompt that execution will send.
  * Creates through the Host and closes only after the Host confirms it.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron, nextRunAtMs } from '../../core/schedule.ts'
 import { parseFreezeRequest } from '../../core/freeze-snapshot.ts'
@@ -92,7 +92,9 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
   const [tags, setTags] = useState<TaskTag[]>(stored?.tags ?? pristine.tags)
   const [archiveOriginal, setArchiveOriginal] = useState(stored?.archiveOriginal ?? pristine.archiveOriginal)
   const [error, setError] = useState<string | undefined>(undefined)
-  const [pending, setPending] = useState(false)
+  // One submit per mount: the popup closes at once, so a double click must not
+  // mint two cards behind the outbox's back.
+  const submitted = useRef(false)
   const [options, setOptions] = useState(controller.getSnapshot().executionOptions)
   // "Parse pasted text" (issue #1540) exists only when the deployment carries a
   // parse face; the section stays hidden otherwise.
@@ -104,7 +106,7 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
     setTitle(draft.title)
     setDescription(draft.description)
     setPrompt(draft.prompt)
-  })
+  }, () => ({ title, description, prompt }))
 
   /** The whole form as one value: the draft seat's payload. */
   const form = (): NewTaskForm => ({
@@ -196,11 +198,12 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
       mode: mode === '' ? undefined : mode,
       permission: permission === '' ? undefined : permission as TaskPermission,
     }
+    if (submitted.current) return
+    submitted.current = true
     // Blank rows never reach the wire: the protocol rejects a tag with an
     // empty name, and an empty list is expressed by omitting the field.
     const tagList = cleanTags(tags)
-    setPending(true)
-    const task = await controller.createTaskConfirmed({
+    const input = {
       title,
       description,
       prompt,
@@ -216,23 +219,31 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
       ...(reuseSession ? { reuseSession: true } : {}),
       ...(tagList.length > 0 ? { tags: tagList } : {}),
       schedule: scheduleEnabled ? { enabled: true, cron: scheduleCron.trim() } : undefined,
-    })
-    if (task === undefined) {
-      setPending(false)
-      setError(controller.getSnapshot().transportError ?? t('new.required'))
-      return
     }
-    if (isDuplicate && archiveOriginal && initialTask !== undefined) {
-      if (onDuplicateSuccess !== undefined) {
-        await onDuplicateSuccess(initialTask.id)
-      } else {
-        await controller.archiveTask(initialTask.id)
-      }
+    // The form became a card: its draft is spent and the popup closes right away.
+    // The Host confirms in the background; a rejection puts the draft back so no
+    // input is lost, and the board shows the reason as a notice.
+    const draftSnapshot = form()
+    const accepted = (): void => {
+      if (!isDuplicate || !archiveOriginal || initialTask === undefined) return
+      if (onDuplicateSuccess !== undefined) void onDuplicateSuccess(initialTask.id)
+      else controller.archiveTask(initialTask.id)
     }
-    // The form became a card: its draft is spent and must not come back, even
-    // when this confirmation arrives after the popup was already closed.
+    const rejected = (): void => { controller.saveFormDraft?.(draftKey, draftSnapshot) }
     spend()
     onClose()
+    // A stale controller from a mixed bundle may predate the outbox; the
+    // awaited seam keeps that deployment working (it just waits for the Host).
+    const queue = controller.queueCreateTask
+    if (queue !== undefined) {
+      queue.call(controller, input, { onAccepted: accepted, onRejected: rejected })
+      return
+    }
+    if (typeof controller.createTaskConfirmed !== 'function') return
+    void Promise.resolve(controller.createTaskConfirmed(input)).then(task => {
+      if (task === undefined) rejected()
+      else accepted()
+    })
   }
 
   /** Next-run preview for a valid armed cron (creation-time only). */
@@ -247,9 +258,9 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
       ariaLabel={modalTitle}
       title={modalTitle}
       error={error}
-      pending={pending}
+      pending={false}
       submitLabel={t('new.submit')}
-      onSubmit={() => { void submit() }}
+      onSubmit={submit}
       onClose={onClose}
     >
       {restored && <DraftNotice onDiscard={discardDraft} />}

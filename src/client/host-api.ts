@@ -16,7 +16,6 @@ import {
 const IMPORT_MARKER = 'dsh.taskBoard.v2.hostImported'
 const SOURCE_KEY = 'dsh.taskBoard.v2.sourceId'
 const IMPORT_REQUEST_KEY = 'dsh.taskBoard.v2.importRequestId'
-const REQUEST_TIMEOUT_MS = 15_000
 /** Re-notify the panel at most this often while the event stream stays broken. */
 const STREAM_ERROR_NOTIFY_MS = 15_000
 /** Mirrors the Host's own parse budget; only used to phrase the timeout. */
@@ -121,8 +120,8 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     return await this.request(`${TASK_BOARD_API_PREFIX}/state`, { cache: 'no-store' })
   }
 
-  async action(action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot> {
-    return await this.post(uuid(), action, initiator)
+  async action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot> {
+    return await this.post(requestId ?? uuid(), action, initiator)
   }
 
   private async post(requestId: string, action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot> {
@@ -134,19 +133,19 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     })
   }
 
+  /**
+   * One Host read. There is deliberately **no timeout**: a slow Host is not a
+   * user-visible failure. The action outbox in the controller retries a broken
+   * connection with the same requestId, and the board stays usable throughout.
+   */
   private async request(url: string, init: RequestInit): Promise<TaskBoardSnapshot> {
-    const controller = new AbortController()
-    const timeout = globalThis.setTimeout(() => { controller.abort() }, REQUEST_TIMEOUT_MS)
     try {
-      return await readJson<TaskBoardSnapshot>(await fetch(url, { ...init, signal: controller.signal }))
+      return await readJson<TaskBoardSnapshot>(await fetch(url, init))
     } catch (error) {
       if (error instanceof HostApiError) throw error
-      if (controller.signal.aborted) throw new HostApiError('timeout', t('board.hostError.timeout', { seconds: String(REQUEST_TIMEOUT_MS / 1_000) }))
       // fetch itself failed (server stopped, connection reset, DNS): the panel
       // says so in its own words instead of leaking "Failed to fetch".
       throw new HostApiError('unreachable', t('board.hostError.unreachable'))
-    } finally {
-      globalThis.clearTimeout(timeout)
     }
   }
 

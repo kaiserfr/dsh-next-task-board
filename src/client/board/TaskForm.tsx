@@ -179,18 +179,29 @@ export function parseSourceText(task: Pick<TaskRecord, 'title' | 'description' |
  * State and actions behind one "Parse with AI" box. The owner supplies the
  * opening text and decides what a successful draft does (the create form fills
  * its three fields; the edit form overwrites the task's).
+ *
+ * A parse runs asynchronously and the user may keep typing while it runs, so a
+ * result is only applied directly when the target fields still hold the values
+ * they had when the request started. Otherwise the draft is offered behind an
+ * explicit "apply result" button — nothing overwrites typing.
  */
 export function useAiParse(
   controller: BoardController,
   initialText: string,
   onDraft: (draft: TaskBoardParseDraft) => void,
+  current?: () => { title: string; description: string; prompt: string },
 ) {
   const [text, setText] = useState(initialText)
   const [models, setModels] = useState(controller.getSnapshot().executionOptions.models ?? [])
   const [model, setModel] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | undefined>(undefined)
+  const [conflict, setConflict] = useState<TaskBoardParseDraft | undefined>(undefined)
   const abort = useRef<AbortController | undefined>(undefined)
+  // The owner re-renders on every keystroke; the ref always holds the freshest
+  // getter, so the comparison at result time sees what the user actually typed.
+  const currentRef = useRef(current)
+  currentRef.current = current
 
   // The model roster arrives from the runtime after mount; follow it so the
   // picker never freezes on an empty snapshot.
@@ -216,10 +227,18 @@ export function useAiParse(
     }
     const request = new AbortController()
     abort.current = request
+    const baseline = currentRef.current?.()
     setPending(true)
     setError(undefined)
+    setConflict(undefined)
     try {
-      onDraft(await controller.parseTaskDraft({ text: value, ...(model === '' ? {} : { model }) }, request.signal))
+      const draft = await controller.parseTaskDraft({ text: value, ...(model === '' ? {} : { model }) }, request.signal)
+      const after = currentRef.current?.()
+      if (baseline === undefined || after === undefined || JSON.stringify(baseline) === JSON.stringify(after)) {
+        onDraft(draft)
+      } else {
+        setConflict(draft)
+      }
     } catch (failure) {
       // A cancelled parse reports nothing: the user asked for it to stop.
       if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
@@ -227,6 +246,12 @@ export function useAiParse(
       abort.current = undefined
       setPending(false)
     }
+  }
+
+  const applyConflict = (): void => {
+    if (conflict === undefined) return
+    onDraft(conflict)
+    setConflict(undefined)
   }
 
   return {
@@ -238,6 +263,8 @@ export function useAiParse(
     pending,
     error,
     setError,
+    conflict,
+    applyConflict,
     run,
     cancel: (): void => { abort.current?.abort() },
   }
@@ -296,6 +323,14 @@ export function AiParseSection({
             )}
       </div>
       {parse.error !== undefined && <p className={css.formError}>{parse.error}</p>}
+      {parse.conflict !== undefined && (
+        <p className={css.queuedNotice} data-dsh-part="ai-parse-conflict" role="status">
+          {t('new.aiParseConflict')}{' '}
+          <button type="button" className={css.linkButton} onClick={() => { parse.applyConflict() }}>
+            {t('new.aiParseApply')}
+          </button>
+        </p>
+      )}
     </section>
   )
 }

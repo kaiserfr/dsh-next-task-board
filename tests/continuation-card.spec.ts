@@ -151,12 +151,10 @@ describe('continuation card: vertical action -> controller -> ledger -> snapshot
     expect(id).toBeDefined()
     if (id === undefined) return
 
-    controller.updateTask(id, { freeze: { goal: 'g2', progress: 'p2', next: 'n2' } })
-    await new Promise(resolve => { setTimeout(resolve, 0) })
+    expect(await controller.updateTask(id, { freeze: { goal: 'g2', progress: 'p2', next: 'n2' } })).toBe(true)
     expect(controller.getSnapshot().tasks.find(task => task.id === id)?.freeze?.goal).toBe('g2')
 
-    controller.updateTask(id, { freeze: null })
-    await new Promise(resolve => { setTimeout(resolve, 0) })
+    expect(await controller.updateTask(id, { freeze: null })).toBe(true)
     expect(controller.getSnapshot().tasks.find(task => task.id === id)?.freeze).toBeUndefined()
   })
 

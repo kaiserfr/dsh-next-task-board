@@ -77,8 +77,9 @@ describe('merge release on the Host service', () => {
     vi.spyOn(service.runner, 'inspect').mockImplementation(async () => ({ outcome: 'pending' }))
 
     try {
-      service.apply('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'p', workspaceId: 'ws-1' } })
-      service.apply('pull', { kind: 'move', taskId: 'card', status: 'clarification' })
+      await service.apply('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'p', workspaceId: 'ws-1' } })
+      await service.apply('pull', { kind: 'move', taskId: 'card', status: 'clarification' })
+      await ledger.awaitCard('card')
       const dir = ledger.state().tasks[0]!.git!.worktreePath!
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -86,10 +87,12 @@ describe('merge release on the Host service', () => {
       writeFileSync(join(repo, 'feature.txt'), 'main\n')
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
-      service.apply('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+      await service.apply('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+      await ledger.awaitCard('card')
 
-      const snapshot = service.apply('release', { kind: 'approve-merge', taskId: 'card' })
-      const task = snapshot.tasks[0]!
+      await service.apply('release', { kind: 'approve-merge', taskId: 'card' })
+      await ledger.awaitCard('card')
+      const task = ledger.state().tasks[0]!
       expect(task.status).toBe('running')
       expect(task.merge?.attempts).toBe(1)
 
@@ -120,7 +123,52 @@ describe('merge release on the Host service', () => {
     }
   })
 
-  it('applies the repoSubpath setting through the service', () => {
+
+  it('answers a release at once with a pending marker and writes the outcome later', async () => {
+    const gitState = { branch: 'task/card', base: 'main', repoPath: '/tmp/repo' }
+    let releaseMerge: (value: { mergedAt: number }) => void = () => {}
+    const merge = new Promise<{ mergedAt: number }>(resolve => { releaseMerge = resolve })
+    const git = {
+      repoPath: () => '/tmp/repo',
+      openBranch: async () => gitState,
+      commitBranch: async (_task: unknown, now: number) => ({ ...gitState, committedAt: now, reviewedCommit: 'abc123' }),
+      mergeBranch: async () => ({ ...gitState, mergedAt: await merge.then(value => value.mergedAt) }),
+      hasUnresolvedMerge: () => false,
+      abortUnresolvedMerge: () => {},
+      releaseWorktree: async () => {},
+    } as unknown as GitWorkflow
+    const ledger = new HostTaskLedger(mkdtempSync(join(tmpdir(), 'dsh-task-board-pending-')), () => NOW, { git })
+    const service = new TaskBoardHostService({} as unknown as TypertGateway, {
+      ledger,
+      git,
+      compose: new ComposeWorkflow({ file: '' }),
+      power: new PowerInhibitor({ platform: 'linux' }),
+      now: () => NOW,
+    })
+    try {
+      await service.apply('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'p' } })
+      await service.apply('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+      await ledger.awaitCard('card')
+      expect(ledger.task('card')?.git?.reviewedCommit).toBe('abc123')
+
+      const snapshot = await service.apply('release', { kind: 'approve-merge', taskId: 'card' })
+      // The card has not moved yet: the Host is still merging in the background.
+      expect(snapshot.tasks[0]!.status).toBe('ready_for_test')
+      expect(snapshot.pendingReleases?.card).toBeDefined()
+      expect(ledger.pendingReleases().card).toBeDefined()
+
+      releaseMerge({ mergedAt: NOW })
+      await ledger.awaitCard('card')
+      expect(ledger.task('card')?.status).toBe('done')
+      expect(ledger.task('card')?.git?.mergedAt).toBe(NOW)
+      expect(ledger.pendingReleases().card).toBeUndefined()
+      expect(service.snapshot().pendingReleases?.card).toBeUndefined()
+    } finally {
+      service.dispose()
+    }
+  })
+
+  it('applies the repoSubpath setting through the service', async () => {
     // Its own temporary ledger: the default one is the running Host's.
     const service = new TaskBoardHostService({} as unknown as TypertGateway, {
       ledger: new HostTaskLedger(tempDir('merge-service-ledger-'), () => NOW),

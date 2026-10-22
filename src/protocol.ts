@@ -33,6 +33,27 @@ export interface TaskBoardSchedulerSnapshot {
   error?: string
 }
 
+/**
+ * One derived, user-facing message the Host wants the board to show as a toast
+ * (a background git failure, a refused release, a branch that could not be
+ * created). Never ledger state: the Host keeps the last few for a short while
+ * and the browser dedupes them by id.
+ */
+export interface TaskBoardNotice {
+  id: string
+  taskId?: string
+  message: string
+  at: number
+}
+
+/**
+ * Card id → the started merge release the Host is carrying out in the
+ * background. Derived from the service's in-memory work queue, like the review
+ * plans: it is not ledger state, and a Host restart simply lets the card show
+ * its review column again (the human can release again).
+ */
+export type TaskBoardPendingReleases = Record<string, { startedAt: number }>
+
 export interface TaskBoardSnapshot {
   schemaVersion: typeof TASK_BOARD_SCHEMA_VERSION
   revision: number
@@ -70,6 +91,19 @@ export interface TaskBoardSnapshot {
    * it is never ledger state; absent on an older Host.
    */
   reviewPlans?: Record<string, TaskBoardReviewPlan>
+  /**
+   * Review-column cards whose merge release the Host is carrying out right now
+   * (see {@link TaskBoardPendingReleases}). The card stays in `ready_for_test`
+   * until the merge settles; this marker explains the wait and never claims a
+   * column the Host has not written. Absent on an older Host.
+   */
+  pendingReleases?: TaskBoardPendingReleases
+  /**
+   * Recent derived messages for the board's toast area (background git
+   * failures, refused releases). Kept short-lived on the Host and deduped by
+   * the browser; absent on an older Host.
+   */
+  notices?: TaskBoardNotice[]
 }
 
 /** SSE event frame: revision/scheduler/power only, never the task list. */
@@ -92,6 +126,10 @@ export interface TaskBoardEventPayload {
    * revision change.
    */
   reviewPlans?: Record<string, TaskBoardReviewPlan>
+  /** Merge releases the Host is carrying out right now, derived on every frame. */
+  pendingReleases?: TaskBoardPendingReleases
+  /** Recent derived messages; see {@link TaskBoardNotice}. */
+  notices?: TaskBoardNotice[]
 }
 
 /**

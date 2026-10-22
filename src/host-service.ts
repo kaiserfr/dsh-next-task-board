@@ -110,6 +110,8 @@ export class TaskBoardHostService {
    * (the card stays in it until the directory is gone).
    */
   private readonly worktreeWarnings = new Set<string>()
+  /** Per-card review action chain: a second review click waits for the first. */
+  private readonly reviewWork = new Map<string, Promise<void>>()
   /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
   private reviewPlans: Record<string, TaskBoardReviewPlan> = {}
   private readonly now: () => number
@@ -156,6 +158,9 @@ export class TaskBoardHostService {
     this.ledger.subscribe(() => {
       this.syncPowerReasons()
       this.refreshReviewPlans()
+      // A background release that hit a conflict opens a merge run without an
+      // action request; the ledger hands it over on the next notification.
+      for (const run of this.ledger.takeRuns()) this.scheduleLaunch(run)
       this.emit()
       // A settle frees its lane's WIP slot, so the next queued run starts here.
       this.pumpLaunchQueue()
@@ -350,6 +355,8 @@ export class TaskBoardHostService {
       maxDoneTasks: this.ledger.maxDoneTasksLimit,
       awaitingAnswer: { ...this.awaitingAnswer },
       reviewPlans: { ...this.reviewPlans },
+      pendingReleases: this.ledger.pendingReleases(),
+      notices: this.ledger.notices(),
     }
   }
 
@@ -366,6 +373,8 @@ export class TaskBoardHostService {
       // bumps the ledger revision, and the 5 s heartbeat must still deliver it.
       awaitingAnswer: { ...this.awaitingAnswer },
       reviewPlans: { ...this.reviewPlans },
+      pendingReleases: this.ledger.pendingReleases(),
+      notices: this.ledger.notices(),
     }
   }
 
@@ -374,20 +383,23 @@ export class TaskBoardHostService {
     return () => { this.listeners.delete(listener) }
   }
 
-  apply(requestId: string, action: TaskBoardAction, initiator?: string): TaskBoardSnapshot {
+  async apply(requestId: string, action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot> {
     if (!this.active) throw new Error('task board is disabled')
-    // A review action the Host is already carrying out for this card is refused
-    // here, before the ledger: the in-flight marker lives in the service (it is
-    // not durable state), and a second click must not start a second stack.
-    if (isReviewAction(action) && this.reviewBusy.has(action.taskId)) {
-      throw new Error('a review action is already running for this task')
-    }
+    // Run the action behind the heavy work already queued for its card(s): a
+    // release must see the commit of the park it approves, and a run must see the
+    // branch its transition created. The browser never waits for this — it has
+    // already accepted the action into its outbox — and the event loop stays free
+    // while the card's work chain runs git in the background.
+    for (const taskId of actionTaskIds(action)) await this.ledger.awaitCard(taskId)
     const result = this.ledger.applyRequest(requestId, action, initiator)
     // A clarification run is a run: both go through the launch queue below, but
     // only the implementation run is gated by the lane WIP limit; the
     // clarification's kind decides the prompt and the exemption.
     if (result.run !== undefined) this.scheduleLaunch(result.run)
     if (result.clarification !== undefined) this.scheduleLaunch(result.clarification)
+    // Background jobs (a release that hit a conflict) open runs without an
+    // action request; the ledger hands them over here.
+    for (const run of this.ledger.takeRuns()) this.scheduleLaunch(run)
     // The pause is already in the ledger (so the monitor no longer touches the
     // run); stopping the sessions happens next, off this call.
     for (const paused of result.paused ?? []) this.stopPausedRun(paused)
@@ -395,23 +407,37 @@ export class TaskBoardHostService {
     // Review environments take minutes to come up (compose builds images, a
     // start script boots the app), so they are carried out off this call: the
     // card shows "starting" from the in-flight plan and the outcome is written
-    // back to the ledger when it is known.
+    // back to the ledger when it is known. A second review action on the same
+    // card queues behind the first instead of being refused.
     for (const intent of result.review ?? []) this.scheduleReview(intent)
+    // A queued release has already marked its card; publish that marker now.
+    this.emit()
     return this.snapshotWith(result.state)
   }
 
   /**
-   * The branch of {@link TaskBoardHostService.apply} that answers a review
-   * action: the ledger already validated it, so this only starts the work and
-   * marks the card as busy.
+   * Queue one review action on the card's review chain: a second click on the
+   * same card waits for the first action instead of being refused. The card's
+   * derived plan shows `pending` while anything is queued, and the buttons stay
+   * usable (`reviewBusy` is only the UI's in-flight explanation, never a fence).
    */
   private scheduleReview(intent: ReviewIntent): void {
     this.reviewBusy.set(intent.taskId, intent.intent)
     this.refreshReviewPlans()
     this.emit()
-    void this.runReviewIntent(intent).catch(error => {
+    const previous = this.reviewWork.get(intent.taskId) ?? Promise.resolve()
+    const operation = previous.catch(() => {}).then(async () => {
+      await this.runReviewIntent(intent)
+    }).catch(error => {
       safeConsoleError(`[dsh-task-board] review action ${intent.intent} failed for task ${intent.taskId}`, error)
     })
+    this.reviewWork.set(intent.taskId, operation)
+    void operation.finally(() => {
+      if (this.reviewWork.get(intent.taskId) === operation) this.reviewWork.delete(intent.taskId)
+      if (!this.reviewWork.has(intent.taskId)) this.reviewBusy.delete(intent.taskId)
+      this.refreshReviewPlans()
+      this.emit()
+    }).catch(() => {})
   }
 
   /**
@@ -424,10 +450,16 @@ export class TaskBoardHostService {
    */
   private async runReviewIntent(intent: ReviewIntent): Promise<void> {
     // Read the card fresh: the ledger may have moved it out of the review
-    // column (or dropped it) while this action waited.
+    // column (or dropped it) while this action waited in the card's queue.
     const task = this.ledger.task(intent.taskId)
     if (task === undefined) {
       this.reviewEnvs.delete(intent.taskId)
+      return
+    }
+    if (task.archivedAt !== undefined || task.status !== 'ready_for_test') {
+      // The review controls only exist in the review column; a queued action
+      // that lost its column is dropped instead of staring a stack for a card
+      // that is no longer under review.
       return
     }
     const current = this.reviewEnvs.get(task.id) ?? task.review
@@ -461,13 +493,9 @@ export class TaskBoardHostService {
         : (described === undefined ? undefined : { ...described, startedAt: undefined, error: message })
       this.reviewEnvs.delete(task.id)
       if (failed !== undefined) this.ledger.noteReview(task.id, failed)
-      // Re-thrown so the scheduler's catch logs it once; the card already says
+      // Re-thrown so the card's review chain logs it once; the card already says
       // what went wrong.
       throw error
-    } finally {
-      this.reviewBusy.delete(intent.taskId)
-      this.refreshReviewPlans()
-      this.emit()
     }
   }
 
@@ -509,6 +537,7 @@ export class TaskBoardHostService {
     this.launchesInFlight.clear()
     this.awaitingAnswer = {}
     this.answerWatches.clear()
+    this.reviewWork.clear()
     for (const timer of this.timers.splice(0)) clearInterval(timer)
     this.power.dispose()
     this.ledger.dispose()
@@ -524,6 +553,24 @@ export class TaskBoardHostService {
     // superseded while its session is being created: never start a run the
     // ledger has already closed (it would mint the second conversation the card
     // must never have).
+    if (!this.ledger.isOpenExecution(opened.task.id, opened.execution.id)) return
+    // Wait for the card's queued branch/worktree creation and make sure the run
+    // really stands on the feature branch. This is the only place a run waits for
+    // git; the browser does not see it (the action was accepted into its outbox
+    // long before) and the event loop stays free while the child git runs.
+    let prepared: ComposeTaskRecord
+    try {
+      const branchTask = await this.ledger.ensureBranch(opened.task.id)
+      if (branchTask === undefined) return
+      prepared = branchTask
+    } catch (error) {
+      // A branch/worktree that cannot be created fails this run visibly before
+      // the agent starts: working in the wrong checkout is worse than not starting.
+      this.ledger.settle(opened.task.id, opened.execution.id, 'failed', error instanceof Error ? error.message : String(error))
+      return
+    }
+    // The card may have been superseded (clarification go-ahead) while the branch
+    // work was running; never mint the second conversation in that case.
     if (!this.ledger.isOpenExecution(opened.task.id, opened.execution.id)) return
     // The card's clarification run goes through this very queue, but not
     // through the lane limit: the clarification column is WIP-free, so it may
@@ -543,15 +590,15 @@ export class TaskBoardHostService {
       // A clarification run is exempt: it implements nothing, and checking a
       // branch out while a same-lane run is working would yank that run's
       // worktree out from under it.
-      if (!clarification) this.git.useBranch(opened.task)
+      if (!clarification) await this.git.useBranch(prepared)
       // The card's development environment is part of its run: the stack is up
       // (and its ports known) before the agent gets its prompt. A clarification
       // round needs no environment — it implements nothing. A failed start
       // therefore fails the run, with docker's own output on the card.
-      if (!clarification) await this.ensureCompose(opened.task)
+      if (!clarification) await this.ensureCompose(prepared)
       // The environment record was written to the ledger above, and the prompt
       // names it: the run gets the refreshed card, not the pre-launch copy.
-      const launched = this.ledger.state().tasks.find(task => task.id === opened.task.id) ?? opened.task
+      const launched = this.ledger.state().tasks.find(task => task.id === opened.task.id) ?? prepared
       // A rework round continues the conversation it corrects, whether or not
       // the card opted into session reuse: the correction was written into that
       // chat, so a fresh session would lose it. There is nothing for the board
@@ -779,11 +826,14 @@ export class TaskBoardHostService {
    * logged once per card and retried silently on every poll until the directory
    * is gone — a locked worktree is never unlocked behind the human's back.
    */
-  private reconcileArchivedWorktrees(): void {
+  private async reconcileArchivedWorktrees(): Promise<void> {
     if (this.disposed) return
     const pending = new Set<string>()
     for (const task of this.ledger.archivedWorktrees()) {
-      const failure = this.git.releaseWorktree(task)
+      // Serialize with the card's own work chain: archiving may have queued the
+      // very same removal, and the poll must not race it.
+      await this.ledger.awaitCard(task.id)
+      const failure = await this.git.releaseWorktree(task)
       if (failure === undefined) continue
       pending.add(task.id)
       if (this.worktreeWarnings.has(task.id)) continue
@@ -802,7 +852,7 @@ export class TaskBoardHostService {
     // archived card's worktree is retried until it is gone.
     this.reconcileCompose()
     this.reconcileReview()
-    this.reconcileArchivedWorktrees()
+    await this.reconcileArchivedWorktrees()
     if (!this.active && this.ledger.runtimeView().openExecutions.length === 0) return
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
@@ -1118,6 +1168,21 @@ export function safeConsoleError(message: string, ...args: unknown[]): void {
     console.error(message, ...args)
   } catch {
     // Best-effort stderr write; ignore write errors when stderr stream fails
+  }
+}
+
+/** Cards an action touches, for waiting on their background work before applying it. */
+function actionTaskIds(action: TaskBoardAction): string[] {
+  switch (action.kind) {
+    case 'import':
+    case 'create':
+      return []
+    case 'move-many':
+    case 'pause':
+    case 'resume':
+      return [...new Set(action.taskIds)]
+    default:
+      return [action.taskId]
   }
 }
 

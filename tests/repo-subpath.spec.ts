@@ -55,7 +55,7 @@ function registryFor(path: string): TaskBoardWorkspaceRegistry {
 }
 
 describe('repoSubpath', () => {
-  it('resolves the repository inside the workspace and drives the whole flow', () => {
+  it('resolves the repository inside the workspace and drives the whole flow', async () => {
     if (!hasGit) return
     const { workspace, repo } = createWorkspace()
     const gitWorkflow = new GitWorkflow(registryFor(workspace), { worktreesRoot: join(tempDir('dsh-task-board-wt-'), 'wt') })
@@ -70,6 +70,7 @@ describe('repoSubpath', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const task = ledger.state().tasks[0]
       // The branch was cut in the repository, not in the container folder.
       expect(task.git?.repoPath).toBe(repo)
