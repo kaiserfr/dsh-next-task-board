@@ -151,7 +151,7 @@ holding uncommitted card work:
   another card of the same workspace cannot yank a working run's directory, and
   the human's checkout keeps its branch and its uncommitted state. Everything
   below happens in that worktree; only the merge runs in the main checkout.
-* A card whose worktree is gone (removed by hand, or merged earlier) falls back
+* A card whose worktree is gone (removed by hand, or archived earlier) falls back
   to the main checkout and checks the branch out there, exactly like a card from
   before this feature.
 * **A run settles into `ready_for_test` only once its session has ended**: the
@@ -177,13 +177,16 @@ holding uncommitted card work:
   has no execution to carry it and only gets a Host warning.
 * The replay onto the base and the final merge happen in the **main checkout**
   (a worktree never has the base branch checked out) — except the replay's own
-  conflict, which is resolved in the card's worktree — and the merged card's
-  worktree is removed afterwards — the branch, the commits and the review stamp
-  all live on in the repository. A worktree git refuses to remove (untracked
-  build artifacts) is left alone and never fails the accept.
-* **Deleting** a card releases its worktree too: nothing else points at the
-  directory. Archiving does not — a restored card has to find its checkout
-  again (and falls back to the main checkout when it is gone).
+  conflict, which is resolved in the card's worktree. The worktree **outlives the
+  merge**: a `done` card can be reactivated (or pulled back for rework), and that
+  run needs its own checkout. It is released only when the card leaves the board
+  for good — when it is **archived** (explicitly or by the Done-column limit) or
+  **deleted**. The branch, the commits and the review stamp all live on in the
+  repository. A git that refuses the removal (a locked worktree, an open file)
+  never fails the archive: the Host poll retries it on the archived card and logs
+  the refusal once, and a locked worktree is never unlocked behind the human's
+  back. A restored card has to find its checkout again (and falls back to the
+  main checkout when it is gone, until the next branch cut re-creates it).
 * The card's `TaskGit` records `committedAt` (the instant of the last commit, not
   shown in the UI) next to `mergedAt`.
 
@@ -242,7 +245,8 @@ Host action) — go through the same Host routine, so the two can never disagree
   the base is untouched (the replay is then a no-op).
 * **The merge succeeds.** The feature branch lands on the base branch
   (`--no-ff`), the card moves to `done`, and both `TaskGit.mergedAt` and
-  `TaskMerge.mergedAt` name the instant. The disposable worktree is removed; the
+  `TaskMerge.mergedAt` name the instant. The card keeps its worktree — a done
+  card may be reactivated — and releasing it is what **archiving** does; the
   branch, the commits and the review stamp survive in the repository.
 * **The release is refused or fails** (dirty worktree, a branch past the reviewed
   commit, no reviewed commit, git's own error): the card goes to `failed` with

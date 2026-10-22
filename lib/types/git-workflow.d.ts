@@ -184,18 +184,17 @@ export declare class GitWorkflow {
      */
     abortUnresolvedMerge(task: TaskRecord): void;
     /**
-     * Drop a card's worktree because the card itself is gone (deleted from the
-     * board): nothing points at the directory any more, so it is not kept around.
-     * A git that refuses (untracked build artifacts, a lock) only logs.
+     * Release the card's own worktree: the card is archived (it left the board
+     * for good, so no run will ever need the directory again) or deleted. The
+     * directory was disposal-only from the start — the branch, the commits and
+     * the review stamp all survive in the repository. A git that refuses
+     * (untracked build artifacts a `--force` cannot take, a locked worktree, an
+     * open file) is reported instead of thrown: archiving never fails because of
+     * it, and the Host poll retries the removal on the archived card.
+     * @param task - the card leaving the board.
+     * @returns why git refused, or undefined when the directory is gone.
      */
-    releaseWorktree(task: TaskRecord): void;
-    /**
-     * Drop the card's worktree after its branch was merged: the directory was
-     * disposal-only from the start (the branch, the commits and the review stamp
-     * all survive in the repository). A worktree git refuses to remove — untracked
-     * build artifacts, a lock — is left alone and never fails the accept.
-     */
-    private removeWorktree;
+    releaseWorktree(task: TaskRecord): string | undefined;
     /**
      * Branch a new feature branch starts from: HEAD while it is a normal branch,
      * otherwise the repository's main branch (a second card pulled into

@@ -110,8 +110,11 @@ export interface TaskGit {
      * Absolute path of the card's own git worktree, when one was created: the
      * checkout the execution session works in, so the main checkout stays on the
      * branch the human is using and two cards of one workspace never share a
-     * directory. Absent on cards whose branch lives in the main checkout (the
-     * legacy path, and any environment where `git worktree` refuses).
+     * directory. It outlives the merge (a done card may be reactivated) and is
+     * released only when the card is archived or deleted; the path stays recorded,
+     * and `git.openBranch` re-attaches the directory when the card needs it again.
+     * Absent on cards whose branch lives in the main checkout (the legacy path,
+     * and any environment where `git worktree` refuses).
      */
     worktreePath?: string;
     /**

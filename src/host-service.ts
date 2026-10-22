@@ -104,6 +104,12 @@ export class TaskBoardHostService {
    */
   private readonly reviewEnvs = new Map<string, TaskReview>()
   private readonly reviewBusy = new Map<string, 'start' | 'stop' | 'restart'>()
+  /**
+   * Archived cards whose worktree removal failed once. The removal is retried
+   * every poll; this set only keeps the warning from repeating alongside it
+   * (the card stays in it until the directory is gone).
+   */
+  private readonly worktreeWarnings = new Set<string>()
   /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
   private reviewPlans: Record<string, TaskBoardReviewPlan> = {}
   private readonly now: () => number
@@ -766,14 +772,37 @@ export class TaskBoardHostService {
     }
   }
 
+  /**
+   * Retry releasing the worktree of an archived card. Archiving releases it
+   * right away; this covers the git that refused then (a locked worktree, an
+   * open file) and cards archived before archiving owned that job. A failure is
+   * logged once per card and retried silently on every poll until the directory
+   * is gone — a locked worktree is never unlocked behind the human's back.
+   */
+  private reconcileArchivedWorktrees(): void {
+    if (this.disposed) return
+    const pending = new Set<string>()
+    for (const task of this.ledger.archivedWorktrees()) {
+      const failure = this.git.releaseWorktree(task)
+      if (failure === undefined) continue
+      pending.add(task.id)
+      if (this.worktreeWarnings.has(task.id)) continue
+      this.worktreeWarnings.add(task.id)
+      console.warn(`task board: could not remove the worktree of archived task ${task.id} (${failure}); retrying on every poll`)
+    }
+    for (const id of [...this.worktreeWarnings]) if (!pending.has(id)) this.worktreeWarnings.delete(id)
+  }
+
   private async pollSessions(): Promise<void> {
     if (this.disposed) return
     // Environments are reconciled on every poll, whether or not the board is
     // active: a stack whose card left the run/review columns (or is gone) must
     // not keep running just because the plugin was switched off meanwhile. The
-    // review environments the board started are held to the same rule.
+    // review environments the board started are held to the same rule, and an
+    // archived card's worktree is retried until it is gone.
     this.reconcileCompose()
     this.reconcileReview()
+    this.reconcileArchivedWorktrees()
     if (!this.active && this.ledger.runtimeView().openExecutions.length === 0) return
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
