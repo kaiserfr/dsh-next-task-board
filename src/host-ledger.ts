@@ -510,6 +510,7 @@ export class HostTaskLedger {
     const { tasks, archivedIds } = enforceDoneLimit(this.document.tasks, this.maxDoneTasks, this.now())
     if (archivedIds.length === 0) return
     this.document.tasks = [...tasks]
+    this.releaseArchivedWorktrees(archivedIds)
     this.commit()
   }
 
@@ -759,6 +760,34 @@ export class HostTaskLedger {
     if (task.merge === undefined) return task
     const { merge: _released, ...rest } = task
     return rest
+  }
+
+  /**
+   * Release the worktrees of cards that just became archived — the explicit
+   * archive action and the Done-column limit alike. Archiving is the last board
+   * state a card reaches, so no later run needs the directory; the branch, its
+   * commits and the review stamp stay in the repository. A git that refuses
+   * (a locked worktree, an open file) never fails the archive: the Host poll
+   * retries it on the archived card ({@link HostTaskLedger.archivedWorktrees}).
+   * @param ids - cards that the archive just took off the board.
+   */
+  private releaseArchivedWorktrees(ids: readonly string[]): void {
+    for (const id of ids) {
+      const task = this.document.tasks.find(item => item.id === id)
+      if (task !== undefined) this.git?.releaseWorktree(task)
+    }
+  }
+
+  /**
+   * Archived cards whose own worktree directory still exists, so the Host poll
+   * can retry releasing it: git may have refused at archive time, or the card
+   * was archived before archiving released the worktree. A runtime projection on
+   * the hot poll path — it never clones the document.
+   */
+  archivedWorktrees(): TaskRecord[] {
+    return this.document.tasks.filter(task => task.archivedAt !== undefined
+      && task.git?.worktreePath !== undefined
+      && existsSync(task.git.worktreePath))
   }
 
   /**
@@ -1114,7 +1143,8 @@ export class HostTaskLedger {
           if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
           // The card's worktree is only ever referenced by this card, so deleting
           // the card releases it (the branch and its commits stay in the repo).
-          this.git?.releaseWorktree(task)
+          const failure = this.git?.releaseWorktree(task)
+          if (failure !== undefined) console.warn(`task board: could not remove the worktree of deleted task ${task.id} (${failure})`)
         }
         this.document.tasks = [...applyDeleteTask(this.document.tasks, undefined, action.taskId).tasks]
         break
@@ -1191,9 +1221,15 @@ export class HostTaskLedger {
         // The Done-column limit: a move that would leave more than N on-board
         // cards in `done` archives the oldest ones (FIFO) until it holds again.
         // Every other column is untouched and surviving cards keep their order.
-        this.document.tasks = action.status === 'done'
-          ? [...enforceDoneLimit(moved, this.maxDoneTasks, now).tasks]
-          : moved
+        // Archived cards give their worktrees to the poll's retry (they are the
+        // only cards that no longer need a checkout).
+        if (action.status === 'done') {
+          const limited = enforceDoneLimit(moved, this.maxDoneTasks, now)
+          this.document.tasks = [...limited.tasks]
+          this.releaseArchivedWorktrees(limited.archivedIds)
+        } else {
+          this.document.tasks = moved
+        }
         break
       }
       case 'move-many': {
@@ -1226,15 +1262,23 @@ export class HostTaskLedger {
         // the moved cards in their existing order among themselves; the
         // Done-column limit then trims exactly as the single-card move does.
         const next = this.document.tasks.map(item => moved.get(item.id) ?? item)
-        this.document.tasks = action.status === 'done'
-          ? [...enforceDoneLimit(next, this.maxDoneTasks, now).tasks]
-          : next
+        if (action.status === 'done') {
+          const limited = enforceDoneLimit(next, this.maxDoneTasks, now)
+          this.document.tasks = [...limited.tasks]
+          this.releaseArchivedWorktrees(limited.archivedIds)
+        } else {
+          this.document.tasks = next
+        }
         break
       }
       case 'archive': {
+        const task = this.document.tasks.find(item => item.id === action.taskId)
         const result = applyArchiveTask(this.document.tasks, action.taskId, now)
         if (!result.archived) throw new Error('task cannot be archived')
         this.document.tasks = [...result.tasks]
+        // Archive is the last board state: release the card's own checkout. A
+        // refusal is not fatal — the Host poll retries it.
+        if (task !== undefined) this.git?.releaseWorktree(task)
         break
       }
       case 'restore': {

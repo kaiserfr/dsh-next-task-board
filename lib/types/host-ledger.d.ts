@@ -275,6 +275,23 @@ export declare class HostTaskLedger {
      */
     private clearRelease;
     /**
+     * Release the worktrees of cards that just became archived — the explicit
+     * archive action and the Done-column limit alike. Archiving is the last board
+     * state a card reaches, so no later run needs the directory; the branch, its
+     * commits and the review stamp stay in the repository. A git that refuses
+     * (a locked worktree, an open file) never fails the archive: the Host poll
+     * retries it on the archived card ({@link HostTaskLedger.archivedWorktrees}).
+     * @param ids - cards that the archive just took off the board.
+     */
+    private releaseArchivedWorktrees;
+    /**
+     * Archived cards whose own worktree directory still exists, so the Host poll
+     * can retry releasing it: git may have refused at archive time, or the card
+     * was archived before archiving released the worktree. A runtime projection on
+     * the hot poll path — it never clones the document.
+     */
+    archivedWorktrees(): TaskRecord[];
+    /**
      * The merge release of one card: replay its feature branch onto the base
      * branch as that stands now (other cards may have merged meanwhile) and merge
      * it back into the base — and, when that replay conflicts, hand the conflict

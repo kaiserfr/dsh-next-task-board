@@ -179,9 +179,11 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     const merged = workflow.mergeBranch({ ...task, git: parked }, NOW)
     expect(merged?.mergedAt).toBe(NOW)
     expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
-    // The merge landed in the main checkout — and the disposable worktree is gone.
+    // The merge landed in the main checkout — and the card keeps its worktree:
+    // a done card can be reactivated, and that run works in its own checkout.
     expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
-    expect(existsSync(state.worktreePath!)).toBe(false)
+    expect(existsSync(state.worktreePath!)).toBe(true)
+    expect(git(state.worktreePath!, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
     expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe(`merge ${state.branch} (task board)`)
     // Already merged: a second accept is a no-op.
     expect(workflow.mergeBranch({ ...task, git: merged! }, NOW + 1)).toBeUndefined()
@@ -301,10 +303,18 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       const done = ledger.state().tasks[0]
       expect(done.status).toBe('done')
       expect(done.git?.mergedAt).toBe(NOW)
-      // Merged into the main checkout, and the disposable worktree is gone.
+      // Merged into the main checkout, and the worktree stays: a done card that
+      // is pulled back out of `done` still needs its own checkout.
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
       expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
+      expect(existsSync(dir)).toBe(true)
+
+      // Archiving is where the worktree is released — the branch and its
+      // commits stay in the repository.
+      ledger.applyRequest('r-archive', { kind: 'archive', taskId: 'card-1' })
+      expect(ledger.state().tasks[0].archivedAt).toBe(NOW)
       expect(existsSync(dir)).toBe(false)
+      expect(git(repo, ['show', `${done.git!.branch}:feature.txt`])).toBe('agent output')
     } finally {
       ledger.dispose()
     }
@@ -599,8 +609,9 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(task.merge?.error).toBeUndefined()
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
       expect(readFileSync(join(repo, 'feature.txt'), 'utf8')).toContain('resolved')
-      // The disposable worktree is gone with the merge.
-      expect(existsSync(dir)).toBe(false)
+      // The worktree survives the merge; it belongs to the card until the card
+      // is archived or deleted.
+      expect(existsSync(dir)).toBe(true)
     } finally {
       ledger.dispose()
     }

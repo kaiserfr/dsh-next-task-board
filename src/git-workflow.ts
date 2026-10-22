@@ -26,7 +26,11 @@
  *   commit and the worktree is clean: work committed after the review makes the
  *   approval stale and the release refuses instead of replaying something nobody
  *   reviewed. A replay that conflicts is left in the card's own worktree for the
- *   card's agent ({@link GitWorkflow.mergeBranch}).
+ *   card's agent ({@link GitWorkflow.mergeBranch}),
+ * - the worktree outlives the merge: a done card may be pulled back out of
+ *   `done` (reactivated or reworked), and that run needs its own checkout. The
+ *   directory is only released when the card leaves the board for good —
+ *   archiving or deleting it ({@link GitWorkflow.releaseWorktree}).
  *
  * The board's WIP limit stays per workspace (WIP lane): one implementation run
  * per workspace. The card's worktree is what makes that limit about *slots*, not
@@ -359,7 +363,9 @@ export class GitWorkflow {
       if (this.unmergedFiles(git.repoPath).length > 0) this.abortMerge(git.repoPath)
       throw error
     }
-    this.removeWorktree(git)
+    // The worktree deliberately outlives the merge: a card can be reactivated
+    // from `done`, and that run must find the checkout it worked in. It is
+    // released when the card is archived or deleted.
     return { ...git, mergedAt: now }
   }
 
@@ -462,27 +468,25 @@ export class GitWorkflow {
   }
 
   /**
-   * Drop a card's worktree because the card itself is gone (deleted from the
-   * board): nothing points at the directory any more, so it is not kept around.
-   * A git that refuses (untracked build artifacts, a lock) only logs.
+   * Release the card's own worktree: the card is archived (it left the board
+   * for good, so no run will ever need the directory again) or deleted. The
+   * directory was disposal-only from the start — the branch, the commits and
+   * the review stamp all survive in the repository. A git that refuses
+   * (untracked build artifacts a `--force` cannot take, a locked worktree, an
+   * open file) is reported instead of thrown: archiving never fails because of
+   * it, and the Host poll retries the removal on the archived card.
+   * @param task - the card leaving the board.
+   * @returns why git refused, or undefined when the directory is gone.
    */
-  releaseWorktree(task: TaskRecord): void {
-    if (task.git !== undefined) this.removeWorktree(task.git)
-  }
-
-  /**
-   * Drop the card's worktree after its branch was merged: the directory was
-   * disposal-only from the start (the branch, the commits and the review stamp
-   * all survive in the repository). A worktree git refuses to remove — untracked
-   * build artifacts, a lock — is left alone and never fails the accept.
-   */
-  private removeWorktree(git: TaskGit): void {
-    if (git.worktreePath === undefined || !existsSync(git.worktreePath)) return
+  releaseWorktree(task: TaskRecord): string | undefined {
+    const git = task.git
+    if (git === undefined || git.worktreePath === undefined || !existsSync(git.worktreePath)) return undefined
     try {
       this.run(git.repoPath, ['worktree', 'remove', '--force', git.worktreePath])
     } catch (error) {
-      console.warn(`task board: could not remove worktree ${git.worktreePath} (${error instanceof Error ? error.message : String(error)})`)
+      return error instanceof Error ? error.message : String(error)
     }
+    return existsSync(git.worktreePath) ? `${git.worktreePath} is still there after git worktree remove` : undefined
   }
 
   /**

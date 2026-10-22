@@ -88,6 +88,12 @@ export declare class TaskBoardHostService {
      */
     private readonly reviewEnvs;
     private readonly reviewBusy;
+    /**
+     * Archived cards whose worktree removal failed once. The removal is retried
+     * every poll; this set only keeps the warning from repeating alongside it
+     * (the card stays in it until the directory is gone).
+     */
+    private readonly worktreeWarnings;
     /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
     private reviewPlans;
     private readonly now;
@@ -274,6 +280,14 @@ export declare class TaskBoardHostService {
      * stop command would not help.
      */
     private reconcileReview;
+    /**
+     * Retry releasing the worktree of an archived card. Archiving releases it
+     * right away; this covers the git that refused then (a locked worktree, an
+     * open file) and cards archived before archiving owned that job. A failure is
+     * logged once per card and retried silently on every poll until the directory
+     * is gone — a locked worktree is never unlocked behind the human's back.
+     */
+    private reconcileArchivedWorktrees;
     private pollSessions;
     /**
      * Recompute which cards wait for the human's answer and publish the change.
