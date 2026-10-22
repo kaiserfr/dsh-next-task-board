@@ -1,10 +1,10 @@
 /**
  * Task card: the board's column item. A plain click marks the card (the
  * board owns the Ctrl/Shift/Space rules), a double click opens the task
- * detail — it never executes anything directly (detail holds the Run button).
- * A card whose latest execution carries a session also renders a direct
- * session link, for a running (active) and a settled (inactive) execution
- * alike.
+ * detail — it never executes anything directly (detail holds the transition
+ * buttons, including the run starts). A card whose latest execution carries a
+ * session also renders a direct session link, for a running (active) and a
+ * settled (inactive) execution alike.
  *
  * The link is a sibling of the card button, not a child: a button may not hold
  * interactive content, and a nested anchor would not be keyboard-reachable.
@@ -17,23 +17,34 @@
  */
 import { type DragEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import type { TaskRecord, WaitingReason } from '../../core/tasks.ts';
+import type { QueuedTransition, TransitionError } from '../../core/transitions.ts';
 /** Compact relative/absolute time label. */
 export declare function formatHostTimestamp(ms: number, timeZone?: string): string;
 export declare function formatTime(ms: number, timeZone?: string): string;
 /**
  * Whether a card may be dragged at all: archived cards are read-only and a card
  * the runner owns (`running`) must not be moved while its execution settles.
- * A card with an action in the outbox is deliberately **not** excluded any more:
- * further actions queue behind it, so the user is never blocked by a running
- * backend call. The board reuses this to decide which cards a group drag may
- * carry.
+ * A card with an action in the outbox is deliberately **not** excluded: further
+ * actions queue behind it, so the user is never blocked by a running backend
+ * call. The board reuses this to decide which cards a group drag may carry.
  */
 export declare function isCardDraggable(task: TaskRecord): boolean;
-declare function TaskCardInner({ task, pending, releasePending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+/**
+ * Whether a card may take part in the selection's bulk archive/delete. The
+ * broader drag rule deliberately does not apply here: archiving a card while a
+ * Host action for it is on the wire would race that action, so pending cards
+ * remain out of the bulk actions even though they can be dragged.
+ */
+export declare function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean;
+declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
     task: TaskRecord;
     pending: boolean;
     /** A merge release of this card runs in the Host's background. */
     releasePending?: boolean;
+    /** The card's waiting transition intent (one per card), if any. */
+    pendingTransition?: QueuedTransition;
+    /** The last discarded/failed transition, until the card's next action. */
+    transitionError?: TransitionError;
     timeZone?: string;
     selected: boolean;
     dragging: boolean;

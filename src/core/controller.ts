@@ -12,7 +12,14 @@
  * owns only the orchestration seam (state, persistence, notify, navigation).
  */
 import type { TaskStore } from './store.ts'
+import { resolveStateMachine } from './state-machine.ts'
 import { withStatus, type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts'
+import {
+  transitionBlockerOf,
+  type QueuedTransition,
+  type TransitionBlocker,
+  type TransitionError,
+} from './transitions.ts'
 import { applyArchiveTask, applyRestoreTask } from './use-cases/task-archive.ts'
 import { applyCreateTask } from './use-cases/task-create.ts'
 import { applyDeleteTask } from './use-cases/task-delete.ts'
@@ -165,6 +172,14 @@ export interface ControllerSnapshot {
   /** Recent user-facing messages (refusals, Host rejections, background failures). */
   notices?: readonly BoardNotice[]
   /**
+   * Transition intents waiting for their turn (at most one per card; a newer
+   * click replaces the older intent). Browser view state only, never ledger
+   * state: the Host confirms the move before the card changes column.
+   */
+  pendingTransitions?: readonly QueuedTransition[]
+  /** The last transition failure per card, cleared by the card's next action. */
+  transitionErrors?: Readonly<Record<string, TransitionError>>
+  /**
    * Keys of the modal form drafts the controller currently holds (see
    * {@link BoardController.saveFormDraft}). The board marks "new task" while
    * the blank form's draft waits, so a kept draft is visible before the popup
@@ -281,6 +296,17 @@ export class BoardController {
   private readonly noticeList: BoardNotice[] = []
   private readonly seenHostNotices = new Set<string>()
   /**
+   * Transition intents (a status move that starts a run/clarify included).
+   * One per card: a newer click replaces the older intent. They wait outside
+   * the outbox until no action for the card is in flight, then enter it; the
+   * outbox owns retries and request-id idempotency.
+   */
+  private readonly transitionQueue = new Map<string, QueuedTransition>()
+  /** Last transition failure per card; cleared by the card's next action. */
+  private readonly transitionErrors = new Map<string, TransitionError>()
+  private transitionPumpQueued = false
+  private pumpingTransitions = false
+  /**
    * Modal form drafts, keyed per modal (the client owns the key vocabulary).
    * They live here — not in the popup components — so closing a popup by an
    * accidental click next to it, by Escape, or by Cancel never throws typed
@@ -330,6 +356,9 @@ export class BoardController {
     this.outboxDraining.clear()
     this.outboxKickPending.clear()
     this.outbox.length = 0
+    this.transitionPumpQueued = false
+    this.transitionQueue.clear()
+    this.transitionErrors.clear()
     this.listeners.clear()
   }
 
@@ -349,6 +378,8 @@ export class BoardController {
         ...(this.outboxError === undefined ? {} : { error: this.outboxError }),
       },
       notices: [...this.noticeList],
+      ...(this.transitionQueue.size === 0 ? {} : { pendingTransitions: [...this.transitionQueue.values()] }),
+      ...(this.transitionErrors.size === 0 ? {} : { transitionErrors: Object.fromEntries(this.transitionErrors) }),
       ...(this.formDrafts.size === 0 ? {} : { formDrafts: this.formDraftKeys() }),
       ...(this.workspaceCreator === undefined ? {} : { canCreateWorkspace: true }),
       ...(typeof this.deps.transport?.parseDraft === 'function' ? { canParseTask: true } : {}),
@@ -375,6 +406,8 @@ export class BoardController {
    * Tests and the host-sync retry use this instead of polling.
    */
   async whenIdle(): Promise<void> {
+    // Let a ready transition intent enter the outbox before waiting on it.
+    await Promise.resolve()
     while (this.outboxDrains.size > 0) {
       await Promise.all([...this.outboxDrains.values()].map(drain => drain.catch(() => {})))
     }
@@ -571,12 +604,15 @@ export class BoardController {
   }
 
   /**
-   * Move one card. Host-backed: accepted immediately and queued per card; the
-   * card moves when the Host confirms (or the rejection arrives as a notice).
+   * Ask for a manual status move. Host-backed this only enqueues the intent:
+   * the controller sends it (through the outbox) when no other action for the
+   * card is in flight and the machine/preconditions allow it, then waits for
+   * the confirmed snapshot. The legacy in-memory path still applies the move
+   * synchronously.
    */
   moveTask(id: string, status: TaskStatus): void {
     if (this.deps.transport !== undefined) {
-      this.enqueue({ kind: 'move', taskId: id, status }, id)
+      this.enqueueTransition(id, status)
       return
     }
     this.tasks = this.tasks.map(task => task.id === id ? withStatus(task, status, this.now()) : task)
@@ -584,26 +620,56 @@ export class BoardController {
   }
 
   /**
-   * Move a group of cards to one status as a single ledger action (group drag).
-   * The Host validates the whole batch before writing any card, so the move is
-   * all-or-nothing and the cards keep their order among themselves.
+   * Move a group of cards to one status. Host-backed each card gets its own
+   * queued intent (the "last click wins" rule is per card), so one card's
+   * blocker never holds back the others; the legacy path keeps the single
+   * in-memory write.
    * @param ids - the dragged cards; duplicates are ignored.
    * @param status - the target column.
-   * @returns whether the batch was accepted locally (always true on the legacy
-   * in-memory path); the board clears its selection on that.
+   * @returns whether the intents were accepted into the queue (always true on
+   * the legacy path); the board clears its selection on success only.
    */
   async moveTasks(ids: readonly string[], status: TaskStatus): Promise<boolean> {
     const unique = [...new Set(ids)]
     if (unique.length === 0) return true
-    if (unique.length === 1) { this.moveTask(unique[0]!, status); return true }
     if (this.deps.transport !== undefined) {
-      this.enqueue({ kind: 'move-many', taskIds: unique, status })
+      for (const id of unique) this.enqueueTransition(id, status)
+      return true
+    }
+    if (unique.length === 1) {
+      this.moveTask(unique[0]!, status)
       return true
     }
     const moving = new Set(unique)
     this.tasks = this.tasks.map(task => moving.has(task.id) ? withStatus(task, status, this.now()) : task)
     this.persistAndNotify()
     return true
+  }
+
+  /**
+   * Drop the card's waiting transition intent. A move already handed to the
+   * outbox is not retracted (the intent leaves the queue before that), so the
+   * cancel control only exists while the card is actually waiting.
+   */
+  cancelTransition(taskId: string): void {
+    if (!this.transitionQueue.delete(taskId)) return
+    this.notify()
+  }
+
+  /**
+   * Record why a drop/click could not even be queued (hard blocker). The card
+   * shows a badge and the detail the reason until its next action.
+   */
+  noteTransitionBlocked(taskId: string, blocker: TransitionBlocker, to?: TaskStatus): void {
+    const task = this.tasks.find(candidate => candidate.id === taskId)
+    if (task === undefined) return
+    this.transitionErrors.set(taskId, {
+      code: blocker,
+      from: task.status,
+      ...(to === undefined ? {} : { to }),
+      at: this.now(),
+    })
+    this.notify()
   }
 
   deleteTask(id: string): void {
@@ -936,6 +1002,174 @@ export class BoardController {
     this.notify()
   }
 
+  // --- transition intent queue -------------------------------------------------
+
+  /** The machine the Host currently enforces (the shipped one as fallback). */
+  private transitionMachine(): ReturnType<typeof resolveStateMachine>['machine'] {
+    return resolveStateMachine(this.hostState?.stateMachine).machine
+  }
+
+  /**
+   * Queue one manual move for the card. Hard blockers are refused at once (the
+   * button is disabled for them anyway) and recorded so the popup/card can say
+   * why; a valid intent replaces any older waiting intent for the same card.
+   */
+  private enqueueTransition(taskId: string, to: TaskStatus): boolean {
+    const task = this.tasks.find(candidate => candidate.id === taskId)
+    if (task === undefined) return false
+    if (task.status === to) {
+      // The desired column is already reached: the intent is complete.
+      this.transitionQueue.delete(taskId)
+      this.transitionErrors.delete(taskId)
+      this.notify()
+      return true
+    }
+    // A move already on the wire will change the source column; the follow-up
+    // transition is validated by the Host against the state the first action
+    // leaves behind. Otherwise the current column decides right away.
+    const pendingMove = this.outbox.some(candidate =>
+      candidate.taskId === taskId && candidate.action.kind === 'move')
+    if (!pendingMove) {
+      const blocker = transitionBlockerOf(task, this.transitionMachine(), to, this.hostState?.sessionDefaultPermission)
+      if (blocker !== undefined) {
+        this.noteTransitionBlocked(taskId, blocker, to)
+        return false
+      }
+    }
+    this.transitionQueue.set(taskId, { taskId, from: task.status, to, requestedAt: this.now() })
+    this.transitionErrors.delete(taskId)
+    this.notify()
+    this.pumpTransitionQueue()
+    return true
+  }
+
+  private failTransition(
+    taskId: string,
+    code: TransitionError['code'],
+    message?: string,
+    from?: TaskStatus,
+    to?: TaskStatus,
+  ): void {
+    this.transitionErrors.set(taskId, {
+      code,
+      ...(message === undefined || message === '' ? {} : { message }),
+      ...(from === undefined ? {} : { from }),
+      ...(to === undefined ? {} : { to }),
+      at: this.now(),
+    })
+    this.notify()
+  }
+
+  /** Schedule a pump after the current microtask queue (deduped). */
+  private scheduleTransitionPump(): void {
+    if (this.transitionPumpQueued) return
+    this.transitionPumpQueued = true
+    queueMicrotask(() => {
+      this.transitionPumpQueued = false
+      this.pumpTransitionQueue()
+    })
+  }
+
+  /**
+   * Send every intent whose card is free. A card with an outbox action is
+   * skipped (the outbox hooks pump again when that action settles); a card
+   * whose source column changed, or that hit a hard blocker in the meantime,
+   * loses its intent with a recorded reason.
+   */
+  private pumpTransitionQueue(): void {
+    if (this.pumpingTransitions) return
+    if (this.deps.transport === undefined) {
+      this.transitionQueue.clear()
+      return
+    }
+    if (this.transitionQueue.size === 0) return
+    this.pumpingTransitions = true
+    let changed = false
+    try {
+      for (const [taskId, entry] of [...this.transitionQueue]) {
+        const task = this.tasks.find(candidate => candidate.id === taskId)
+        // A deleted/archived card has nothing left to move.
+        if (task === undefined || task.archivedAt !== undefined) {
+          this.transitionQueue.delete(taskId)
+          changed = true
+          continue
+        }
+        // The outbox owns the card until its action is confirmed or rejected.
+        const pendingForCard = this.outbox.filter(candidate => candidate.taskId === taskId)
+        if (pendingForCard.length > 0) {
+          // A transition behind another transition keeps the outbox's per-card
+          // FIFO (a second click while the first move is on the wire). Behind a
+          // non-transition action the intent still waits for that action to
+          // settle, so its source-column precheck remains meaningful.
+          const pendingMove = pendingForCard.some(candidate => candidate.action.kind === 'move')
+          if (!pendingMove) continue
+          if (pendingForCard.some(candidate => candidate.action.kind === 'move'
+            && candidate.action.taskId === taskId && candidate.action.status === entry.to)) {
+            this.transitionQueue.delete(taskId)
+            changed = true
+            continue
+          }
+          this.transitionQueue.delete(taskId)
+          this.sendQueuedTransition(entry)
+          continue
+        }
+        if (task.status === entry.to) {
+          this.transitionQueue.delete(taskId)
+          this.transitionErrors.delete(taskId)
+          changed = true
+          continue
+        }
+        if (task.status !== entry.from) {
+          this.transitionQueue.delete(taskId)
+          this.failTransition(taskId, 'source-changed', undefined, entry.from, entry.to)
+          continue
+        }
+        const blocker = transitionBlockerOf(
+          task,
+          this.transitionMachine(),
+          entry.to,
+          this.hostState?.sessionDefaultPermission,
+        )
+        if (blocker !== undefined) {
+          this.transitionQueue.delete(taskId)
+          this.failTransition(taskId, blocker, undefined, entry.from, entry.to)
+          continue
+        }
+        this.transitionQueue.delete(taskId)
+        this.sendQueuedTransition(entry)
+      }
+    } finally {
+      this.pumpingTransitions = false
+      // A silently completed/dropped intent still has to disappear from the
+      // card badge; the snapshot that triggered the pump may predate this pass.
+      if (changed) this.notify()
+    }
+  }
+
+  /**
+   * Hand one intent to the outbox. The outbox serialises per card, retries a
+   * broken connection with the same request id and reports a definitive
+   * rejection through the hook, so the intent queue never duplicates that work.
+   */
+  private sendQueuedTransition(entry: QueuedTransition): void {
+    this.enqueue(
+      { kind: 'move', taskId: entry.taskId, status: entry.to },
+      entry.taskId,
+      {
+        onAccepted: () => {
+          this.transitionErrors.delete(entry.taskId)
+          this.scheduleTransitionPump()
+        },
+        onRejected: (message) => {
+          this.failTransition(entry.taskId, 'rejected', message, entry.from, entry.to)
+          this.scheduleTransitionPump()
+        },
+      },
+      currentOf(this.deps.sessions),
+      false,
+    )
+  }
+
   // --- outbox ------------------------------------------------------------------
 
   /**
@@ -1247,6 +1481,9 @@ export class BoardController {
       }
       this.ingestHostNotices(event.notices)
       this.notify()
+      // A ready transition intent can enter the outbox now; the outbox itself
+      // keeps the retry backoff for a temporarily unreachable Host.
+      this.scheduleTransitionPump()
       return
     }
     void this.refreshRemote()
@@ -1274,6 +1511,7 @@ export class BoardController {
     const nextLedgerId = snapshot.scheduler.ledgerId
     const sameGeneration = currentLedgerId === nextLedgerId
     if (sameGeneration && this.hostState !== undefined && snapshot.revision < this.hostState.revision) return false
+    const previousStatuses = new Map(this.tasks.map(task => [task.id, task.status]))
     this.tasks = [...snapshot.tasks]
     this.hostState = {
       ...this.hostState,
@@ -1297,6 +1535,25 @@ export class BoardController {
     }
     this.ingestHostNotices(snapshot.notices)
     this.transportError = undefined
+    // The queue is browser view state: drop intents for cards the snapshot no
+    // longer has or has archived, and let a status change clear the old error
+    // badge (the pump records a fresh source-changed reason for a stale intent).
+    const live = new Set(this.tasks.map(task => task.id))
+    for (const id of [...this.transitionQueue.keys()]) {
+      if (!live.has(id)) this.transitionQueue.delete(id)
+    }
+    for (const id of [...this.transitionErrors.keys()]) {
+      if (!live.has(id)) this.transitionErrors.delete(id)
+    }
+    for (const task of this.tasks) {
+      if (task.archivedAt !== undefined) {
+        this.transitionQueue.delete(task.id)
+        this.transitionErrors.delete(task.id)
+        continue
+      }
+      const previous = previousStatuses.get(task.id)
+      if (previous !== undefined && previous !== task.status) this.transitionErrors.delete(task.id)
+    }
     if (this.selectedTaskId !== undefined && !this.tasks.some(task => task.id === this.selectedTaskId)) {
       this.selectedTaskId = undefined
     }
@@ -1305,6 +1562,7 @@ export class BoardController {
       this.selectedTaskId = undefined
     }
     this.notify()
+    this.scheduleTransitionPump()
     return true
   }
 

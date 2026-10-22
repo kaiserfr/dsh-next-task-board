@@ -229,12 +229,12 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     expect(moveCalls).toEqual([{ id: 't-ready', status: 'done' }])
   })
 
-  it('drops a todo card onto the running column and starts it like Run', async () => {    const container = document.createElement('div')
+  it('drops a todo card onto the running column and starts it through the transition', async () => {
+    const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
     roots.push(root)
 
-    const runCalls: string[] = []
     const moveCalls: Array<{ id: string; status: string }> = []
     const controller = fakeController(
       {
@@ -246,7 +246,6 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
         pendingTaskIds: ['t-pending'],
       },
       {
-        rerunTask: async (id) => { runCalls.push(id) },
         moveTask: (id, status) => { moveCalls.push({ id, status }) },
       },
     )
@@ -267,15 +266,13 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     }
 
     await drop('t-todo')
-    expect(runCalls).toEqual(['t-todo'])
+    expect(moveCalls).toEqual([{ id: 't-todo', status: 'running' }])
 
-    // Already running, unknown, or pending tasks are not started again.
+    // Already running, unknown, or invalid targets do not move anything.
     await drop('t-running')
     await drop('t-missing')
     await drop('t-pending')
-    expect(runCalls).toEqual(['t-todo'])
-    // The running column never performs a plain status move.
-    expect(moveCalls).toHaveLength(0)
+    expect(moveCalls).toEqual([{ id: 't-todo', status: 'running' }])
   })
 
   it('rejects invalid drops (same column or dropping running tasks)', async () => {
@@ -393,7 +390,7 @@ describe('TaskBoard running-card marking and runner-column order', () => {
     const root = createRoot(container)
     roots.push(root)
 
-    const runCalls: string[] = []
+    const moveCalls: Array<{ id: string; status: string }> = []
     // The lane occupant holds the slot (a session is attached); the dropped
     // card is already in the runner column with an open run that has no
     // session — the state the Host's queue leaves it in.
@@ -408,7 +405,7 @@ describe('TaskBoard running-card marking and runner-column order', () => {
         tasks,
         executionOptions: { workspaces: [{ workspaceId: 'w1', title: 'Comfy' }], presets: [] },
       },
-      { rerunTask: async (id) => { runCalls.push(id) } },
+      { moveTask: (id, status) => { moveCalls.push({ id, status }) } },
     )
     await act(async () => { root.render(<TaskBoard controller={controller} />) })
 
@@ -441,7 +438,7 @@ describe('TaskBoard running-card marking and runner-column order', () => {
       )
       await Promise.resolve()
     })
-    expect(runCalls).toEqual(['t-drop'])
+    expect(moveCalls).toEqual([{ id: 't-drop', status: 'running' }])
   })
 })
 
@@ -855,7 +852,7 @@ describe('TaskBoard multi-selection and group drag', () => {
     const started: string[] = []
     const board = await render(
       [task({ id: 't-a', title: 'A', status: 'clarification' }), task({ id: 't-b', title: 'B', status: 'clarification' })],
-      { rerunTask: async (id) => { started.push(id) } },
+      { moveTasks: async (ids) => { started.push(...ids); return true } },
     )
 
     await click(board.card('A'))
@@ -995,7 +992,7 @@ describe('TaskBoard multi-selection and group drag', () => {
           task({ id: 't-open', title: 'Open', status: 'clarification' }),
           task({ id: 't-clear', title: 'Clear', status: 'clarification' }),
         ],
-        { rerunTask: async (id) => { started.push(id) } },
+        { moveTasks: async (ids) => { started.push(...ids); return true } },
       )
 
       await click(board.card('Open'))
@@ -1010,16 +1007,16 @@ describe('TaskBoard multi-selection and group drag', () => {
     })
 
     it('starts a card whose round already settled', async () => {
-      const started: string[] = []
+      const started: Array<{ id: string; status: string }> = []
       const board = await render(
         [task({ id: 't-a', title: 'A', status: 'clarification', clarificationSessionId: 'session-clarify' })],
-        { rerunTask: async (id) => { started.push(id) } },
+        { moveTask: (id, status) => { started.push({ id, status }) } },
       )
 
       const dataTransfer = transfer()
       await dragStart(board.card('A'), dataTransfer)
       await drop(board.column('running'), dataTransfer)
-      expect(started).toEqual(['t-a'])
+      expect(started).toEqual([{ id: 't-a', status: 'running' }])
     })
   })
 })

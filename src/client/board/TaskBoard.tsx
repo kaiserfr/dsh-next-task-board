@@ -8,13 +8,15 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
 import { collectKnownTags, compareWipOrder, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason } from '../../core/tasks.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
+import { transitionBlockerOf, type QueuedTransition, type TransitionBlocker, type TransitionError } from '../../core/transitions.ts'
 import { t } from '../locales.ts'
 import css from '../board.module.css'
 import { NewTaskModal } from './NewTaskModal.tsx'
 import { NEW_TASK_DRAFT_KEY } from './TaskForm.tsx'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
-import { isCardDraggable, TaskCard } from './TaskCard.tsx'
+import { isCardBulkActionable, isCardDraggable, TaskCard } from './TaskCard.tsx'
 import { TaskDetail } from './TaskDetail.tsx'
+import { blockerText } from './transition-text.ts'
 import { STATUS_KEY } from './status-key.ts'
 import type { TaskBoardKey } from '../locales.ts'
 
@@ -162,11 +164,13 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
   task: TaskRecord
   pending: boolean
   /** The Host is merging this card in the background. */
   releasePending?: boolean
+  pendingTransition?: QueuedTransition
+  transitionError?: TransitionError
   timeZone?: string
   selected: boolean
   dragging: boolean
@@ -193,6 +197,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       task={task}
       pending={pending}
       releasePending={releasePending}
+      pendingTransition={pendingTransition}
+      transitionError={transitionError}
       timeZone={timeZone}
       selected={selected}
       dragging={dragging}
@@ -264,15 +270,24 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     && matchesFilter(task, filter)
     && matchesTagFilter(task, tagFilter),
   ), [snapshot.tasks, archiveView, projectId, filter, tagFilter])
-  // The selection as it can actually be acted on: cards still on the board and
-  // not owned by the runner. The group drag carries this set, and the header's
-  // bulk archive/delete apply to it too, so a card that left the board
-  // (archived/deleted), started running, or is hidden by the current filter
-  // drops out here without a second source of truth.
-  const actionableIds = useMemo(
+  // The selected cards a group drag may carry. Pending cards are included on
+  // purpose: their drop is queued, so a transient Host action no longer makes
+  // the card undraggable.
+  const dragSelectionIds = useMemo(
     () => visible.filter(task => selectedIds.has(task.id) && isCardDraggable(task)).map(task => task.id),
     [visible, selectedIds],
   )
+  // Bulk archive/delete keep the stricter rule: a card with an action in flight
+  // must not be archived underneath it.
+  const bulkActionableIds = useMemo(
+    () => visible.filter(task => selectedIds.has(task.id) && isCardBulkActionable(task, pendingSet.has(task.id))).map(task => task.id),
+    [visible, selectedIds, pendingSet],
+  )
+  const pendingTransitionById = useMemo(
+    () => new Map((snapshot.pendingTransitions ?? []).map(entry => [entry.taskId, entry])),
+    [snapshot.pendingTransitions],
+  )
+  const transitionErrorById = snapshot.transitionErrors ?? {}
   // The rendered card order — columns left to right, cards top to bottom within
   // a column — which is the reference order a Shift click walks. Empty in the
   // archive view: archived cards are read-only and never selectable.
@@ -448,73 +463,104 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const startDrag = useCallback((id: string, event: ReactDragEvent<HTMLButtonElement>): void => {
     const task = snapshot.tasks.find(item => item.id === id)
     if (task === undefined || !isCardDraggable(task)) return
-    const ids = selectedIds.has(id) && actionableIds.includes(id) ? actionableIds : [id]
+    const ids = selectedIds.has(id) && dragSelectionIds.includes(id) ? dragSelectionIds : [id]
     event.dataTransfer.setData('text/plain', id)
     event.dataTransfer.setData(BATCH_DRAG_MIME, JSON.stringify(ids))
     event.dataTransfer.effectAllowed = 'move'
     setDragIds(new Set(ids))
-  }, [pendingSet, actionableIds, selectedIds, snapshot.tasks])
-  // One drop handler for every column. It takes the movable subset of the
-  // dragged cards: a card the machine does not allow into this column stays
-  // where it is, and a drop with nothing movable changes nothing at all.
+  }, [dragSelectionIds, selectedIds, snapshot.tasks])
+  // One drop handler for every column. A transition the machine does not allow
+  // is refused immediately (and explained), a hard blocker (running/paused,
+  // missing permission confirmation) is refused with its reason, and everything
+  // else enters the controller's queue: the drop returns at once even while the
+  // card still has another Host action in flight.
   const dropOnColumn = useCallback((columnStatus: TaskStatus, isRunTarget: boolean, event: ReactDragEvent<HTMLElement>): void => {
     event.preventDefault()
     const ids = readDragIds(event.dataTransfer, event.dataTransfer.getData('text/plain'))
     setDragIds(NO_IDS)
+    setQueuedNotice(undefined)
     const draggedIds = ids
       .map(id => snapshot.tasks.find(task => task.id === id))
       .filter((task): task is TaskRecord => task !== undefined)
     const dragged = draggedIds.filter(task => isCardDraggable(task))
-    const movable = dragged.filter(task => isRunTarget
-      // A human start is the go-ahead on the clarification gate: the Host
-      // closes the card's open clarification round and continues its session,
-      // so the drop is offered like any other run.
-      ? task.status !== columnStatus && machine.actionsFor(task.status, columnStatus).includes('run')
-      : machine.canTransition(task.status, columnStatus))
-    if (movable.length === 0) {
-      // Never swallow a drop silently: name the card and the reason it cannot
-      // go where it was dropped. A card with an action already in flight is not
-      // refused here — its move queues behind that action in the outbox.
-      const blocked = dragged[0] ?? draggedIds[0]
+    if (dragged.length === 0) {
+      // Nothing is draggable: name the first card's reason instead of letting
+      // the drop disappear silently.
+      const blocked = draggedIds[0]
       if (blocked !== undefined) controller.refuse?.(dropRefusalReason(blocked, columnStatus, isRunTarget), blocked.id)
       return
     }
-    // The runner owns the run entry; start each card in drag order so the
-    // queue keeps that order (the WIP limit still gates the launches).
+    const queueable: TaskRecord[] = []
+    const blocked: Array<{ task: TaskRecord; blocker: TransitionBlocker }> = []
+    for (const task of dragged) {
+      // Dropping on the card's own column is a no-op, but it is still named.
+      if (task.status === columnStatus) {
+        controller.refuse?.(dropRefusalReason(task, columnStatus, isRunTarget), task.id)
+        continue
+      }
+      const allowed = isRunTarget
+        // A human start is the go-ahead on the clarification gate: the Host
+        // closes the card's open clarification round and continues its session,
+        // so the drop is offered like any other run.
+        ? machine.actionsFor(task.status, columnStatus).includes('run')
+        : machine.canTransition(task.status, columnStatus)
+      if (!allowed) {
+        blocked.push({ task, blocker: 'invalid' })
+        continue
+      }
+      const blocker = transitionBlockerOf(task, machine, columnStatus, snapshot.host?.sessionDefaultPermission)
+      if (blocker !== undefined) blocked.push({ task, blocker })
+      else queueable.push(task)
+    }
+    if (blocked.length > 0) {
+      for (const { task, blocker } of blocked) {
+        controller.noteTransitionBlocked?.(task.id, blocker, columnStatus)
+      }
+      const first = blocked[0]!
+      const reason = first.blocker === 'invalid'
+        ? dropRefusalReason(first.task, columnStatus, isRunTarget)
+        : blockerText(first.blocker)
+      controller.refuse?.(
+        blocked.length === 1
+          ? t('board.transitionBlocked', { task: first.task.title, reason })
+          : t('board.transitionBlockedMany', {
+              count: String(blocked.length),
+              task: first.task.title,
+              reason,
+            }),
+        first.task.id,
+      )
+    }
+    if (queueable.length === 0) return
     if (isRunTarget) {
       // The lane's slot belongs to the run that already holds it, so this drop
       // queues the card(s) instead of starting them: say so, with the blocker's
       // name, right where the drop happened. The card itself shows the same
       // reason while it waits.
-      const queueNotice = queuedDropNotice(movable, snapshot.tasks, snapshot.host?.maxConcurrentRuns ?? 1, workspaceTitles)
+      const queueNotice = queuedDropNotice(queueable, snapshot.tasks, snapshot.host?.maxConcurrentRuns ?? 1, workspaceTitles)
       if (queueNotice !== undefined) setQueuedNotice(queueNotice)
-      void (async () => {
-        for (const task of movable) await controller.rerunTask(task.id)
-      })()
-      clearSelection()
-      return
     }
-    const moving = movable.map(task => task.id)
+    const moving = queueable.map(task => task.id)
     if (moving.length === 1) {
       controller.moveTask(moving[0]!, columnStatus)
       clearSelection()
       return
     }
-    void Promise.resolve(controller.moveTasks(moving, columnStatus)).then(moved => { if (moved) clearSelection() })
-  }, [clearSelection, controller, machine, pendingSet, snapshot.host?.maxConcurrentRuns, snapshot.tasks, workspaceTitles])
+    void controller.moveTasks(moving, columnStatus).then(moved => { if (moved) clearSelection() })
+  }, [clearSelection, controller, machine, snapshot.host?.maxConcurrentRuns, snapshot.host?.sessionDefaultPermission, snapshot.tasks, workspaceTitles])
   // Bulk archive/delete of the marked cards: both reuse the per-card
-  // controller actions and apply them to the actionable subset the group drag
-  // carries, so a running card (or one the current filter hides) stays behind.
+  // controller actions and apply them to the bulk-actionable subset, so a card
+  // with a Host action in flight stays behind.
   // The selection ends once the actions are submitted.
   const archiveSelection = useCallback((): void => {
-    for (const id of actionableIds) controller.archiveTask(id)
+    for (const id of bulkActionableIds) controller.archiveTask(id)
     clearSelection()
-  }, [actionableIds, clearSelection, controller])
+  }, [bulkActionableIds, clearSelection, controller])
   const deleteSelection = useCallback((): void => {
     setConfirmDeleteSelection(false)
-    for (const id of actionableIds) controller.deleteTask(id)
+    for (const id of bulkActionableIds) controller.deleteTask(id)
     clearSelection()
-  }, [actionableIds, clearSelection, controller])
+  }, [bulkActionableIds, clearSelection, controller])
 
   return (
     <div
@@ -618,7 +664,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
           type="button"
           className={css.ghostButton}
           data-dsh-part="bulk-archive"
-          disabled={actionableIds.length === 0}
+          disabled={bulkActionableIds.length === 0}
           onClick={(event) => { event.stopPropagation(); archiveSelection() }}
         >
           {t('board.archiveSelected')}
@@ -627,7 +673,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
           type="button"
           className={css.dangerButton}
           data-dsh-part="bulk-delete"
-          disabled={actionableIds.length === 0}
+          disabled={bulkActionableIds.length === 0}
           onClick={(event) => { event.stopPropagation(); setConfirmDeleteSelection(true) }}
         >
           {t('board.deleteSelected')}
@@ -776,7 +822,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             </header>
             <div className={css.cards}>
               {visible.map(task => (
-                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
+                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
               ))}
               {visible.length === 0 && (
                 <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('archive.empty')}</div>
@@ -807,7 +853,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                 </header>
                 <div className={css.cards}>
                   {tasks.map(task => (
-                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
+                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
                   ))}
                   {tasks.length === 0 && (
                     <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('board.empty')}</div>
@@ -832,7 +878,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       {confirmDeleteSelection && (
         <ConfirmDialog
           title={t('delete.selectedTitle')}
-          message={t('delete.selectedConfirm', { count: String(actionableIds.length) })}
+          message={t('delete.selectedConfirm', { count: String(bulkActionableIds.length) })}
           confirmLabel={t('delete.ok')}
           danger
           onCancel={() => { setConfirmDeleteSelection(false) }}

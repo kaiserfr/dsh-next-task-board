@@ -465,6 +465,21 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   color: var(--dsw-alias-state-success-primary);
 }
 
+/* Waiting transition target / failed-transition mark in the card meta row:
+   the queue stays visible after the detail popup is closed. */
+.cardTransition {
+  flex: none;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--dsw-alias-state-warn-primary);
+  white-space: nowrap;
+}
+
+.cardTransition[data-error='true'] {
+  color: var(--dsw-alias-state-error-primary);
+  font-weight: 700;
+}
+
 /* Direct card → session link: a bare glyph in the card's bottom corner, over
    the meta row. It is a sibling of the card button (the wrapper is the
    positioning context), so the card keeps a single click target for the detail
@@ -1112,6 +1127,22 @@ textarea.input::-webkit-resizer {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* Owns a transition button's tooltip: a disabled native button does not
+   reliably show one, and the reason is exactly what the control must explain. */
+.moveButtonWrap {
+  display: inline-flex;
+}
+
+/* Waiting-intent line under the status buttons. */
+.transitionQueued {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
 }
 
 .detailFooter {
