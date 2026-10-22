@@ -58,18 +58,22 @@ export function formatTime(ms: number, timeZone?: string): string {
 }
 
 /**
- * Whether a card may be dragged at all: archived cards are read-only, a card
- * the runner owns (`running`, or pending on the Host) must not be moved while
- * its execution settles. The board reuses this to decide which cards a group
- * drag may carry, so the payload and the `draggable` attribute never disagree.
+ * Whether a card may be dragged at all: archived cards are read-only and a card
+ * the runner owns (`running`) must not be moved while its execution settles.
+ * A card with an action in the outbox is deliberately **not** excluded any more:
+ * further actions queue behind it, so the user is never blocked by a running
+ * backend call. The board reuses this to decide which cards a group drag may
+ * carry.
  */
-export function isCardDraggable(task: TaskRecord, pending: boolean): boolean {
-  return task.archivedAt === undefined && task.status !== 'running' && !pending
+export function isCardDraggable(task: TaskRecord): boolean {
+  return task.archivedAt === undefined && task.status !== 'running'
 }
 
-function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+function TaskCardInner({ task, pending, releasePending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
   task: TaskRecord
   pending: boolean
+  /** A merge release of this card runs in the Host's background. */
+  releasePending?: boolean
   timeZone?: string
   selected: boolean
   dragging: boolean
@@ -103,7 +107,7 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingRea
   const paused = !archived && isTaskPaused(task)
   const executing = !archived && isTaskExecuting(task)
   const queued = !archived && !executing && !paused && !pending && latest !== undefined && latest.endedAt === undefined
-  const isDraggable = isCardDraggable(task, pending)
+  const isDraggable = isCardDraggable(task)
   // The pause button covers every open run of the card: the executing one (its
   // session is stopped) and the queued one (it never starts). A paused card
   // offers the same button as a play button to resume the run. The card's
@@ -194,6 +198,9 @@ function TaskCardInner({ task, pending, timeZone, selected, dragging, waitingRea
           {!archived && (executing || pending) && <span className={css.cardSpinner} aria-hidden="true" />}
         </span>
         {!archived && pending && <span className={css.cardRunningLabel}>{t('board.pending')}…</span>}
+        {!archived && releasePending === true && (
+          <span className={css.cardRunningLabel} data-dsh-part="card-release-pending">{t('card.releasePending')}</span>
+        )}
         {merge !== undefined && (
           // The merge verdict, in the free bottom-left corner: is this result in
           // the base branch, still waiting, resolving a conflict, or failed? A

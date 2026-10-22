@@ -1617,3 +1617,43 @@ textarea.input::-webkit-resizer {
 .aiParseRow .primaryButton {
   flex: none;
 }
+
+/* --- Outbox notices (status refusals, Host failures, background git) ---------- */
+
+.notices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+  font-size: 13px;
+}
+
+.notice[data-kind="refused"] {
+  border-color: var(--dsw-alias-border-warning, var(--dsw-alias-border-l2));
+}
+
+.notice[data-kind="failed"] {
+  border-color: var(--dsw-alias-border-danger, var(--dsw-alias-border-l2));
+}
+
+.noticeClose {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}

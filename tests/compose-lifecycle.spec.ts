@@ -59,7 +59,7 @@ function createRepo(): string {
  * and whose git is real: the card's worktree (the directory an environment lives
  * in) is cut by the board itself.
  */
-function harness(options: { failUp?: string } = {}) {
+async function harness(options: { failUp?: string } = {}) {
   const repo = createRepo()
   const workflow = new GitWorkflow({ list: () => [{ id: 'ws-1', path: repo }] } as unknown as TaskBoardWorkspaceRegistry,
     { worktreesRoot: join(tempDir('dsh-task-board-worktrees-'), 'wt') })
@@ -72,7 +72,9 @@ function harness(options: { failUp?: string } = {}) {
   // Backlog → Clarification cuts branch and worktree; that is where a task
   // environment belongs.
   ledger.applyRequest('to-clarify', { kind: 'move', taskId: 'card', status: 'clarification' })
+  await ledger.awaitCard('card')
   ledger.settle('card', ledger.state().tasks[0].executions[0].id, 'succeeded')
+  await ledger.awaitCard('card')
   const worktree = ledger.state().tasks[0].git!.worktreePath!
 
   const calls: ComposeCalls = { up: [], down: [] }
@@ -105,9 +107,9 @@ function harness(options: { failUp?: string } = {}) {
 
 describe.skipIf(!hasGit)('task environment lifecycle', () => {
   it('brings the stack up before the run and keeps it through the review', async () => {
-    const { ledger, service, calls, worktree, flush, poll } = harness()
+    const { ledger, service, calls, worktree, flush, poll } = await harness()
 
-    service.apply('run-card', { kind: 'run', taskId: 'card' })
+    await service.apply('run-card', { kind: 'run', taskId: 'card' })
     await flush()
     expect(calls.up).toEqual([{ id: 'card', dir: worktree }])
     const started = ledger.state().tasks[0]
@@ -124,7 +126,8 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
     expect(ledger.state().tasks[0].compose?.project).toBe('dsh-tb-card')
 
     // Accepting the card ends the environment.
-    service.apply('done', { kind: 'move', taskId: 'card', status: 'done' })
+    await service.apply('done', { kind: 'move', taskId: 'card', status: 'done' })
+    await ledger.awaitCard('card')
     await flush()
     await poll()
     expect(calls.down).toEqual([{ project: 'dsh-tb-card', dir: worktree }])
@@ -133,26 +136,27 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
   })
 
   it('tears the stack down when the card goes back to work, is archived or deleted', async () => {
-    const { ledger, service, calls, worktree, flush, poll } = harness()
-    service.apply('run-card', { kind: 'run', taskId: 'card' })
+    const { ledger, service, calls, worktree, flush, poll } = await harness()
+    await service.apply('run-card', { kind: 'run', taskId: 'card' })
     await flush()
     ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
     await flush()
 
     // Back to To do (a rework return): the next run brings a fresh stack up.
-    service.apply('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
+    await service.apply('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     await poll()
     expect(calls.down.map(entry => entry.project)).toEqual(['dsh-tb-card'])
     expect(ledger.state().tasks[0].compose).toBeUndefined()
 
     // A deleted card has no record left — the Host still owns the project.
-    service.apply('run-again', { kind: 'move', taskId: 'card', status: 'running' })
+    await service.apply('run-again', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(calls.up).toHaveLength(2)
     ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
     await flush()
     ledger.applyRequest('delete', { kind: 'delete', taskId: 'card' })
+    await ledger.awaitCard('card')
     await poll()
     expect(calls.down).toHaveLength(2)
     expect(ledger.state().tasks).toEqual([])
@@ -160,9 +164,9 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
   })
 
   it('fails the run and records the reason when the stack cannot start', async () => {
-    const { ledger, service, worktree, flush } = harness({ failUp: 'docker compose up failed for dsh-tb-card: port is already allocated' })
+    const { ledger, service, worktree, flush } = await harness({ failUp: 'docker compose up failed for dsh-tb-card: port is already allocated' })
 
-    service.apply('run-card', { kind: 'run', taskId: 'card' })
+    await service.apply('run-card', { kind: 'run', taskId: 'card' })
     await flush()
     const task = ledger.state().tasks[0]
     // No session was created and the card carries docker's own words.

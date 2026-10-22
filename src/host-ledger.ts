@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import type { TaskCompose, TaskMerge, TaskReview } from './core/tasks.ts'
+import type { TaskCompose, TaskGit, TaskMerge, TaskReview } from './core/tasks.ts'
 import { DEFAULT_MAX_DONE_TASKS, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, isReworkReturn, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
@@ -14,7 +14,7 @@ import { applyDeleteTask } from './core/use-cases/task-delete.ts'
 import { enforceDoneLimit } from './core/use-cases/done-limit.ts'
 import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-schedule.ts'
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
-import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts'
+import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardNotice, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 import { DEFAULT_SESSION_PERMISSION, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
 import { MergeConflictError, type GitWorkflow } from './git-workflow.ts'
 
@@ -68,6 +68,34 @@ export interface OpenedRun {
 interface ReleaseResult {
   task: TaskRecord
   run?: OpenedRun
+  /** The card was not moved: the merge runs in the background and writes its outcome later. */
+  pending?: boolean
+}
+
+/** How long a derived Host notice stays visible in the board's toast area. */
+const NOTICE_TTL_MS = 5 * 60_000
+/** How many derived Host notices are kept for the toast area. */
+const NOTICE_LIMIT = 12
+
+/**
+ * One merge release the Host is carrying out in the background. The plan is
+ * computed synchronously (it binds the release to the reviewed commit the card
+ * stands on), so a later park can never merge a commit nobody reviewed; the git
+ * work itself runs on the card's work chain, off the action request.
+ */
+interface ReleasePlan {
+  taskId: string
+  reviewedCommit: string
+  base: TaskMerge
+  initiator?: string
+  at: number
+}
+
+/** Result of the background merge, before the ledger writes the outcome back. */
+interface ReleaseOutcome {
+  merged?: TaskGit
+  conflict?: MergeConflictError
+  error?: string
 }
 
 /**
@@ -400,6 +428,24 @@ export class HostTaskLedger {
   /** The configurable state machine that validates every move and names its actions. */
   private machine: StateMachine
 
+  /**
+   * Per-card work chain: every heavy git job (branch/worktree creation, commit,
+   * merge, worktree removal) runs here, off the action request and strictly in
+   * order for one card. The action path therefore stays synchronous and fast;
+   * an action that needs the result of earlier work awaits the chain first
+   * ({@link awaitCard}), which the service does before applying it.
+   */
+  private readonly cardWork = new Map<string, Promise<void>>()
+  /** Last background git failure per card (branch/worktree creation). */
+  private readonly gitFailures = new Map<string, string>()
+  /** Cards whose merge release is running right now (derived, never persisted). */
+  private readonly releases = new Map<string, number>()
+  /** Recent derived messages for the board's toast area. */
+  private readonly noticeList: TaskBoardNotice[] = []
+  /** Runs opened by a background job (conflict resolution); the service takes them. */
+  private pendingRuns: OpenedRun[] = []
+  private disposed = false
+
   constructor(dir: string = join(dshHome(), 'task-board'), private readonly now: () => number = Date.now, options: { sessionDefaultPermission?: TaskPermission; git?: GitWorkflow; maxDoneTasks?: number; stateMachine?: unknown } = {}) {
     this.sessionDefaultPermission = options.sessionDefaultPermission ?? DEFAULT_SESSION_PERMISSION
     this.git = options.git
@@ -463,6 +509,126 @@ export class HostTaskLedger {
    */
   task(taskId: string): TaskRecord | undefined {
     return this.document.tasks.find(item => item.id === taskId)
+  }
+
+  // --- background work --------------------------------------------------------
+
+  /**
+   * Wait until every background git job queued for one card has finished.
+   *
+   * The action path calls this before applying an action that depends on the
+   * card's git state (a commit must be stamped before the card can be released,
+   * a branch must exist before a run starts). It never blocks the browser: the
+   * UI has already accepted the action into its outbox, and the event loop keeps
+   * serving `/state`, `/parse` and SSE while this promise waits.
+   */
+  async awaitCard(taskId: string): Promise<void> {
+    // A job may be queued while we wait (a settle during the await); keep waiting
+    // until the card's chain really stands still, so an action never overtakes
+    // the work it depends on.
+    for (;;) {
+      const pending = this.cardWork.get(taskId)
+      if (pending === undefined) return
+      await pending.catch(() => {})
+      if (this.cardWork.get(taskId) === pending) return
+    }
+  }
+
+  /** Merge releases currently running, as the derived snapshot marker. */
+  pendingReleases(): Record<string, { startedAt: number }> {
+    return Object.fromEntries([...this.releases.entries()].map(([taskId, startedAt]) => [taskId, { startedAt }]))
+  }
+
+  /** Recent derived Host messages (git failures, refused releases), newest last. */
+  notices(): TaskBoardNotice[] {
+    const now = this.now()
+    return this.noticeList.filter(notice => now - notice.at <= NOTICE_TTL_MS).map(notice => ({ ...notice }))
+  }
+
+  /** Runs opened by a background job; the service schedules them and calls this again. */
+  takeRuns(): OpenedRun[] {
+    const runs = this.pendingRuns
+    this.pendingRuns = []
+    return runs
+  }
+
+  /**
+   * Make sure the card stands on its feature branch and worktree before a run
+   * starts. Awaits earlier background work first, then creates the branch when
+   * the card has a repository but no branch yet. Fails closed: a git error is
+   * thrown to the caller (which fails the run visibly), never silently ignored.
+   */
+  async ensureBranch(taskId: string): Promise<TaskRecord | undefined> {
+    await this.awaitCard(taskId)
+    const task = this.task(taskId)
+    if (task === undefined || task.git !== undefined) return task
+    if (this.git === undefined || this.git.repoPath(task) === undefined) return task
+    try {
+      const git = await this.git.openBranch(task)
+      if (git === undefined) return task
+      this.gitFailures.delete(taskId)
+      this.patchTask(taskId, current => current.git === undefined ? { ...current, git, updatedAt: this.now() } : current)
+      return this.task(taskId)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.gitFailures.set(taskId, message)
+      this.pushNotice(taskId, `branch could not be created: ${message}`)
+      throw error
+    }
+  }
+
+  /**
+   * Queue one heavy job on a card's chain. Jobs never reject the chain (their
+   * own errors become notices/card records), so one failure cannot wedge the
+   * card's later work; the chain resolves when the job has written its outcome.
+   */
+  private enqueueCardWork(taskId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.cardWork.get(taskId) ?? Promise.resolve()
+    const operation = previous.catch(() => {}).then(async () => {
+      if (this.disposed) return
+      await work()
+    })
+    const tail = operation.then(() => {}, () => {})
+    this.cardWork.set(taskId, tail)
+    void operation.finally(() => {
+      if (this.cardWork.get(taskId) === tail) this.cardWork.delete(taskId)
+      this.notify()
+    }).catch(() => {})
+    return operation
+  }
+
+  /**
+   * Patch one card in place and persist when it really changed. Background jobs
+   * use this so a card moved/deleted while the job ran is not resurrected and
+   * an untouched document is not rewritten.
+   */
+  private patchTask(taskId: string, update: (task: TaskRecord) => TaskRecord | undefined): boolean {
+    let changed = false
+    this.document.tasks = this.document.tasks.map(task => {
+      if (task.id !== taskId) return task
+      const next = update(task)
+      if (next === undefined || next === task) return task
+      changed = true
+      return next
+    })
+    if (changed) this.commit()
+    return changed
+  }
+
+  /** Record one derived user-facing message (kept short-lived; never persisted). */
+  private pushNotice(taskId: string | undefined, message: string): void {
+    this.noticeList.push({
+      id: crypto.randomUUID(),
+      ...(taskId === undefined ? {} : { taskId }),
+      message,
+      at: this.now(),
+    })
+    while (this.noticeList.length > NOTICE_LIMIT) this.noticeList.shift()
+    this.notify()
+  }
+
+  private notify(): void {
+    for (const listener of [...this.listeners]) listener()
   }
 
   /**
@@ -674,68 +840,108 @@ export class HostTaskLedger {
    * Ensure the card has a feature branch before it starts. The backlog →
    * clarification pull normally opens it; a cron trigger or the detail Run
    * button may bypass that, and those runs must not land on the base branch.
-   * No-op without a repository or when a branch already exists.
+   * The branch is created on the card's work chain (off the action request);
+   * the run waits for it in `HostTaskBoardService.launch`, which calls
+   * {@link ensureBranch}.
    */
-  private withFeatureBranch(task: TaskRecord): TaskRecord {
+  private ensureFeatureBranchLater(task: TaskRecord): TaskRecord {
     if (task.git !== undefined) return task
-    const opened = this.git?.openBranch(task)
-    return opened === undefined ? task : { ...task, git: opened }
+    this.enqueueOpenBranch(task.id)
+    return task
+  }
+
+  /** Queue `git.openBranch` for one card (no-op when a branch already exists). */
+  private enqueueOpenBranch(taskId: string): void {
+    void this.enqueueCardWork(taskId, async () => {
+      const task = this.task(taskId)
+      if (task === undefined || task.git !== undefined) return
+      if (this.git === undefined || this.git.repoPath(task) === undefined) return
+      try {
+        const git = await this.git.openBranch(task)
+        if (git === undefined) return
+        this.gitFailures.delete(taskId)
+        this.patchTask(taskId, current => current.git === undefined ? { ...current, git, updatedAt: this.now() } : current)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.gitFailures.set(taskId, message)
+        this.pushNotice(taskId, `branch could not be created: ${message}`)
+      }
+    })
   }
 
   /**
-   * The card after a transition's git hooks ran, in configured order. Only the
-   * first git action of a transition applies; `"git": false` skips them
-   * entirely; without a repository the hooks are no-ops. Shared by the
-   * single-card and the batch move so a group drop fires exactly the hooks a
-   * single drop of the same card would.
+   * The card after a transition's git hooks were **scheduled**. Only the first
+   * git action of a transition applies; `"git": false` skips them entirely;
+   * without a repository the hooks are no-ops. The hooks run on the card's work
+   * chain instead of inside the action, so a commit or worktree creation never
+   * blocks the event loop or the user. Shared by the single-card and the batch
+   * move so a group drop fires exactly the hooks a single drop would.
    */
   private transitionGit(task: TaskRecord, transition: StateTransition, now: number): TaskRecord {
     if (transition.git === false) return task
     for (const action of transition.actions ?? []) {
-      if (action === 'git.openBranch') return this.withFeatureBranch(task)
-      // Parking the card for the review drops the release record of the review
-      // before it: the next release starts from a clean slate.
-      if (action === 'git.commitBranch') return this.clearRelease(this.commitWork(task, now))
-      if (action === 'git.mergeBranch') {
-        const merged = this.git?.mergeBranch(task, now)
-        return merged === undefined ? task : { ...task, git: merged }
+      if (action === 'git.openBranch') {
+        this.enqueueOpenBranch(task.id)
+        return task
       }
+      // Parking the card for the review drops the release record of the review
+      // before it: the next release starts from a clean slate. The commit itself
+      // is queued and stamps `reviewedCommit` when it lands.
+      if (action === 'git.commitBranch') {
+        this.enqueueCommit(task.id)
+        return this.clearRelease(task)
+      }
+      // A merge transition is the release path and never runs here: the caller
+      // checks for it and starts a release plan instead.
+      if (action === 'git.mergeBranch') return task
     }
     return task
   }
 
   /**
-   * Commit the card's worktree onto its feature branch, stamping `committedAt`.
-   * A git failure never fails the move or the settle — the worktree is the
-   * human's to repair — so the error is appended to the card's newest *settled*
-   * execution `error`, which its execution history shows. A card without one
-   * (never ran, or only a clarification round is open) has nothing to carry it
-   * and only gets a Host warning.
+   * Queue a commit of the card's worktree onto its feature branch. A git failure
+   * never fails the move or the settle — the worktree is the human's to repair —
+   * so the error is appended to the card's newest *settled* execution `error`
+   * and surfaced as a notice. A card without a settled execution has nothing to
+   * carry it and only gets the Host warning + notice.
    */
-  private commitWork(task: TaskRecord, now: number): TaskRecord {
-    try {
-      const committed = this.git?.commitBranch(task, now)
-      return committed === undefined ? task : { ...task, git: committed }
-    } catch (error) {
-      const detail = `commit failed: ${error instanceof Error ? error.message : String(error)}`
-      let index = -1
-      for (let entryIndex = task.executions.length - 1; entryIndex >= 0; entryIndex -= 1) {
-        if (task.executions[entryIndex].endedAt !== undefined) {
-          index = entryIndex
-          break
-        }
+  private enqueueCommit(taskId: string): void {
+    void this.enqueueCardWork(taskId, async () => {
+      const task = this.task(taskId)
+      if (task === undefined || this.git === undefined) return
+      try {
+        const git = await this.git.commitBranch(task, this.now())
+        if (git === undefined) return
+        this.gitFailures.delete(taskId)
+        this.patchTask(taskId, current => ({ ...current, git }))
+      } catch (error) {
+        this.recordCommitError(taskId, error)
       }
-      if (index === -1) {
-        console.warn(`task board: ${task.id}: ${detail}`)
-        return task
-      }
-      return {
-        ...task,
-        executions: task.executions.map((entry, entryIndex) => entryIndex === index
-          ? { ...entry, error: entry.error === undefined || entry.error === '' ? detail : `${entry.error}; ${detail}` }
-          : entry),
+    })
+  }
+
+  private recordCommitError(taskId: string, error: unknown): void {
+    const detail = `commit failed: ${error instanceof Error ? error.message : String(error)}`
+    const task = this.task(taskId)
+    if (task === undefined) return
+    this.pushNotice(taskId, detail)
+    let index = -1
+    for (let entryIndex = task.executions.length - 1; entryIndex >= 0; entryIndex -= 1) {
+      if (task.executions[entryIndex].endedAt !== undefined) {
+        index = entryIndex
+        break
       }
     }
+    if (index === -1) {
+      console.warn(`task board: ${taskId}: ${detail}`)
+      return
+    }
+    this.patchTask(taskId, current => ({
+      ...current,
+      executions: current.executions.map((entry, entryIndex) => entryIndex === index
+        ? { ...entry, error: entry.error === undefined || entry.error === '' ? detail : `${entry.error}; ${detail}` }
+        : entry),
+    }))
   }
 
   /**
@@ -747,7 +953,9 @@ export class HostTaskLedger {
    */
   private commitSettledWork(task: TaskRecord, executionId: string, now: number): TaskRecord {
     const execution = task.executions.find(entry => entry.id === executionId)
-    return execution === undefined || execution.kind === 'clarify' ? task : this.commitWork(task, now)
+    if (execution === undefined || execution.kind === 'clarify') return task
+    this.enqueueCommit(task.id)
+    return task
   }
 
   /**
@@ -762,6 +970,19 @@ export class HostTaskLedger {
     return rest
   }
 
+  /** The merge record a release starts from (destructured out of the current card). */
+  private releaseBase(task: TaskRecord, now: number): TaskMerge {
+    const git = task.git
+    const previous = task.merge
+    return {
+      releasedAt: previous?.releasedAt ?? now,
+      ...(git?.reviewedCommit === undefined ? {} : { commit: git.reviewedCommit }),
+      attempts: previous?.attempts ?? 0,
+      ...(previous?.conflict === undefined ? {} : { conflict: previous.conflict }),
+      ...(previous?.resolvedAt === undefined ? {} : { resolvedAt: previous.resolvedAt }),
+    }
+  }
+
   /**
    * Release the worktrees of cards that just became archived — the explicit
    * archive action and the Done-column limit alike. Archiving is the last board
@@ -774,7 +995,14 @@ export class HostTaskLedger {
   private releaseArchivedWorktrees(ids: readonly string[]): void {
     for (const id of ids) {
       const task = this.document.tasks.find(item => item.id === id)
-      if (task !== undefined) this.git?.releaseWorktree(task)
+      if (task?.git === undefined) continue
+      // The removal runs on the card's work chain, never in the action path. A
+      // refusal is not fatal: the Host poll's reconcileArchivedWorktrees retries
+      // it and logs it once (a locked worktree is never unlocked behind the
+      // human's back).
+      void this.enqueueCardWork(task.id, async () => {
+        await this.git?.releaseWorktree(task)
+      })
     }
   }
 
@@ -792,55 +1020,137 @@ export class HostTaskLedger {
 
   /**
    * The merge release of one card: replay its feature branch onto the base
-   * branch as that stands now (other cards may have merged meanwhile) and merge
-   * it back into the base — and, when that replay conflicts, hand the conflict
-   * to the card's agent in the card's own worktree. One automatic resolution run
-   * per release; when that does not resolve it, the release fails visibly.
+   * branch as that stands now and merge it back. The git work is queued on the
+   * card's work chain and the action returns at once with `pending: true`: the
+   * card stays in `ready_for_test` (a derived "release running" marker explains
+   * the wait) until the outcome is written back. Nothing optimistic ever claims
+   * a column the Host has not written.
    *
    * The decision table (the human's "Freigeben (Merge)"):
    *
    * - no branch at all (no repository, or a workspace outside git): the release
-   *   is the plain move to `done`, recorded as {@link TaskMerge.skipped} so the
-   *   card says "no branch" instead of pretending it merged something,
+   *   is the plain move to `done`, recorded as skipped so the card says "no
+   *   branch" instead of pretending it merged something,
    * - merge succeeds: `done`, `TaskGit.mergedAt` and {@link TaskMerge.mergedAt}
    *   stamped,
    * - merge refused (dirty worktree, moved branch, no reviewed commit) or fails:
-   *   the card goes to `failed` with the reason, which is what the review column
-   *   is for — the human sends it back and re-releases it,
-   * - the replay onto the base conflicts: the half-done rebase is left in the
-   *   card's own worktree, where the conflict is in front of the agent; the card
-   *   goes to `running` on a `merge` run whose settle retries the release
-   *   ({@link finishMergeRun}).
-   * @param task - the card being released.
-   * @param now - instant the release (or the failure) is stamped with.
-   * @param initiator - session that asked for the release, for the run record.
-   * @returns the card as it stands afterwards, plus the resolution run if one
-   *   was opened.
+   *   the card goes to `failed` with the reason,
+   * - the replay conflicts: the half-done rebase is left in the card's own
+   *   worktree and the card goes to `running` on a `merge` run; one automatic
+   *   resolution run per release, whose settle retries the release.
    */
-  private releaseCard(task: TaskRecord, now: number, initiator?: string): ReleaseResult {
+  private beginRelease(task: TaskRecord, now: number, initiator?: string): ReleaseResult {
     const git = task.git
     if (git === undefined) {
       const merge: TaskMerge = { releasedAt: now, attempts: 0, skipped: true }
       return { task: withStatus({ ...task, merge }, 'done', now) }
     }
-    const previous = task.merge
-    const base: TaskMerge = {
-      releasedAt: previous?.releasedAt ?? now,
-      ...(git.reviewedCommit === undefined ? {} : { commit: git.reviewedCommit }),
-      attempts: previous?.attempts ?? 0,
-      ...(previous?.conflict === undefined ? {} : { conflict: previous.conflict }),
-      ...(previous?.resolvedAt === undefined ? {} : { resolvedAt: previous.resolvedAt }),
+    const base = this.releaseBase(task, now)
+    const plan: ReleasePlan = {
+      taskId: task.id,
+      reviewedCommit: git.reviewedCommit ?? '',
+      base,
+      at: now,
+      ...(initiator === undefined || initiator === '' ? {} : { initiator }),
     }
-    const released: TaskRecord = { ...task, merge: base }
+    this.releases.set(task.id, now)
+    this.notify()
+    this.enqueueRelease(plan)
+    return { task, pending: true }
+  }
+
+  private enqueueRelease(plan: ReleasePlan): void {
+    void this.enqueueCardWork(plan.taskId, async () => { await this.runRelease(plan) })
+  }
+
+  /**
+   * The background half of a release: check the card is still the card the
+   * human approved, then run the merge and write the outcome back. A card that
+   * left the review column meanwhile is never moved by a late release.
+   */
+  private async runRelease(plan: ReleasePlan): Promise<void> {
     try {
-      const merged = this.git?.mergeBranch(released, now)
-      const merge: TaskMerge = { ...base, mergedAt: now }
-      return { task: withStatus({ ...released, git: merged ?? git, merge }, 'done', now) }
+      const task = this.task(plan.taskId)
+      if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') {
+        this.pushNotice(plan.taskId, 'release cancelled: the card left the review column before the merge started')
+        return
+      }
+      if (task.git === undefined || this.git === undefined) {
+        this.finishRelease(plan, { error: 'the card has no git state to merge' })
+        return
+      }
+      if (plan.reviewedCommit === '') {
+        this.finishRelease(plan, { error: 'merge refused: the card has no reviewed commit; park the card in "Ready for test" again so the approval is bound to the commit you reviewed' })
+        return
+      }
+      if (task.git.reviewedCommit !== plan.reviewedCommit) {
+        this.finishRelease(plan, { error: 'the card was parked again while the release was waiting; review the new commit and release again' })
+        return
+      }
+      if (this.git.hasUnresolvedMerge(task)) {
+        this.git.abortUnresolvedMerge(task)
+        throw new Error('the merge conflict was not resolved: the worktree still holds an unfinished conflict (unmerged files, or a rebase that was never continued)')
+      }
+      const merged = await this.git.mergeBranch(task, plan.at)
+      this.finishRelease(plan, { merged })
     } catch (error) {
-      if (error instanceof MergeConflictError) return this.resolveConflict(released, base, error, now, initiator)
-      const message = error instanceof Error ? error.message : String(error)
-      return { task: withStatus({ ...released, merge: { ...base, error: message } }, 'failed', now) }
+      if (error instanceof MergeConflictError) this.finishRelease(plan, { conflict: error })
+      else this.finishRelease(plan, { error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      this.releases.delete(plan.taskId)
+      this.notify()
     }
+  }
+
+  /** Write a finished release back to the ledger (the only place a release moves a card). */
+  private finishRelease(plan: ReleasePlan, outcome: ReleaseOutcome): void {
+    const task = this.task(plan.taskId)
+    if (task === undefined) return
+    const now = this.now()
+    // The card left the review column while the merge ran (another tab, a
+    // send-back): record what git did, but never overwrite the human's move.
+    if (task.status !== 'ready_for_test') {
+      this.patchTask(task.id, current => ({
+        ...current,
+        ...(outcome.merged === undefined ? {} : { git: outcome.merged }),
+        ...(outcome.merged === undefined && outcome.conflict === undefined && outcome.error === undefined
+          ? {}
+          : { merge: { ...plan.base, ...(outcome.merged === undefined ? { error: outcome.error ?? outcome.conflict?.message ?? 'the release finished after the card left the review column' } : { mergedAt: now }) } }),
+        updatedAt: now,
+      }))
+      this.pushNotice(task.id, 'release finished after the card left the review column; the result was recorded but the column was not changed')
+      return
+    }
+    if (outcome.merged !== undefined || task.git?.mergedAt !== undefined) {
+      const merged = outcome.merged ?? task.git
+      const merge: TaskMerge = { ...plan.base, mergedAt: now }
+      this.applyReleaseResult(withStatus({ ...task, ...(merged === undefined ? {} : { git: merged }), merge }, 'done', now))
+      return
+    }
+    if (outcome.conflict !== undefined) {
+      const result = this.resolveConflict({ ...task, merge: plan.base }, plan.base, outcome.conflict, now, plan.initiator)
+      // Register the run before the commit notification: the service's ledger
+      // subscription takes pending runs, and it runs during that notification.
+      if (result.run !== undefined) this.pendingRuns.push(result.run)
+      this.applyReleaseResult(result.task)
+      return
+    }
+    const message = outcome.error ?? 'the release failed'
+    this.applyReleaseResult(withStatus({ ...task, merge: { ...plan.base, error: message } }, 'failed', now))
+    this.pushNotice(task.id, `release failed: ${message}`)
+  }
+
+  /** Persist one release result and keep the Done-column limit converged. */
+  private applyReleaseResult(task: TaskRecord): void {
+    const moved = this.document.tasks.map(item => item.id === task.id ? task : item)
+    if (task.status === 'done') {
+      const limited = enforceDoneLimit(moved, this.maxDoneTasks, this.now())
+      this.document.tasks = [...limited.tasks]
+      this.releaseArchivedWorktrees(limited.archivedIds)
+    } else {
+      this.document.tasks = moved
+    }
+    this.commit()
   }
 
   /**
@@ -871,14 +1181,15 @@ export class HostTaskLedger {
   }
 
   /**
-   * What the release does once its resolution run settled. A run that did not
+   * What happens once a conflict-resolution run settled. A run that did not
    * succeed (or one that ended with the replay still unfinished) leaves the
    * conflict unresolved: the worktree is put back into a clean state, the card
    * says why, and the release ends in `failed` — the second attempt the decision
-   * allows is used up. A run that did resolve it makes the Host retry the merge,
-   * which either finishes the release (`done`) or fails it.
+   * allows is used up. A run that did resolve it queues the release retry after
+   * that run's settle commit, which either finishes the release (`done`) or
+   * fails it.
    */
-  private finishMergeRun(task: TaskRecord, outcome: 'succeeded' | 'failed' | 'cancelled', error: string | undefined, now: number): TaskRecord {
+  private onMergeRunSettled(task: TaskRecord, outcome: 'succeeded' | 'failed' | 'cancelled', error: string | undefined, now: number): TaskRecord {
     const merge = task.merge
     if (merge === undefined || merge.mergedAt !== undefined) return task
     if (outcome !== 'succeeded') {
@@ -886,20 +1197,36 @@ export class HostTaskLedger {
       const reason = error !== undefined && error !== '' ? error : outcome === 'cancelled'
         ? 'the conflict-resolution run was cancelled'
         : 'the conflict-resolution run failed'
+      this.pushNotice(task.id, `release failed: ${reason}`)
       return { ...task, merge: { ...merge, error: reason }, updatedAt: now }
     }
-    if (this.git?.hasUnresolvedMerge(task) === true) {
-      this.git.abortUnresolvedMerge(task)
-      return withStatus(
-        { ...task, merge: { ...merge, error: 'the merge conflict was not resolved: the worktree still holds an unfinished conflict (unmerged files, or a rebase that was never continued)' } },
-        'failed',
-        now,
-      )
-    }
-    return this.releaseCard({ ...task, merge: { ...merge, resolvedAt: now } }, now).task
+    // The run resolved the conflict; its settle enqueued the commit above, so
+    // this job runs after it and its plan binds the new reviewed commit.
+    this.releases.set(task.id, now)
+    this.notify()
+    void this.enqueueCardWork(task.id, async () => {
+      const current = this.task(task.id)
+      if (current === undefined || current.status !== 'ready_for_test' || current.git?.reviewedCommit === undefined) {
+        this.releases.delete(task.id)
+        this.notify()
+        return
+      }
+      const base: TaskMerge = { ...this.releaseBase(current, this.now()), resolvedAt: now }
+      await this.runRelease({
+        taskId: task.id,
+        reviewedCommit: current.git.reviewedCommit,
+        base,
+        at: this.now(),
+      })
+    })
+    return task
   }
 
   dispose(): void {
+    this.disposed = true
+    this.cardWork.clear()
+    this.releases.clear()
+    this.pendingRuns = []
     const fd = this.lockFd
     if (fd === undefined) return
     this.lockFd = undefined
@@ -954,7 +1281,7 @@ export class HostTaskLedger {
       this.commit()
       return undefined
     }
-    const opened = startExecution(this.withFeatureBranch(task), triggeredAt, crypto.randomUUID())
+    const opened = startExecution(this.ensureFeatureBranchLater(task), triggeredAt, crypto.randomUUID())
     this.document.tasks = this.document.tasks.map(item => item.id === taskId ? opened.task : item)
     this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, triggeredAt, triggeredAt)]
     this.commit()
@@ -1067,7 +1394,7 @@ export class HostTaskLedger {
       const committed = this.commitSettledWork(settled, executionId, now)
       // A conflict-resolution run is not a review: its settle is what makes the
       // Host retry the merge the card was released for.
-      if (execution?.kind === 'merge') return this.finishMergeRun(committed, outcome, error, now)
+      if (execution?.kind === 'merge') return this.onMergeRunSettled(committed, outcome, error, now)
       // A finished implementation run parks the card for a new review, so the
       // release record of the review before it is dropped here.
       return outcome === 'succeeded' ? this.clearRelease(committed) : committed
@@ -1143,8 +1470,16 @@ export class HostTaskLedger {
           if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
           // The card's worktree is only ever referenced by this card, so deleting
           // the card releases it (the branch and its commits stay in the repo).
-          const failure = this.git?.releaseWorktree(task)
-          if (failure !== undefined) console.warn(`task board: could not remove the worktree of deleted task ${task.id} (${failure})`)
+          // The removal runs on the card's work chain: a slow filesystem never
+          // keeps the browser waiting for the delete. Deleting is final, so a
+          // refusal is logged here (there is no archived card for the poll to
+          // retry on).
+          if (task.git !== undefined) {
+            void this.enqueueCardWork(task.id, async () => {
+              const failure = await this.git?.releaseWorktree(task)
+              if (failure !== undefined) console.warn(`task board: could not remove the worktree of deleted task ${task.id} (${failure})`)
+            })
+          }
         }
         this.document.tasks = [...applyDeleteTask(this.document.tasks, undefined, action.taskId).tasks]
         break
@@ -1173,10 +1508,12 @@ export class HostTaskLedger {
         // `failed` — so a drag onto "Done" and the card's release button can
         // never behave differently. Every other move keeps the plain git hooks.
         const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch')
-        const released = merges ? this.releaseCard(task, now, initiator) : undefined
+        const released = merges ? this.beginRelease(task, now, initiator) : undefined
         const gitted = merges ? task : this.transitionGit(task, transition, now)
         // The target state over the transition's git hooks: the base the
-        // transition's actions build on, in their configured order.
+        // transition's actions build on, in their configured order. A queued
+        // release (`pending`) leaves the card exactly where it is; its background
+        // job writes `done`/`failed` later.
         let next: TaskRecord = released?.task ?? withStatus(gitted, action.status, now)
         if (released?.run !== undefined) run = released.run
         // Leaving the review column (or a failed run) for `clarification` is a
@@ -1222,8 +1559,9 @@ export class HostTaskLedger {
         // cards in `done` archives the oldest ones (FIFO) until it holds again.
         // Every other column is untouched and surviving cards keep their order.
         // Archived cards give their worktrees to the poll's retry (they are the
-        // only cards that no longer need a checkout).
-        if (action.status === 'done') {
+        // only cards that no longer need a checkout). A queued release keeps the
+        // card in ready_for_test and therefore does not touch the Done column.
+        if (action.status === 'done' && released?.pending !== true) {
           const limited = enforceDoneLimit(moved, this.maxDoneTasks, now)
           this.document.tasks = [...limited.tasks]
           this.releaseArchivedWorktrees(limited.archivedIds)
@@ -1255,6 +1593,15 @@ export class HostTaskLedger {
         })
         const moved = new Map<string, TaskRecord>()
         for (const { task, transition } of batch) {
+          const actions = transition.actions ?? []
+          const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch')
+          // A group drop onto Done releases every card that carries the merge
+          // hook; each release runs on its own card's work chain and writes its
+          // own outcome (done/failed/conflict run), exactly like a single drop.
+          if (merges) {
+            moved.set(task.id, this.beginRelease(task, now, initiator).task)
+            continue
+          }
           const target = withStatus(this.transitionGit(task, transition, now), action.status, now)
           moved.set(task.id, isReworkReturn(task.status, action.status) ? withReworkStamp(target, now) : target)
         }
@@ -1278,7 +1625,7 @@ export class HostTaskLedger {
         this.document.tasks = [...result.tasks]
         // Archive is the last board state: release the card's own checkout. A
         // refusal is not fatal — the Host poll retries it.
-        if (task !== undefined) this.git?.releaseWorktree(task)
+        if (task !== undefined) this.releaseArchivedWorktrees([task.id])
         break
       }
       case 'restore': {
@@ -1312,7 +1659,7 @@ export class HostTaskLedger {
         if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → done`)
         const released = (transition.git === false || !(transition.actions ?? []).includes('git.mergeBranch'))
           ? { task: withStatus(task, 'done', now) }
-          : this.releaseCard(task, now, initiator)
+          : this.beginRelease(task, now, initiator)
         if (released.run !== undefined) run = released.run
         const moved = this.document.tasks.map(item => item.id === task.id ? released.task : item)
         this.document.tasks = released.task.status === 'done'
@@ -1396,7 +1743,7 @@ export class HostTaskLedger {
         // Safety net for a card started without the backlog → clarification
         // pull (the detail Run button or a cron trigger): still work on a
         // feature branch when the workspace has a repository.
-        run = startExecution(this.withFeatureBranch(released), now, crypto.randomUUID(), initiator)
+        run = startExecution(this.ensureFeatureBranchLater(released), now, crypto.randomUUID(), initiator)
         this.document.tasks = this.document.tasks.map(item => item.id === task.id ? run!.task : item)
         break
       }
@@ -1449,8 +1796,10 @@ export class HostTaskLedger {
       const settled = settleExecution(task, execution.id, 'cancelled', now, 'host restarted before the execution session was recorded')
       // The restart cancels an interrupted implementation run just like any
       // other cancellation, so its work is committed rather than left in the
-      // worktree; a clarification round owns nothing to commit.
-      return execution.kind === 'clarify' ? settled : this.commitWork(settled, now)
+      // worktree (queued on the card's work chain); a clarification round owns
+      // nothing to commit.
+      if (execution.kind !== 'clarify') this.enqueueCommit(settled.id)
+      return settled
     })
     if (changed && persist) this.commit()
   }
@@ -1604,6 +1953,9 @@ export class HostTaskLedger {
   }
 
   private commit(bumpRevision = true): void {
+    // A background git job may finish after the Host shut down; never write
+    // through a released lock.
+    if (this.disposed) return
     if (bumpRevision) this.document.revision += 1
     mkdirSync(dirname(this.file), { recursive: true })
     const tmp = `${this.file}.tmp-${process.pid}`
@@ -1628,10 +1980,6 @@ export class HostTaskLedger {
       throw error
     }
     this.notify()
-  }
-
-  private notify(): void {
-    for (const listener of [...this.listeners]) listener()
   }
 
   private acquireLock(): number {

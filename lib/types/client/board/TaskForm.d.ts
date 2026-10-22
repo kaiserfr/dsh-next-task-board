@@ -77,8 +77,17 @@ export declare function parseSourceText(task: Pick<TaskRecord, 'title' | 'descri
  * State and actions behind one "Parse with AI" box. The owner supplies the
  * opening text and decides what a successful draft does (the create form fills
  * its three fields; the edit form overwrites the task's).
+ *
+ * A parse runs asynchronously and the user may keep typing while it runs, so a
+ * result is only applied directly when the target fields still hold the values
+ * they had when the request started. Otherwise the draft is offered behind an
+ * explicit "apply result" button — nothing overwrites typing.
  */
-export declare function useAiParse(controller: BoardController, initialText: string, onDraft: (draft: TaskBoardParseDraft) => void): {
+export declare function useAiParse(controller: BoardController, initialText: string, onDraft: (draft: TaskBoardParseDraft) => void, current?: () => {
+    title: string;
+    description: string;
+    prompt: string;
+}): {
     text: string;
     setText: import("react").Dispatch<import("react").SetStateAction<string>>;
     models: readonly import("../../core/controller.ts").ExecutionModelOption[];
@@ -87,6 +96,8 @@ export declare function useAiParse(controller: BoardController, initialText: str
     pending: boolean;
     error: string | undefined;
     setError: import("react").Dispatch<import("react").SetStateAction<string | undefined>>;
+    conflict: TaskBoardParseDraft | undefined;
+    applyConflict: () => void;
     run: () => Promise<void>;
     cancel: () => void;
 };

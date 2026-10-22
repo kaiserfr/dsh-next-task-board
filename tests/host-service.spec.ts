@@ -157,7 +157,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.dispose()
   })
 
-  it('treats the first session snapshot after re-enable as unknown', () => {
+  it('treats the first session snapshot after re-enable as unknown', async () => {
     const { gateway } = makeGateway(() => ({ items: [] }))
     const service = new TaskBoardHostService(gateway, {
       ledger: new HostTaskLedger(root()),
@@ -170,26 +170,26 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.dispose()
   })
 
-  it('returns the first ledger result for a duplicate request id', () => {
+  it('returns the first ledger result for a duplicate request id', async () => {
     const { gateway } = makeGateway(() => ({ items: [] }))
     const service = new TaskBoardHostService(gateway, {
       ledger: new HostTaskLedger(root()),
       power: new PowerInhibitor({ platform: 'linux' }),
     })
-    const first = service.apply('request-a', {
+    const first = await service.apply('request-a', {
       kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' },
     })
-    service.apply('request-b', {
+    await service.apply('request-b', {
       kind: 'create', id: 'task-b', input: { title: 'B', description: '', prompt: '' },
     })
-    const duplicate = service.apply('request-a', {
+    const duplicate = await service.apply('request-a', {
       kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' },
     })
     expect(duplicate.revision).toBeGreaterThan(first.revision)
     expect(duplicate.tasks.map(task => task.id)).toEqual(['task-a', 'task-b'])
-    expect(() => service.apply('request-a', {
+    await expect(service.apply('request-a', {
       kind: 'create', id: 'ignored', input: { title: 'ignored', description: '', prompt: '' },
-    })).toThrow('different action')
+    })).rejects.toThrow('different action')
     service.dispose()
   })
 
@@ -231,7 +231,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.dispose()
   })
 
-  it('starts its two Host timers only once', () => {
+  it('starts its two Host timers only once', async () => {
     const interval = vi.spyOn(globalThis, 'setInterval')
     const { gateway } = makeGateway(() => ({ items: [] }))
     const service = new TaskBoardHostService(gateway, {
@@ -271,7 +271,9 @@ describe('TaskBoardHostService clarification runs', () => {
 
     const prompts: Array<{ sessionId: string; text: string }> = []
     let created = 0
-    const { gateway } = makeGateway(request => {
+    let releaseFirstCreate: (() => void) | undefined
+    const firstCreateGate = new Promise<void>(resolve => { releaseFirstCreate = resolve })
+    const { gateway } = makeGateway(async request => {
       if (request.namespace !== 'session') throw new Error('unexpected namespace')
       if (request.method === 'list') {
         return { items: [{ sessionId: 'session-busy', running: true }, { sessionId: 'session-clarify', running: false }] }
@@ -297,7 +299,7 @@ describe('TaskBoardHostService clarification runs', () => {
     // for a slot, so the human gets the questions without waiting for the run to
     // settle. The prompt is the card's own prompt plus the clarification
     // addendum, and the run links the card's conversation.
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
+    await service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     expect(created).toBe(1)
     expect(prompts[0]?.sessionId).toBe('session-clarify')
@@ -313,7 +315,7 @@ describe('TaskBoardHostService clarification runs', () => {
     // short prompt (plus the completion contract). The *implementation* run is
     // an ordinary run: it needs the lane's slot, which `busy` still holds.
     service.setMaxConcurrentRuns(2)
-    service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
+    await service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(prompts[1]?.sessionId).toBe('session-clarify')
     expect(prompts[1]?.text.startsWith('Bitte jetzt implementieren.')).toBe(true)
@@ -347,12 +349,18 @@ describe('TaskBoardHostService clarification runs', () => {
     const prompts: Array<{ sessionId: string; text: string }> = []
     const cancelled: string[] = []
     let created = 0
-    const { gateway } = makeGateway(request => {
+    let releaseFirstCreate: (() => void) | undefined
+    const firstCreateGate = new Promise<void>(resolve => { releaseFirstCreate = resolve })
+    const { gateway } = makeGateway(async request => {
       if (request.namespace !== 'session') throw new Error('unexpected namespace')
       if (request.method === 'list') {
         return { items: [{ sessionId: 'session-busy', running: true }] }
       }
-      if (request.method === 'create') { created += 1; return { sessionId: `session-${created}` } }
+      if (request.method === 'create') {
+        created += 1
+        if (created === 1) await firstCreateGate
+        return { sessionId: `session-${created}` }
+      }
       if (request.method === 'rename') return { title: 'Card', seq: 1 }
       if (request.method === 'cancel') { cancelled.push((request.args as { request: { sessionId: string } }).request.sessionId); return {} }
       if (request.method === 'prompt') {
@@ -372,10 +380,12 @@ describe('TaskBoardHostService clarification runs', () => {
     // The round starts at once (WIP-free) and the go-ahead follows before its
     // session could attach; the implementation is an ordinary run, so the busy
     // lane keeps it queued until the limit is raised.
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
-    service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
+    await service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
+    await vi.waitFor(() => { expect(created).toBe(1) })
+    // The go-ahead arrives while the round's session is still being created.
+    await service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
+    releaseFirstCreate?.()
     await flush()
-    expect(created).toBe(1)
     service.setMaxConcurrentRuns(2)
     await flush()
 
@@ -503,7 +513,7 @@ describe('TaskBoardHostService poll heartbeat', () => {
     service.dispose()
   })
 
-  it('eventPayload carries revision/scheduler/power and never the task list', () => {
+  it('eventPayload carries revision/scheduler/power and never the task list', async () => {
     const ledger = new HostTaskLedger(root())
     ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
     const service = new TaskBoardHostService(sessionsList([]), {
@@ -665,7 +675,7 @@ describe('TaskBoardHostService poll heartbeat', () => {
     service.dispose()
   })
 
-  it('hands the enforced state machine to the browser in the snapshot', () => {
+  it('hands the enforced state machine to the browser in the snapshot', async () => {
     const machine = {
       initial: 'clarification',
       states: [{ status: 'backlog' }, { status: 'clarification' }, { status: 'done' }],
@@ -677,13 +687,13 @@ describe('TaskBoardHostService poll heartbeat', () => {
     // The machine travels with an action result too, so the browser never
     // validates against a stale machine.
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: '' } })
-    const applied = service.apply('move', { kind: 'move', taskId: 'card', status: 'done' })
+    const applied = await service.apply('move', { kind: 'move', taskId: 'card', status: 'done' })
     expect(applied.stateMachine).toEqual(machine)
     expect(applied.tasks[0].status).toBe('done')
     service.dispose()
   })
 
-  it('installs error guards on streams without crashing on emitted error (#1427)', () => {
+  it('installs error guards on streams without crashing on emitted error (#1427)', async () => {
     installStreamErrorGuards()
     expect(() => {
       process.stderr.emit('error', Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }))
@@ -691,7 +701,7 @@ describe('TaskBoardHostService poll heartbeat', () => {
     }).not.toThrow()
   })
 
-  it('safeConsoleError suppresses console.error exceptions (#1427)', () => {
+  it('safeConsoleError suppresses console.error exceptions (#1427)', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {
       throw Object.assign(new Error('ENOSPC: write failed'), { code: 'ENOSPC' })
     })
@@ -722,10 +732,13 @@ describe('TaskBoardHostService lane occupancy', () => {
     prompts: Array<{ sessionId: string; text: string }>,
   ) {
     let created = 0
-    const { gateway } = makeGateway(request => {
+    const { gateway } = makeGateway(async request => {
       if (request.namespace !== 'session') throw new Error('unexpected namespace')
       if (request.method === 'list') return { items: roster() }
-      if (request.method === 'create') { created += 1; return { sessionId: `session-${created}` } }
+      if (request.method === 'create') {
+        created += 1
+        return { sessionId: `session-${created}` }
+      }
       if (request.method === 'rename') return { title: 'Card', seq: 1 }
       if (request.method === 'prompt') {
         const args = request.args as unknown as { request: { sessionId: string; content: Array<{ text: string }> } }
@@ -768,7 +781,7 @@ describe('TaskBoardHostService lane occupancy', () => {
     const service = new TaskBoardHostService(gateway, { ledger, power: new PowerInhibitor({ platform: 'linux' }), now: () => now })
     await poll(service)
 
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
+    await service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     // `busy` still carries an open, session-attached execution — but the roster
     // saw that session at rest, so it is not working and the clarification must
@@ -787,7 +800,7 @@ describe('TaskBoardHostService lane occupancy', () => {
     const { gateway, created } = gatewayWithRoster(() => [{ sessionId: 'session-busy', running: busyRunning }], prompts)
     const service = new TaskBoardHostService(gateway, { ledger, power: new PowerInhibitor({ platform: 'linux' }), now: () => now })
 
-    service.apply('card-to-running', { kind: 'run', taskId: 'card' })
+    await service.apply('card-to-running', { kind: 'run', taskId: 'card' })
     await flush()
     // No roster poll yet: an unreadable roster is no evidence of a free slot.
     expect(created()).toBe(0)
@@ -831,7 +844,7 @@ describe('TaskBoardHostService lane occupancy', () => {
 
     // `busy` works in the run column and holds the lane's slot, and the card's
     // round still starts at once: the clarification column is WIP-free.
-    service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
+    await service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
     await flush()
     expect(created()).toBe(1)
     expect(prompts[0]?.text).toContain('Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.')
@@ -839,7 +852,7 @@ describe('TaskBoardHostService lane occupancy', () => {
     // The go-ahead is an implementation run: the card is pulled straight from
     // clarification on to the run column, and the run queues behind the occupant
     // instead of opening a second session.
-    service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
+    await service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
     expect(created()).toBe(1)
     expect(ledger.state().tasks.find(task => task.id === 'card')?.status).toBe('running')

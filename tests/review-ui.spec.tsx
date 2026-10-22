@@ -136,14 +136,16 @@ describe('review block', () => {
     expect(calls.reviewRestart).toEqual(['card-1'])
   })
 
-  it('disables the action buttons while one is in flight and says what it is', () => {
+  it('keeps the controls usable while an action is in flight and names it', () => {
     const { controller } = harness({ plan: { 'card-1': { dir: '/worktrees/card-1', worktree: true, available: true, logs: true, pending: 'start' } } })
     const container = render(<TaskDetail controller={controller} task={card()} />)
     const block = container.querySelector('[data-dsh-part="review"]')!
     expect(block.textContent).not.toHaveLength(0)
-    for (const action of ['start', 'stop', 'restart']) {
-      expect((control(container, action) as HTMLButtonElement).disabled, action).toBe(true)
-    }
+    // A queued action is not a fence: only the state itself disables controls
+    // (stop needs a running version; start/restart stay available and queue).
+    expect((control(container, 'start') as HTMLButtonElement).disabled).toBe(false)
+    expect((control(container, 'restart') as HTMLButtonElement).disabled).toBe(false)
+    expect((control(container, 'stop') as HTMLButtonElement).disabled).toBe(true)
     expect(block.getAttribute('data-state')).toBeNull()
     expect(block.querySelector('[data-dsh-part="review-status"]')?.getAttribute('data-state')).toBe('start')
   })

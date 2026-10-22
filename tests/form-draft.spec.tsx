@@ -227,7 +227,7 @@ describe('a kept new-task draft survives closing the popup', () => {
     expect(noticeOf(container)).toBeNull()
   })
 
-  it('a create confirmed only after the popup closed still leaves no draft', async () => {
+  it('closes the create popup at once and leaves no draft while the Host confirms', async () => {
     let confirm: ((created: TaskRecord | undefined) => void) | undefined
     const { controller, drafts } = makeController({
       createTaskConfirmed: () => new Promise(resolve => { confirm = resolve }),
@@ -240,12 +240,10 @@ describe('a kept new-task draft survives closing the popup', () => {
         .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     })
 
-    // The Host is still working; the user clicks next to the popup meanwhile.
-    closeNextToPopup(container)
-    expect(drafts.get(NEW_TASK_DRAFT_KEY)).toMatchObject({ title: 'slow Host' })
-
-    // The confirmation lands after the popup is gone: the created form must not
-    // survive as a draft (it would offer to create the same task twice).
+    // The popup no longer waits for the Host: it is gone, and the submitted
+    // form is spent (a confirmation landing later must not offer it again).
+    expect(container.querySelector('[role="dialog"]')).toBeNull()
+    expect(drafts.size).toBe(0)
     await act(async () => { confirm?.(task({ id: 'slow-created' })) })
     expect(drafts.size).toBe(0)
     click(newTaskButton(container))

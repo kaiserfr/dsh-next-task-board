@@ -126,7 +126,7 @@ describe('review environments on the Host', () => {
     const before = service.snapshot()
     expect(before.reviewPlans?.card).toMatchObject({ dir: repo, available: true, logs: true })
 
-    const accepted = service.apply('start', { kind: 'review-start', taskId: 'card' })
+    const accepted = await service.apply('start', { kind: 'review-start', taskId: 'card' })
     // The action answers immediately with the in-flight marker, not with the
     // environment: a start may take minutes.
     expect(accepted.reviewPlans?.card?.pending).toBe('start')
@@ -146,21 +146,21 @@ describe('review environments on the Host', () => {
     service.dispose()
   })
 
-  it('refuses the action outside the review column', () => {
+  it('refuses the action outside the review column', async () => {
     const { service, ledger } = harness()
     ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
-    expect(() => service.apply('late', { kind: 'review-start', taskId: 'card' }))
-      .toThrow(/review-action-requires-ready-for-test/)
+    await expect(service.apply('late', { kind: 'review-start', taskId: 'card' }))
+      .rejects.toThrow(/review-action-requires-ready-for-test/)
     service.dispose()
   })
 
   it('stops the version again and records how the stop went', async () => {
     const { service, runner, flush, task } = harness()
-    service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
     const port = task().review!.env!.DSH_COMPOSE_PORT
 
-    service.apply('stop', { kind: 'review-stop', taskId: 'card' })
+    await service.apply('stop', { kind: 'review-stop', taskId: 'card' })
     await flush()
     expect(runner.calls[1]!.command).toBe('./start.sh --stop')
     // The stop runs with the port the start used: this card's own instance.
@@ -180,7 +180,7 @@ describe('review environments on the Host', () => {
     // The Host also logs the failure; keep the suite output clean while
     // asserting that it really reported it.
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
     const failed = task()
     expect(failed.review?.startedAt).toBeUndefined()
@@ -188,16 +188,16 @@ describe('review environments on the Host', () => {
     expect(logged.mock.calls.some(call => String(call[0]).includes('review action start failed'))).toBe(true)
     // Still startable: the failure did not leave an in-flight marker behind.
     expect(service.snapshot().reviewPlans?.card?.pending).toBeUndefined()
-    expect(() => service.apply('again', { kind: 'review-start', taskId: 'card' })).not.toThrow()
+    await expect(service.apply('again', { kind: 'review-start', taskId: 'card' })).resolves.toBeDefined()
     logged.mockRestore()
     service.dispose()
   })
 
   it('restarts a running version: stop first, then start', async () => {
     const { service, runner, flush } = harness()
-    service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
-    service.apply('restart', { kind: 'review-restart', taskId: 'card' })
+    await service.apply('restart', { kind: 'review-restart', taskId: 'card' })
     await flush()
     expect(runner.calls.map(call => call.command)).toEqual(['./start.sh', './start.sh --stop', './start.sh'])
     service.dispose()
@@ -223,7 +223,7 @@ describe('review environments on the Host', () => {
     expect(runner.calls).toEqual([])
 
     ledger.applyRequest('park-again', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
-    service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
     expect(runner.calls).toHaveLength(1)
 
@@ -238,7 +238,7 @@ describe('review environments on the Host', () => {
 
   it('stops the environment of a deleted card and keeps the reason when that fails', async () => {
     const { service, ledger, runner, flush, poll } = harness()
-    service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
     ledger.applyRequest('delete', { kind: 'delete', taskId: 'card' })
     await poll()
@@ -247,7 +247,7 @@ describe('review environments on the Host', () => {
     // A failing stop is reported on the card and not retried every poll.
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const failing = harness({ runner: fakeRunner({ './start.sh --stop': 'no such container' }) })
-    failing.service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await failing.service.apply('start', { kind: 'review-start', taskId: 'card' })
     await failing.flush()
     failing.ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     await failing.poll()
@@ -275,12 +275,12 @@ describe('review environments on the Host', () => {
         down,
       },
     })
-    service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
     expect(task().review).toMatchObject({ mode: 'compose', source: 'dsh-tb-card', ports: ['web 8123->80/tcp'] })
     expect(task().review?.links).toEqual(['http://127.0.0.1:8123'])
 
-    service.apply('stop', { kind: 'review-stop', taskId: 'card' })
+    await service.apply('stop', { kind: 'review-stop', taskId: 'card' })
     await flush()
     expect(down).toHaveBeenCalledWith('dsh-tb-card', expect.any(String), {})
     service.dispose()
@@ -294,7 +294,7 @@ describe('review reads', () => {
     expect(before.ok).toBe(false)
     expect(before.error).toContain('no review environment yet')
 
-    service.apply('start', { kind: 'review-start', taskId: 'card' })
+    await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
     const logs = await service.reviewOperation({ kind: 'logs', taskId: 'card' })
     expect(logs).toEqual({ ok: true, text: 'ran tail -n 3 data/server.log' })

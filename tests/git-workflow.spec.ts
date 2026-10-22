@@ -69,7 +69,7 @@ function boardTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
 }
 
 describe.skipIf(!hasGit)('GitWorkflow', () => {
-  it('resolves the repository of a pinned workspace and ignores plain directories', () => {
+  it('resolves the repository of a pinned workspace and ignores plain directories', async () => {
     const repo = createRepo()
     const plain = tempDir('dsh-task-board-plain-')
     const workflow = workflowFor(repo)
@@ -79,10 +79,10 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     expect(new GitWorkflow().repoPath(boardTask())).toBeUndefined()
   })
 
-  it('cuts the feature branch and the card worktree on openBranch', () => {
+  it('cuts the feature branch and the card worktree on openBranch', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
-    const state = workflow.openBranch(boardTask())!
+    const state = (await workflow.openBranch(boardTask()))!
     expect(state.branch).toBe('task/fix-login-card1')
     expect(state.base).toBe('main')
     expect(state.repoPath).toBe(repo)
@@ -94,11 +94,11 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
   })
 
-  it('bases a second feature branch on main while the first is still open', () => {
+  it('bases a second feature branch on main while the first is still open', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
-    const first = workflow.openBranch(boardTask())!
-    const second = workflow.openBranch({ ...boardTask({ id: 'card2' }), title: 'Add cache' })!
+    const first = (await workflow.openBranch(boardTask()))!
+    const second = (await workflow.openBranch({ ...boardTask({ id: 'card2' }), title: 'Add cache' }))!
     expect(second?.base).toBe('main')
     expect(git(second.worktreePath!, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('task/add-cache-card2')
     // Two cards of one workspace: two directories, one main checkout untouched.
@@ -106,32 +106,32 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
   })
 
-  it('does not touch a card worktree in useBranch, and checks the main checkout out for a legacy card', () => {
+  it('does not touch a card worktree in useBranch, and checks the main checkout out for a legacy card', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
-    const state = workflow.openBranch(boardTask())!
+    const state = (await workflow.openBranch(boardTask()))!
     // A card with its own worktree needs no checkout: switching branches there
     // is what would yank the directory out from under a working run.
     git(state.worktreePath!, ['checkout', '-q', '-b', 'someone-else'])
-    workflow.useBranch({ ...boardTask(), git: state })
+    await workflow.useBranch({ ...boardTask(), git: state })
     expect(git(state.worktreePath!, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('someone-else')
     // A legacy card (branch in the main checkout) is checked out as before.
     git(repo, ['checkout', '-q', 'main'])
-    workflow.useBranch({ ...boardTask({ id: 'card-legacy' }), git: { ...state, worktreePath: undefined } })
+    await workflow.useBranch({ ...boardTask({ id: 'card-legacy' }), git: { ...state, worktreePath: undefined } })
     expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
     // No git state means nothing to check out.
-    workflow.useBranch(boardTask())
+    await workflow.useBranch(boardTask())
   })
 
-  it('commits the card worktree onto the feature branch on commitBranch', () => {
+  it('commits the card worktree onto the feature branch on commitBranch', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     const task = boardTask()
-    const state = workflow.openBranch(task)!
+    const state = (await workflow.openBranch(task))!
     const dir = state.worktreePath!
     writeFileSync(join(dir, 'feature.txt'), 'agent output\n')
     writeFileSync(join(dir, 'untracked.txt'), 'also the agent\n')
-    const committed = workflow.commitBranch({ ...task, git: state }, NOW)
+    const committed = await workflow.commitBranch({ ...task, git: state }, NOW)
     expect(committed?.committedAt).toBe(NOW)
     expect(committed?.branch).toBe(state.branch)
     // Parking binds the review to the commit the branch now stands on.
@@ -145,16 +145,16 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
       .toEqual(['feature.txt', 'untracked.txt'])
     expect(git(repo, ['status', '--porcelain'])).toBe('')
     // Nothing to commit: no empty commit and the previous instant stays.
-    expect(workflow.commitBranch({ ...task, git: committed! }, NOW + 1)).toEqual(committed)
+    expect(await workflow.commitBranch({ ...task, git: committed! }, NOW + 1)).toEqual(committed)
     expect(git(dir, ['rev-list', '--count', 'HEAD'])).toBe('2')
   })
 
-  it('cuts the branch and the worktree first when commitBranch runs on a card without one', () => {
+  it('cuts the branch and the worktree first when commitBranch runs on a card without one', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     // A card pushed straight into the review column: the park opens branch and
     // worktree, and commits what that (empty) worktree holds — nothing.
-    const committed = workflow.commitBranch(boardTask(), NOW)
+    const committed = await workflow.commitBranch(boardTask(), NOW)
     expect(committed?.branch).toBe('task/fix-login-card1')
     expect(committed?.worktreePath).toBeDefined()
     expect(committed?.committedAt).toBeUndefined()
@@ -163,20 +163,20 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     // The card's work lives in its own directory: a file written there is what a
     // park commits.
     writeFileSync(join(committed!.worktreePath!, 'feature.txt'), 'straight to review\n')
-    const again = workflow.commitBranch({ ...boardTask(), git: committed! }, NOW)!
+    const again = (await workflow.commitBranch({ ...boardTask(), git: committed! }, NOW))!
     expect(again.committedAt).toBe(NOW)
     expect(git(again.worktreePath!, ['log', '-1', '--pretty=%s'])).toBe('task: Fix login')
   })
 
-  it('commits the run output and merges the branch back on mergeBranch', () => {
+  it('commits the run output and merges the branch back on mergeBranch', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     const task = boardTask()
-    const state = workflow.openBranch(task)!
+    const state = (await workflow.openBranch(task))!
     writeFileSync(join(state.worktreePath!, 'feature.txt'), 'done\n')
     // The review park commits and stamps the head the merge is bound to.
-    const parked = workflow.commitBranch({ ...task, git: state }, NOW)!
-    const merged = workflow.mergeBranch({ ...task, git: parked }, NOW)
+    const parked = (await workflow.commitBranch({ ...task, git: state }, NOW))!
+    const merged = await workflow.mergeBranch({ ...task, git: parked }, NOW)
     expect(merged?.mergedAt).toBe(NOW)
     expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
     // The merge landed in the main checkout — and the card keeps its worktree:
@@ -186,16 +186,16 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     expect(git(state.worktreePath!, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
     expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe(`merge ${state.branch} (task board)`)
     // Already merged: a second accept is a no-op.
-    expect(workflow.mergeBranch({ ...task, git: merged! }, NOW + 1)).toBeUndefined()
+    expect(await workflow.mergeBranch({ ...task, git: merged! }, NOW + 1)).toBeUndefined()
   })
 
-  it('replays the branch onto the base as it stands now before it merges', () => {
+  it('replays the branch onto the base as it stands now before it merges', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     const task = boardTask()
-    const state = workflow.openBranch(task)!
+    const state = (await workflow.openBranch(task))!
     writeFileSync(join(state.worktreePath!, 'feature.txt'), 'card work\n')
-    const parked = workflow.commitBranch({ ...task, git: state }, NOW)!
+    const parked = (await workflow.commitBranch({ ...task, git: state }, NOW))!
     // Another card merged into the base while this one was under review: the
     // branch was cut from the base as it was *before* that.
     writeFileSync(join(repo, 'other.txt'), 'other card\n')
@@ -203,7 +203,7 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     git(repo, ['commit', '-qm', 'other card merged'])
     const base = git(repo, ['rev-parse', 'main'])
 
-    const merged = workflow.mergeBranch({ ...task, git: parked }, NOW)!
+    const merged = (await workflow.mergeBranch({ ...task, git: parked }, NOW))!
     expect(merged.mergedAt).toBe(NOW)
     // The card's commit now stands on the base as it is, not on the base as it
     // was when the branch was cut.
@@ -214,58 +214,55 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
     expect(git(repo, ['rev-parse', 'HEAD^1'])).toBe(base)
     expect(git(repo, ['log', '-1', '--pretty=%s'])).toBe(`merge ${state.branch} (task board)`)
     // Already merged: a second accept is a no-op.
-    expect(workflow.mergeBranch({ ...task, git: merged }, NOW + 1)).toBeUndefined()
+    expect(await workflow.mergeBranch({ ...task, git: merged }, NOW + 1)).toBeUndefined()
   })
 
-  it('refuses to merge what the review did not see', () => {
+  it('refuses to merge what the review did not see', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     const task = boardTask()
-    const state = workflow.openBranch(task)!
+    const state = (await workflow.openBranch(task))!
     const dir = state.worktreePath!
     writeFileSync(join(dir, 'feature.txt'), 'reviewed\n')
-    const parked = workflow.commitBranch({ ...task, git: state }, NOW)!
+    const parked = (await workflow.commitBranch({ ...task, git: state }, NOW))!
 
     // Work committed after the park moved the branch past the reviewed commit.
     writeFileSync(join(dir, 'later.txt'), 'after the review\n')
     git(dir, ['add', '-A'])
     git(dir, ['commit', '-qm', 'unreviewed work'])
-    expect(() => workflow.mergeBranch({ ...task, git: parked }, NOW))
-      .toThrow(/moved from the reviewed commit/)
+    await expect(workflow.mergeBranch({ ...task, git: parked }, NOW)).rejects.toThrow(/moved from the reviewed commit/)
     expect(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
     expect(git(dir, ['log', '-1', '--pretty=%s'])).toBe('unreviewed work')
 
     // Uncommitted work is the same refusal, not a commit behind the review's
     // back: the safety-net commit is gone.
     writeFileSync(join(dir, 'dirty.txt'), 'still being written\n')
-    expect(() => workflow.mergeBranch({ ...task, git: parked }, NOW))
-      .toThrow(/still holds uncommitted work/)
+    await expect(workflow.mergeBranch({ ...task, git: parked }, NOW)).rejects.toThrow(/still holds uncommitted work/)
     rmSync(join(dir, 'dirty.txt'), { force: true })
     expect(git(dir, ['log', '-1', '--pretty=%s'])).toBe('unreviewed work')
   })
 
-  it('refuses to merge a card that was never park-reviewed', () => {
+  it('refuses to merge a card that was never park-reviewed', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     const task = boardTask()
     // A card with a branch but no review stamp — parked before the gate existed.
-    const state = workflow.openBranch(task)!
-    expect(() => workflow.mergeBranch({ ...task, git: state }, NOW))
-      .toThrow(/no reviewed commit/)
+    const state = (await workflow.openBranch(task))!
+    await expect(workflow.mergeBranch({ ...task, git: state }, NOW)).rejects.toThrow(/no reviewed commit/)
     expect(git(state.worktreePath!, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(state.branch)
   })
 
-  it('is a no-op without a repository', () => {
+  it('is a no-op without a repository', async () => {
     const workflow = new GitWorkflow(registryFor(tempDir('dsh-task-board-plain-')))
-    expect(workflow.openBranch(boardTask())).toBeUndefined()
-    expect(workflow.commitBranch(boardTask(), NOW)).toBeUndefined()
-    expect(workflow.mergeBranch(boardTask(), NOW)).toBeUndefined()
-    workflow.useBranch(boardTask())
+    expect(await workflow.openBranch(boardTask())).toBeUndefined()
+    expect(await workflow.commitBranch(boardTask(), NOW)).toBeUndefined()
+    expect(await workflow.mergeBranch(boardTask(), NOW)).toBeUndefined()
+    await workflow.useBranch(boardTask())
   })
 })
 
 describe.skipIf(!hasGit)('board git flow end to end', () => {
-  it('opens a branch on todo, parks in ready_for_test, and merges on done', () => {
+  it('opens a branch on todo, parks in ready_for_test, and merges on done', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -277,6 +274,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(ledger.state().tasks[0].status).toBe('backlog')
       expect(ledger.state().tasks[0].git).toBeUndefined()
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const opened = ledger.state().tasks[0]
       expect(opened.git?.branch).toBe('task/fix-login-card1')
       expect(opened.git?.base).toBe('main')
@@ -291,6 +289,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(ledger.state().tasks[0].status).toBe('running')
       writeFileSync(join(dir, 'feature.txt'), 'agent output\n')
       ledger.settle('card-1', run!.execution.id, 'succeeded')
+      await ledger.awaitCard('card-1')
       const parked = ledger.state().tasks[0]
       expect(parked.status).toBe('ready_for_test')
       // The park committed: the card worktree is clean while the card is
@@ -300,6 +299,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(git(dir, ['log', '-1', '--pretty=%s'])).toBe('task: Fix login')
 
       ledger.applyRequest('r-done', { kind: 'move', taskId: 'card-1', status: 'done' })
+      await ledger.awaitCard('card-1')
       const done = ledger.state().tasks[0]
       expect(done.status).toBe('done')
       expect(done.git?.mergedAt).toBe(NOW)
@@ -312,6 +312,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       // Archiving is where the worktree is released — the branch and its
       // commits stay in the repository.
       ledger.applyRequest('r-archive', { kind: 'archive', taskId: 'card-1' })
+      await ledger.awaitCard('card-1')
       expect(ledger.state().tasks[0].archivedAt).toBe(NOW)
       expect(existsSync(dir)).toBe(false)
       expect(git(repo, ['show', `${done.git!.branch}:feature.txt`])).toBe('agent output')
@@ -320,7 +321,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('commits a failed and a cancelled run just the same', () => {
+  it('commits a failed and a cancelled run just the same', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -331,10 +332,12 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
           input: { title: `Fix ${id}`, description: '', prompt: 'p', workspaceId: 'ws-1' },
         })
         ledger.applyRequest(`r-step-on-${id}`, { kind: 'move', taskId: id, status: 'clarification' })
+        await ledger.awaitCard(id)
         const run = ledger.applyRequest(`r-run-${id}`, { kind: 'run', taskId: id }).run
         const dir = cardDir(ledger, repo, id)
         writeFileSync(join(dir, `work-${id}.txt`), `${outcome}\n`)
         ledger.settle(id, run!.execution.id, outcome)
+        await ledger.awaitCard(id)
         const task = ledger.state().tasks.find(entry => entry.id === id)!
         expect(task.status).toBe(outcome === 'failed' ? 'failed' : 'clarification')
         expect(task.git?.committedAt).toBe(NOW)
@@ -345,7 +348,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('does not commit a clarification round, and commits when the restart cancels a run', () => {
+  it('does not commit a clarification round, and commits when the restart cancels a run', async () => {
     const repo = createRepo()
     const dir = tempDir('dsh-task-board-ledger-')
     const ledger = new HostTaskLedger(dir, () => NOW, { git: workflowFor(repo) })
@@ -357,11 +360,13 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       })
       // Backlog → Todo opens the branch and the clarification round.
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const clarification = ledger.state().tasks[0].executions.at(-1)!
       expect(clarification.kind).toBe('clarify')
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'question-notes.txt'), 'clarification wrote nothing to keep\n')
       ledger.settle('card-1', clarification.id, 'cancelled')
+      await ledger.awaitCard('card-1')
       // A clarification round implements nothing: the worktree keeps its state
       // and the card keeps its column.
       expect(ledger.state().tasks[0].git?.committedAt).toBeUndefined()
@@ -377,6 +382,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
     const restarted = new HostTaskLedger(dir, () => NOW, { git: workflowFor(repo) })
     try {
+      await restarted.awaitCard('card-1')
       const task = restarted.state().tasks[0]
       expect(task.status).toBe('clarification')
       expect(task.executions.at(-1)?.result).toBe('cancelled')
@@ -389,7 +395,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('records a refused commit on the settled execution instead of failing the park', () => {
+  it('records a refused commit on the settled execution instead of failing the park', async () => {
     const repo = createRepo()
     // A rejecting hook is the deterministic way to make `git commit` refuse.
     writeFileSync(join(repo, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
@@ -401,10 +407,12 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'agent output\n')
       ledger.settle('card-1', run!.execution.id, 'succeeded')
+      await ledger.awaitCard('card-1')
 
       const task = ledger.state().tasks[0]
       // The park still happened; the failure is visible in the execution history.
@@ -418,6 +426,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       writeFileSync(join(dir, 'second.txt'), 'more work\n')
       ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       const again = ledger.state().tasks[0]
       expect(again.status).toBe('ready_for_test')
       // Two refusals are recorded, appended to one another.
@@ -427,7 +436,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('opens the branch and commits when a card is dragged straight into ready_for_test', () => {
+  it('opens the branch and commits when a card is dragged straight into ready_for_test', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -437,6 +446,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       const parked = ledger.state().tasks[0]
       expect(parked.status).toBe('ready_for_test')
       expect(parked.git?.branch).toBe('task/fix-login-card1')
@@ -448,6 +458,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       // Back out and in again: that park commits the work.
       ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       const again = ledger.state().tasks[0]
       expect(again.git?.committedAt).toBe(NOW)
       expect(git(dir, ['status', '--porcelain'])).toBe('')
@@ -456,7 +467,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('releases the card worktree when the card is deleted', () => {
+  it('releases the card worktree when the card is deleted', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -466,6 +477,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-todo', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const dir = ledger.state().tasks[0].git!.worktreePath!
       expect(existsSync(dir)).toBe(true)
       // The clarification round has to be settled: a card with an open
@@ -473,6 +485,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       ledger.settle('card-1', ledger.state().tasks[0].executions[0].id, 'succeeded')
 
       ledger.applyRequest('r-delete', { kind: 'delete', taskId: 'card-1' })
+      await ledger.awaitCard('card-1')
       expect(ledger.state().tasks).toEqual([])
       // The directory is only ever referenced by this card; the branch and its
       // commits stay in the repository.
@@ -483,7 +496,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('opens a branch when a card is started without the todo pull', () => {
+  it('opens a branch when a card is started without the todo pull', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -494,6 +507,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       })
       const run = ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' }).run
       expect(run).toBeDefined()
+      await ledger.awaitCard('card-1')
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('running')
       expect(task.git?.branch).toBe('task/fix-login-card1')
@@ -503,7 +517,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('opens a branch for a cron-triggered run too', () => {
+  it('opens a branch for a cron-triggered run too', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -518,6 +532,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         patch: { enabled: true, cron: '0 9 * * *' },
       })
       expect(ledger.openScheduled('card-1', undefined, NOW)).toBeDefined()
+      await ledger.awaitCard('card-1')
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('running')
       expect(task.git?.branch).toBe('task/fix-login-card1')
@@ -527,7 +542,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('leaves a conflicting replay onto the base in the card\'s own worktree', () => {
+  it('leaves a conflicting replay onto the base in the card\'s own worktree', async () => {
     const repo = createRepo()
     const workflow = workflowFor(repo)
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflow })
@@ -538,6 +553,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       // The same file changed on both sides: the replay onto the base conflicts.
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
@@ -548,7 +564,9 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       git(repo, ['commit', '-qm', 'main work'])
 
       ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       ledger.applyRequest('r-done', { kind: 'move', taskId: 'card-1', status: 'done' })
+      await ledger.awaitCard('card-1')
 
       const task = ledger.state().tasks[0]
       // The release opened the automatic resolution run instead of merging.
@@ -573,7 +591,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('merges and parks the card in done once the resolution run resolved the conflict', () => {
+  it('merges and parks the card in done once the resolution run resolved the conflict', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -583,6 +601,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -591,7 +610,9 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
       ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
+      await ledger.awaitCard('card-1')
       const run = ledger.state().tasks[0].executions.at(-1)!
 
       // The agent resolves the conflict and finishes the replay, exactly the way
@@ -600,6 +621,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       git(dir, ['add', 'feature.txt'])
       git(dir, ['-c', 'core.editor=true', 'rebase', '--continue'])
       ledger.settle('card-1', run.id, 'succeeded')
+      await ledger.awaitCard('card-1')
 
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('done')
@@ -617,7 +639,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('fails the release when the resolution run leaves the conflict unresolved', () => {
+  it('fails the release when the resolution run leaves the conflict unresolved', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -627,6 +649,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -635,11 +658,14 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
       ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
+      await ledger.awaitCard('card-1')
       const run = ledger.state().tasks[0].executions.at(-1)!
 
       // The run reports success without having resolved anything.
       ledger.settle('card-1', run.id, 'succeeded')
+      await ledger.awaitCard('card-1')
 
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('failed')
@@ -656,7 +682,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('fails the release when the automatic resolution run fails', () => {
+  it('fails the release when the automatic resolution run fails', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -666,6 +692,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
       git(dir, ['add', '-A'])
@@ -674,10 +701,13 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
       ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
+      await ledger.awaitCard('card-1')
       const run = ledger.state().tasks[0].executions.at(-1)!
 
       ledger.settle('card-1', run.id, 'failed', 'the agent gave up')
+      await ledger.awaitCard('card-1')
 
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('failed')
@@ -689,7 +719,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('releases a card without a branch straight into done, recorded as skipped', () => {
+  it('releases a card without a branch straight into done, recorded as skipped', async () => {
     // A workspace outside git (no repository, no worktree): the release has
     // nothing to merge, moves the card on and says so.
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'))
@@ -710,7 +740,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('refuses the release outside the review column', () => {
+  it('refuses the release outside the review column', async () => {
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'))
     try {
       ledger.applyRequest('r-create', {
@@ -725,7 +755,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('fails the release once the reviewed commit moved, until the card is parked again', () => {
+  it('fails the release once the reviewed commit moved, until the card is parked again', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -735,10 +765,13 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
       ledger.applyRequest('r-run', { kind: 'run', taskId: 'card-1' })
+      await ledger.awaitCard('card-1')
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'reviewed\n')
       ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
+      await ledger.awaitCard('card-1')
       const reviewed = ledger.state().tasks[0].git!.reviewedCommit
       expect(reviewed).toBe(git(dir, ['rev-parse', 'HEAD']))
 
@@ -748,6 +781,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       git(dir, ['add', '-A'])
       git(dir, ['commit', '-qm', 'late work'])
       ledger.applyRequest('r-done', { kind: 'move', taskId: 'card-1', status: 'done' })
+      await ledger.awaitCard('card-1')
       const failed = ledger.state().tasks[0]
       expect(failed.status).toBe('failed')
       expect(failed.merge?.error).toMatch(/moved from the reviewed commit/)
@@ -762,11 +796,13 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       // release record; the next release then goes through.
       ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      await ledger.awaitCard('card-1')
       const rebound = ledger.state().tasks[0].git!.reviewedCommit
       expect(rebound).toBe(git(dir, ['rev-parse', 'HEAD']))
       expect(rebound).not.toBe(reviewed)
       expect(ledger.state().tasks[0].merge).toBeUndefined()
       ledger.applyRequest('r-done-2', { kind: 'move', taskId: 'card-1', status: 'done' })
+      await ledger.awaitCard('card-1')
       expect(ledger.state().tasks[0].status).toBe('done')
       expect(ledger.state().tasks[0].git?.mergedAt).toBe(NOW)
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
@@ -778,7 +814,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
 })
 
 describe('taskBranch', () => {
-  it('slugs the title and appends the id', () => {
+  it('slugs the title and appends the id', async () => {
     expect(taskBranch(boardTask())).toBe('task/fix-login-card1')
     expect(taskBranch(boardTask({ id: 'abcdef12-3456' }))).toBe('task/fix-login-abcdef12')
     expect(taskBranch(boardTask({ title: '修复登录' }))).toBe('task/card1')

@@ -15,6 +15,7 @@ import { NEW_TASK_DRAFT_KEY } from './TaskForm.tsx'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
 import { isCardDraggable, TaskCard } from './TaskCard.tsx'
 import { TaskDetail } from './TaskDetail.tsx'
+import { STATUS_KEY } from './status-key.ts'
 import type { TaskBoardKey } from '../locales.ts'
 
 /** Sentinel option value of the project row's "register a new project" entry. */
@@ -68,6 +69,25 @@ export function queuedDropNotice(
   }
   if (blockers.size === 0) return undefined
   return t('board.queuedNotice', { task: [...blockers].join(', ') })
+}
+
+/**
+ * Why a drop was refused, in the board's language. Only the current status (or
+ * the runner's ownership of a running card) can forbid an action; a card with
+ * another action in flight is explicitly not a reason any more.
+ */
+function dropRefusalReason(task: TaskRecord, columnStatus: TaskStatus, isRunTarget: boolean): string {
+  if (task.archivedAt !== undefined) return t('board.refused.archived', { task: task.title })
+  if (task.status === 'running') return t('board.refused.running', { task: task.title })
+  if (task.status === columnStatus) return t('board.refused.same', { task: task.title, status: t(STATUS_KEY[columnStatus]) })
+  if (isRunTarget) {
+    return t('board.refused.run', { task: task.title, from: t(STATUS_KEY[task.status]) })
+  }
+  return t('board.refused.transition', {
+    task: task.title,
+    from: t(STATUS_KEY[task.status]),
+    to: t(STATUS_KEY[columnStatus]),
+  })
 }
 
 type BoardMachine = ReturnType<typeof resolveStateMachine>['machine']
@@ -142,9 +162,11 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
   task: TaskRecord
   pending: boolean
+  /** The Host is merging this card in the background. */
+  releasePending?: boolean
   timeZone?: string
   selected: boolean
   dragging: boolean
@@ -170,6 +192,7 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, timeZone, selec
     <TaskCard
       task={task}
       pending={pending}
+      releasePending={releasePending}
       timeZone={timeZone}
       selected={selected}
       dragging={dragging}
@@ -247,8 +270,8 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // (archived/deleted), started running, or is hidden by the current filter
   // drops out here without a second source of truth.
   const actionableIds = useMemo(
-    () => visible.filter(task => selectedIds.has(task.id) && isCardDraggable(task, pendingSet.has(task.id))).map(task => task.id),
-    [visible, selectedIds, pendingSet],
+    () => visible.filter(task => selectedIds.has(task.id) && isCardDraggable(task)).map(task => task.id),
+    [visible, selectedIds],
   )
   // The rendered card order — columns left to right, cards top to bottom within
   // a column — which is the reference order a Shift click walks. Empty in the
@@ -424,7 +447,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // untouched (requirement 3).
   const startDrag = useCallback((id: string, event: ReactDragEvent<HTMLButtonElement>): void => {
     const task = snapshot.tasks.find(item => item.id === id)
-    if (task === undefined || !isCardDraggable(task, pendingSet.has(id))) return
+    if (task === undefined || !isCardDraggable(task)) return
     const ids = selectedIds.has(id) && actionableIds.includes(id) ? actionableIds : [id]
     event.dataTransfer.setData('text/plain', id)
     event.dataTransfer.setData(BATCH_DRAG_MIME, JSON.stringify(ids))
@@ -438,17 +461,24 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     event.preventDefault()
     const ids = readDragIds(event.dataTransfer, event.dataTransfer.getData('text/plain'))
     setDragIds(NO_IDS)
-    const dragged = ids
+    const draggedIds = ids
       .map(id => snapshot.tasks.find(task => task.id === id))
       .filter((task): task is TaskRecord => task !== undefined)
-      .filter(task => isCardDraggable(task, pendingSet.has(task.id)))
+    const dragged = draggedIds.filter(task => isCardDraggable(task))
     const movable = dragged.filter(task => isRunTarget
       // A human start is the go-ahead on the clarification gate: the Host
       // closes the card's open clarification round and continues its session,
       // so the drop is offered like any other run.
       ? task.status !== columnStatus && machine.actionsFor(task.status, columnStatus).includes('run')
       : machine.canTransition(task.status, columnStatus))
-    if (movable.length === 0) return
+    if (movable.length === 0) {
+      // Never swallow a drop silently: name the card and the reason it cannot
+      // go where it was dropped. A card with an action already in flight is not
+      // refused here — its move queues behind that action in the outbox.
+      const blocked = dragged[0] ?? draggedIds[0]
+      if (blocked !== undefined) controller.refuse?.(dropRefusalReason(blocked, columnStatus, isRunTarget), blocked.id)
+      return
+    }
     // The runner owns the run entry; start each card in drag order so the
     // queue keeps that order (the WIP limit still gates the launches).
     if (isRunTarget) {
@@ -470,7 +500,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       clearSelection()
       return
     }
-    void controller.moveTasks(moving, columnStatus).then(moved => { if (moved) clearSelection() })
+    void Promise.resolve(controller.moveTasks(moving, columnStatus)).then(moved => { if (moved) clearSelection() })
   }, [clearSelection, controller, machine, pendingSet, snapshot.host?.maxConcurrentRuns, snapshot.tasks, workspaceTitles])
   // Bulk archive/delete of the marked cards: both reuse the per-card
   // controller actions and apply them to the actionable subset the group drag
@@ -677,6 +707,36 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         </div>
       )}
 
+      {snapshot.outbox?.error !== undefined && (
+        <div className={css.formError} data-dsh-part="outbox-error" role="alert">
+          {t('board.outbox.waiting', { count: String(snapshot.outbox.pending) })} {snapshot.outbox.error}{' '}
+          <button type="button" className={css.linkButton} onClick={() => { controller.retryOutbox?.() }}>
+            {t('board.outbox.retry')}
+          </button>{' '}
+          <button type="button" className={css.linkButton} onClick={() => { controller.discardOutbox?.() }}>
+            {t('board.outbox.discard')}
+          </button>
+        </div>
+      )}
+
+      {(snapshot.notices ?? []).length > 0 && (
+        <div className={css.notices} data-dsh-part="notices" aria-live="polite">
+          {(snapshot.notices ?? []).map(notice => (
+            <div key={notice.id} className={css.notice} data-kind={notice.kind} data-dsh-part="notice" role="status">
+              <span>{notice.message}</span>
+              <button
+                type="button"
+                className={css.noticeClose}
+                aria-label={t('board.notice.dismiss')}
+                onClick={() => { controller.dismissNotice?.(notice.id) }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {snapshot.transportError !== undefined && (
         <div className={css.formError}>
           {t('board.hostError', { error: snapshot.transportError })}{' '}
@@ -716,7 +776,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             </header>
             <div className={css.cards}>
               {visible.map(task => (
-                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
+                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
               ))}
               {visible.length === 0 && (
                 <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('archive.empty')}</div>
@@ -747,7 +807,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                 </header>
                 <div className={css.cards}>
                   {tasks.map(task => (
-                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
+                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
                   ))}
                   {tasks.length === 0 && (
                     <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('board.empty')}</div>

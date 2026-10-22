@@ -369,6 +369,7 @@ describe('run loop', () => {
     await controller.retryHostSync()
 
     expect(await controller.runTask('task-a')).toBe(true)
+    await controller.whenIdle()
     expect(actions).toEqual([{ kind: 'run', taskId: 'task-a' }])
     expect(controller.getSnapshot().tasks[0].status).toBe('running')
     // A second run while the task is already running is ignored locally.
@@ -399,6 +400,7 @@ describe('run loop', () => {
     controller.start()
     await controller.retryHostSync()
     await controller.runTask('task-a')
+    await controller.whenIdle()
     expect(controller.getSnapshot().tasks[0].status).toBe('running')
 
     // The Host settles the execution and broadcasts the frame.
@@ -430,6 +432,7 @@ describe('run loop', () => {
 
     expect(controller.getSnapshot().tasks[0].status).toBe('failed')
     await controller.rerunTask('task-a')
+    await controller.whenIdle()
     expect(actions).toEqual([{ kind: 'rerun', taskId: 'task-a' }])
     expect(controller.getSnapshot().tasks[0].status).toBe('running')
     controller.dispose()

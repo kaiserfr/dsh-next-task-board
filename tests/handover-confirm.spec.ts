@@ -130,11 +130,11 @@ function makeService(ledger: HostTaskLedger, now: () => number) {
 }
 
 describe('confirmation gate: unconfirmed high-permission binding refuses execution', () => {
-  it('manual run on an unconfirmed card is rejected and opens no execution', () => {
+  it('manual run on an unconfirmed card is rejected and opens no execution', async () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('req-create', { kind: 'create', id: 'card', input: { title: '高权卡', description: '', prompt: 'p', handover: HANDOVER } })
     const { service } = makeService(ledger, () => NOW)
-    expect(() => service.apply('req-run', { kind: 'run', taskId: 'card' })).toThrow(/confirmation-required/)
+    await expect(service.apply('req-run', { kind: 'run', taskId: 'card' })).rejects.toThrow(/confirmation-required/)
     expect(ledger.state().tasks[0].executions).toEqual([])
     expect(ledger.state().tasks[0].status).toBe('backlog')
     service.dispose()
@@ -144,20 +144,20 @@ describe('confirmation gate: unconfirmed high-permission binding refuses executi
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('req-create', { kind: 'create', id: 'card', input: { title: '高权卡', description: '', prompt: 'p', handover: HANDOVER } })
     const { service, create } = makeService(ledger, () => NOW)
-    service.apply('req-confirm', { kind: 'confirm-permission', taskId: 'card' })
+    await service.apply('req-confirm', { kind: 'confirm-permission', taskId: 'card' })
     expect(ledger.state().tasks[0].permissionConfirmedAt).toBe(NOW)
-    service.apply('req-run', { kind: 'run', taskId: 'card' })
+    await service.apply('req-run', { kind: 'run', taskId: 'card' })
     await new Promise(resolve => { setTimeout(resolve, 0) })
     expect(create).toHaveBeenCalledOnce()
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
     service.dispose()
   })
 
-  it('a card at or below the session default runs without confirmation', () => {
+  it('a card at or below the session default runs without confirmation', async () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW, { sessionDefaultPermission: 'workspace-write' })
     ledger.applyRequest('req-create', { kind: 'create', id: 'card', input: { title: '平权卡', description: '', prompt: 'p', handover: { ...HANDOVER, permission: 'workspace-write' } } })
     const { service } = makeService(ledger, () => NOW)
-    expect(() => service.apply('req-run', { kind: 'run', taskId: 'card' })).not.toThrow()
+    await expect(service.apply('req-run', { kind: 'run', taskId: 'card' })).resolves.toBeDefined()
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
     service.dispose()
   })

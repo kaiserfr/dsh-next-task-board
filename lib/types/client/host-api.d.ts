@@ -29,8 +29,13 @@ export declare class HttpTaskBoardHostTransport implements TaskBoardHostTranspor
     constructor(storage?: Pick<Storage, 'getItem' | 'setItem'> | undefined);
     bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>;
     state(): Promise<TaskBoardSnapshot>;
-    action(action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot>;
+    action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot>;
     private post;
+    /**
+     * One Host read. There is deliberately **no timeout**: a slow Host is not a
+     * user-visible failure. The action outbox in the controller retries a broken
+     * connection with the same requestId, and the board stays usable throughout.
+     */
     private request;
     /**
      * Ask the Host to turn pasted text into task fields. The route answers a

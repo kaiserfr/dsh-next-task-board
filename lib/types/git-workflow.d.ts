@@ -45,6 +45,14 @@ export declare class GitWorkflow {
     /** Reasons of the last {@link configure} (empty when it parsed). */
     get configurationErrors(): readonly string[];
     private run;
+    /**
+     * Run one git command **without blocking the event loop** (`spawn`, not
+     * `spawnSync`). This is what keeps `/parse`, `/state` and the SSE stream
+     * answering while a worktree is created, a commit is built or a branch is
+     * replayed and merged. The promise settles on the child's exit; the bounded
+     * timeout only protects against a wedged child.
+     */
+    private runAsync;
     /** Whether `dir` is inside a git work tree. */
     private isRepository;
     /**
@@ -66,7 +74,7 @@ export declare class GitWorkflow {
      * When git refuses the worktree, the historical shared checkout is used
      * instead: the card keeps working, just without its own directory.
      */
-    openBranch(task: TaskRecord): TaskGit | undefined;
+    openBranch(task: TaskRecord): Promise<TaskGit | undefined>;
     /**
      * The card's worktree directory, attached when it is missing: `git worktree
      * add` for a new branch, `git worktree add <path> <branch>` for an existing
@@ -104,13 +112,13 @@ export declare class GitWorkflow {
      * @returns the git state stamped with `committedAt`/`reviewedCommit`, or
      *   undefined without a repository.
      */
-    commitBranch(task: TaskRecord, now: number): TaskGit | undefined;
+    commitBranch(task: TaskRecord, now: number): Promise<TaskGit | undefined>;
     /**
      * Put the card's branch in place before it runs. A card with its own worktree
      * needs nothing: that directory stands on its branch already and switching
      * branches there is exactly the yank the worktree exists to prevent.
      */
-    useBranch(task: TaskRecord): void;
+    useBranch(task: TaskRecord): Promise<void>;
     /**
      * Merge the card's feature branch back into the base branch — but only the
      * exact commit the human reviewed. Called by the release path (the
@@ -148,7 +156,7 @@ export declare class GitWorkflow {
      * @param now - merge instant to stamp on the returned state.
      * @returns the git state stamped with `mergedAt`, or undefined without one.
      */
-    mergeBranch(task: TaskRecord, now: number): TaskGit | undefined;
+    mergeBranch(task: TaskRecord, now: number): Promise<TaskGit | undefined>;
     /**
      * Replay the card's branch onto the base branch as it stands right now. A
      * branch that already lies on the base is left alone (`git rebase` is then a
@@ -194,7 +202,7 @@ export declare class GitWorkflow {
      * @param task - the card leaving the board.
      * @returns why git refused, or undefined when the directory is gone.
      */
-    releaseWorktree(task: TaskRecord): string | undefined;
+    releaseWorktree(task: TaskRecord): Promise<string | undefined>;
     /**
      * Branch a new feature branch starts from: HEAD while it is a normal branch,
      * otherwise the repository's main branch (a second card pulled into

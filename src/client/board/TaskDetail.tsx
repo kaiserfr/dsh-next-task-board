@@ -316,7 +316,12 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
   // execution button is the pause/play control of that run.
   const paused = isTaskPaused(current)
   const archived = current.archivedAt !== undefined
-  const pending = snapshot.pendingTaskIds.includes(current.id)
+  // An action already in the outbox is information, not a fence: the detail's
+  // controls stay usable (a move queues behind the running action, and a
+  // rejection arrives as a notice). The card itself still shows the spinner.
+  const pending = false
+  // Informational only: the card is talking to the Host, but nothing is blocked.
+  const actionInFlight = snapshot.pendingTaskIds.includes(current.id)
   const transportError = snapshot.transportError
   const timeZone = snapshot.host?.scheduler.timeZone
   const permissionPending = requiresPermissionConfirmation(current, snapshot.host?.sessionDefaultPermission)
@@ -358,6 +363,21 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
               </button>
             </div>
           )}
+          {(snapshot.notices ?? []).filter(notice => notice.taskId === current.id).map(notice => (
+            // The card's own last messages (a refused transition, a background
+            // commit/release failure) stay visible here, not only as a toast.
+            <div key={notice.id} className={css.notice} data-kind={notice.kind} data-dsh-part="detail-notice" role="status">
+              <span>{notice.message}</span>
+              <button
+                type="button"
+                className={css.noticeClose}
+                aria-label={t('board.notice.dismiss')}
+                onClick={() => { controller.dismissNotice?.(notice.id) }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
           {waitingReason !== undefined && (
             // The card waits for its lane's WIP slot: name the blocker here too,
             // where there is room for the whole sentence.
@@ -461,7 +481,7 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
           {/* The manual check of the new version: worktree, editor, app links and
               the container controls, for cards in the review column only (the
               component itself decides that, so no other column ever renders it). */}
-          <ReviewSection controller={controller} task={current} pending={pending} timeZone={timeZone} />
+          <ReviewSection controller={controller} task={current} timeZone={timeZone} />
 
           <section className={css.detailSection}>
             <h4>{t('detail.prompt')}</h4>
@@ -527,7 +547,7 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
         </div>
 
         <footer className={css.detailFooter}>
-          {!archived && pending && <span className={css.detailMeta}>{t('board.pending')}…</span>}
+          {!archived && actionInFlight && <span className={css.detailMeta}>{t('board.pending')}…</span>}
           {!archived && canEditTaskContent(current) && (
             <button
               type="button"
@@ -585,7 +605,7 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
               // implementation, so the button is offered like the drop.
               disabled={pending}
               onClick={() => {
-                void controller.rerunTask(current.id).then(() => {
+                void Promise.resolve(controller.rerunTask(current.id)).then(() => {
                   if (controller.getSnapshot().transportError === undefined) controller.closeTask()
                 })
               }}

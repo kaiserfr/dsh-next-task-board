@@ -21,6 +21,7 @@ import { applyUpdateTask, type TaskUpdatePatch } from './use-cases/task-update.t
 import type {
   TaskBoardAction,
   TaskBoardEventPayload,
+  TaskBoardNotice,
   TaskBoardParseDraft,
   TaskBoardParseRequest,
   TaskBoardReviewRequest,
@@ -34,8 +35,12 @@ export interface TaskBoardTransport {
   /**
    * Submit one action; the optional initiator is the current DSH session id
    * (issue #6 audit origin), asserted by the client and recorded by the Host.
+   * The optional requestId makes a retry idempotent: the outbox reuses the id
+   * when it resends an action after a connection failure, and the ledger's
+   * persisted request cache then returns the already-applied result instead of
+   * applying it twice.
    */
-  action(action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot>
+  action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot>
   subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void
   /**
    * One-shot model parse of pasted text (issue #1540). Optional: a deployment
@@ -122,6 +127,29 @@ export interface ExecutionOptionsSnapshot {
   models?: readonly ExecutionModelOption[]
 }
 
+/**
+ * One user-facing message the board renders as a toast: a status refusal
+ * (a move the state machine does not allow, an archived/running card), a Host
+ * rejection returned by the ledger, or a derived Host notice (a background git
+ * failure). Messages are generated where the knowledge lives; the board only
+ * displays and dismisses them.
+ */
+export interface BoardNotice {
+  id: string
+  kind: 'refused' | 'failed' | 'host'
+  message: string
+  taskId?: string
+  at: number
+}
+
+/** The outbox's public face: how many actions wait, and why the last send failed. */
+export interface OutboxSnapshot {
+  /** Actions accepted by the UI but not yet confirmed by the Host. */
+  pending: number
+  /** Last transport failure; the outbox keeps retrying and the banner explains it. */
+  error?: string
+}
+
 /** Immutable controller snapshot for UI subscriptions. */
 export interface ControllerSnapshot {
   tasks: readonly TaskRecord[]
@@ -132,6 +160,10 @@ export interface ControllerSnapshot {
   /** Picker option sets (workspace list + agent-preset roster). */
   executionOptions: ExecutionOptionsSnapshot
   pendingTaskIds: readonly string[]
+  /** Actions accepted locally and still waiting for the Host, plus the last transport error. */
+  outbox?: OutboxSnapshot
+  /** Recent user-facing messages (refusals, Host rejections, background failures). */
+  notices?: readonly BoardNotice[]
   /**
    * Keys of the modal form drafts the controller currently holds (see
    * {@link BoardController.saveFormDraft}). The board marks "new task" while
@@ -154,7 +186,7 @@ export interface ControllerSnapshot {
    * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
    */
   sessionOpenError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans'>
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -183,6 +215,39 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** First retry delay of a failed outbox send; doubles up to the cap. */
+const OUTBOX_RETRY_BASE_MS = 1_000
+/** Longest delay between two outbox retries. */
+const OUTBOX_RETRY_MAX_MS = 30_000
+/** How many notices the board keeps for its toast area. */
+const NOTICE_LIMIT = 12
+
+/**
+ * One action the UI accepted from the user and still owes the Host. It carries
+ * its own idempotency key (`requestId`), so a resend after a connection loss can
+ * never apply the action twice; the ledger's persisted request cache answers
+ * the retry with the already-applied state.
+ */
+interface OutboxEntry {
+  requestId: string
+  action: TaskBoardAction
+  taskId?: string
+  initiator?: string
+  attempts: number
+  state: 'queued' | 'sending' | 'waiting'
+  error?: string
+  createdAt: number
+  /** Identity for duplicate suppression (double click, repeated drop). */
+  fingerprint: string
+  onAccepted?: () => void
+  onRejected?: (message: string) => void
+}
+
+/** Transport failures worth retrying: the action did not reach a decision. */
+function isRetryable(failure: string): boolean {
+  return failure === 'unreachable' || failure === 'locked' || failure === 'timeout'
+}
+
 /**
  * Board controller (see module doc). All mutations bump the snapshot and
  * persist through the store; UI and DOM mounts subscribe and re-render.
@@ -198,8 +263,23 @@ export class BoardController {
   private disposers: Array<() => void> = []
   private readonly now: () => number
   private readonly uuid: () => string
-  private readonly pendingTaskIds = new Set<string>()
-  private readonly taskQueues = new Map<string, Promise<void>>()
+  /**
+   * The outbox: user actions accepted immediately and handed to the Host in the
+   * background. This is what makes every UI action possible while the backend is
+   * busy — the board never waits on a request, never disables a control because
+   * of one, and never turns a slow Host into a "timeout" for the user.
+   */
+  private readonly outbox: OutboxEntry[] = []
+  /** One FIFO drain per card (and one global drain for multi-card actions). */
+  private readonly outboxDrains = new Map<string, Promise<void>>()
+  private readonly outboxDraining = new Set<string>()
+  /** A kick arrived while the same card's loop was still finishing. */
+  private readonly outboxKickPending = new Set<string>()
+  /** Per-entry retry timers (keyed by requestId). */
+  private readonly outboxTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private outboxError: string | undefined
+  private readonly noticeList: BoardNotice[] = []
+  private readonly seenHostNotices = new Set<string>()
   /**
    * Modal form drafts, keyed per modal (the client owns the key vocabulary).
    * They live here — not in the popup components — so closing a popup by an
@@ -210,7 +290,7 @@ export class BoardController {
   private readonly formDrafts = new Map<string, unknown>()
   private transportError: string | undefined
   private sessionOpenError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans'> | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases'> | undefined
   private remoteSubscribed = false
   private remoteInitialization: Promise<boolean> | undefined
 
@@ -244,19 +324,31 @@ export class BoardController {
   /** Stop all subscriptions and drop retained state (idempotent). */
   dispose(): void {
     for (const dispose of this.disposers.splice(0)) dispose()
+    for (const timer of this.outboxTimers.values()) clearTimeout(timer)
+    this.outboxTimers.clear()
+    this.outboxDrains.clear()
+    this.outboxDraining.clear()
+    this.outboxKickPending.clear()
+    this.outbox.length = 0
     this.listeners.clear()
   }
 
   // --- snapshot / subscription ------------------------------------------------
 
   getSnapshot(): ControllerSnapshot {
+    const pendingTaskIds = [...new Set(this.outbox.flatMap(entry => entry.taskId === undefined ? [] : [entry.taskId]))]
     return {
       tasks: this.tasks,
       boardOpen: this.boardOpen,
       archiveView: this.archiveView,
       selectedTaskId: this.selectedTaskId,
       executionOptions: this.executionOptions,
-      pendingTaskIds: [...this.pendingTaskIds],
+      pendingTaskIds,
+      outbox: {
+        pending: this.outbox.length,
+        ...(this.outboxError === undefined ? {} : { error: this.outboxError }),
+      },
+      notices: [...this.noticeList],
       ...(this.formDrafts.size === 0 ? {} : { formDrafts: this.formDraftKeys() }),
       ...(this.workspaceCreator === undefined ? {} : { canCreateWorkspace: true }),
       ...(typeof this.deps.transport?.parseDraft === 'function' ? { canParseTask: true } : {}),
@@ -275,6 +367,17 @@ export class BoardController {
   /** Whether production mutations are confirmed by the Host transport. */
   isHostBacked(): boolean {
     return this.deps.transport !== undefined
+  }
+
+  /**
+   * Wait until every queued outbox chain has finished its current send. Waiting
+   * entries (a broken connection) are not awaited: they retry on their own.
+   * Tests and the host-sync retry use this instead of polling.
+   */
+  async whenIdle(): Promise<void> {
+    while (this.outboxDrains.size > 0) {
+      await Promise.all([...this.outboxDrains.values()].map(drain => drain.catch(() => {})))
+    }
   }
 
   /** Retry initial migration/state synchronization after an explicit Host error. */
@@ -372,9 +475,28 @@ export class BoardController {
     const id = this.uuid()
     const preview = applyCreateTask(this.tasks, input, this.now(), id).task
     if (preview === undefined) return undefined
-    return await this.commitRemote({ kind: 'create', id, input }, id)
+    return await this.enqueueConfirmed({ kind: 'create', id, input }, id)
       ? this.tasks.find(task => task.id === id)
       : undefined
+  }
+
+  /**
+   * Accept a new task immediately and hand it to the Host in the background.
+   * The card appears when the Host confirms it; a rejection restores the caller's
+   * draft through `onRejected`. The dialog can close at once — the user is never
+   * blocked by the round trip.
+   * @returns the id the card will have.
+   */
+  queueCreateTask(input: NewTaskInput, hooks: { onAccepted?: () => void; onRejected?: (message: string) => void } = {}): string {
+    const id = this.uuid()
+    if (this.deps.transport === undefined) {
+      const task = this.createTask(input)
+      if (task === undefined) hooks.onRejected?.('the task could not be created')
+      else hooks.onAccepted?.()
+      return id
+    }
+    this.enqueue({ kind: 'create', id, input }, id, hooks)
+    return id
   }
 
   /**
@@ -387,11 +509,25 @@ export class BoardController {
    */
   async updateTask(id: string, patch: TaskUpdatePatch): Promise<boolean> {
     if (this.deps.transport !== undefined) {
-      return await this.commitRemote({ kind: 'update', taskId: id, patch }, id)
+      return await this.enqueueConfirmed({ kind: 'update', taskId: id, patch }, id)
     }
     this.tasks = [...applyUpdateTask(this.tasks, id, patch, this.now())]
     this.persistAndNotify()
     return true
+  }
+
+  /**
+   * Accept an edit immediately and hand it to the Host in the background. The
+   * modal closes at once; a rejection restores the draft through `onRejected`.
+   */
+  queueUpdateTask(id: string, patch: TaskUpdatePatch, hooks: { onAccepted?: () => void; onRejected?: (message: string) => void } = {}): void {
+    if (this.deps.transport === undefined) {
+      this.tasks = [...applyUpdateTask(this.tasks, id, patch, this.now())]
+      this.persistAndNotify()
+      hooks.onAccepted?.()
+      return
+    }
+    this.enqueue({ kind: 'update', taskId: id, patch }, id, hooks)
   }
 
   /**
@@ -434,9 +570,13 @@ export class BoardController {
     return await parse.call(transport, request, signal)
   }
 
+  /**
+   * Move one card. Host-backed: accepted immediately and queued per card; the
+   * card moves when the Host confirms (or the rejection arrives as a notice).
+   */
   moveTask(id: string, status: TaskStatus): void {
     if (this.deps.transport !== undefined) {
-      void this.commitRemote({ kind: 'move', taskId: id, status }, id)
+      this.enqueue({ kind: 'move', taskId: id, status }, id)
       return
     }
     this.tasks = this.tasks.map(task => task.id === id ? withStatus(task, status, this.now()) : task)
@@ -449,15 +589,16 @@ export class BoardController {
    * all-or-nothing and the cards keep their order among themselves.
    * @param ids - the dragged cards; duplicates are ignored.
    * @param status - the target column.
-   * @returns whether the Host accepted the batch (always true on the legacy
-   * in-memory path); the board clears its selection on success only.
+   * @returns whether the batch was accepted locally (always true on the legacy
+   * in-memory path); the board clears its selection on that.
    */
   async moveTasks(ids: readonly string[], status: TaskStatus): Promise<boolean> {
     const unique = [...new Set(ids)]
     if (unique.length === 0) return true
     if (unique.length === 1) { this.moveTask(unique[0]!, status); return true }
     if (this.deps.transport !== undefined) {
-      return await this.commitRemote({ kind: 'move-many', taskIds: unique, status })
+      this.enqueue({ kind: 'move-many', taskIds: unique, status })
+      return true
     }
     const moving = new Set(unique)
     this.tasks = this.tasks.map(task => moving.has(task.id) ? withStatus(task, status, this.now()) : task)
@@ -467,7 +608,7 @@ export class BoardController {
 
   deleteTask(id: string): void {
     if (this.deps.transport !== undefined) {
-      void this.commitRemote({ kind: 'delete', taskId: id }, id)
+      this.enqueue({ kind: 'delete', taskId: id }, id)
       return
     }
     const { tasks, selectionCleared } = applyDeleteTask(this.tasks, this.selectedTaskId, id)
@@ -483,9 +624,12 @@ export class BoardController {
    */
   archiveTask(id: string): boolean {
     const { tasks, archived } = applyArchiveTask(this.tasks, id, this.now())
-    if (!archived) return false
+    if (!archived) {
+      this.refuse('this card cannot be archived (it is running or already archived)', id)
+      return false
+    }
     if (this.deps.transport !== undefined) {
-      void this.commitRemote({ kind: 'archive', taskId: id }, id)
+      this.enqueue({ kind: 'archive', taskId: id }, id)
       return true
     }
     this.tasks = [...tasks]
@@ -498,8 +642,8 @@ export class BoardController {
     const { tasks, archived } = applyRestoreTask(this.tasks, id, this.now())
     if (!archived) return false
     if (this.deps.transport !== undefined) {
-      void this.commitRemote({ kind: 'restore', taskId: id }, id).then(restored => {
-        if (restored && this.selectedTaskId === id) this.closeTask()
+      this.enqueue({ kind: 'restore', taskId: id }, id, {
+        onAccepted: () => { if (this.selectedTaskId === id) this.closeTask() },
       })
       return true
     }
@@ -524,7 +668,7 @@ export class BoardController {
     const { tasks, applied } = applySetSchedule(this.tasks, id, patch, this.now())
     if (!applied) return false
     if (this.deps.transport !== undefined) {
-      void this.commitRemote({ kind: 'set-schedule', taskId: id, patch }, id)
+      this.enqueue({ kind: 'set-schedule', taskId: id, patch }, id)
       return true
     }
     this.tasks = [...tasks]
@@ -606,15 +750,19 @@ export class BoardController {
 
   /**
    * Request a Host execution for a task: the Host ledger owns the running
-   * transition, the execution record, and the settlement. A second call
-   * while the task is already running is ignored; without a Host transport
-   * the run is refused (returns false).
+   * transition, the execution record, and the settlement. The action is
+   * accepted immediately (queued per card); a status that forbids it is
+   * reported as a notice instead of silently doing nothing.
    */
   async runTask(id: string): Promise<boolean> {
     const task = this.tasks.find(candidate => candidate.id === id)
-    if (task === undefined || task.archivedAt !== undefined || task.status === 'running') return false
+    if (task === undefined || task.archivedAt !== undefined || task.status === 'running') {
+      this.refuse(this.taskRefusal(id, 'run'), id)
+      return false
+    }
     if (this.deps.transport === undefined) return false
-    return await this.commitRemote({ kind: 'run', taskId: id }, id, currentOf(this.deps.sessions))
+    this.enqueue({ kind: 'run', taskId: id }, id, {}, currentOf(this.deps.sessions))
+    return true
   }
 
   /**
@@ -631,15 +779,19 @@ export class BoardController {
       this.persistAndNotify()
       return true
     }
-    return await this.commitRemote({ kind: 'confirm-permission', taskId: id }, id)
+    this.enqueue({ kind: 'confirm-permission', taskId: id }, id)
+    return true
   }
 
   /** Re-run a settled task through the Host (the Host replans and executes). */
   async rerunTask(id: string): Promise<void> {
     const task = this.tasks.find(candidate => candidate.id === id)
-    if (task === undefined || task.archivedAt !== undefined) return
+    if (task === undefined || task.archivedAt !== undefined || task.status === 'running') {
+      this.refuse(this.taskRefusal(id, 'run'), id)
+      return
+    }
     if (this.deps.transport === undefined) return
-    await this.commitRemote({ kind: 'rerun', taskId: id }, id, currentOf(this.deps.sessions))
+    this.enqueue({ kind: 'rerun', taskId: id }, id, {}, currentOf(this.deps.sessions))
   }
 
   // --- review environments -------------------------------------------------------
@@ -648,7 +800,7 @@ export class BoardController {
    * Start the card's version for the manual review. Only a card standing in the
    * review column may ask: the Host refuses anything else, and the board hides
    * the controls everywhere else anyway.
-   * @returns whether the Host accepted the action.
+   * @returns whether the action was accepted locally.
    */
   async reviewStart(id: string): Promise<boolean> {
     return await this.reviewAction('review-start', id)
@@ -670,9 +822,13 @@ export class BoardController {
 
   private async reviewAction(kind: 'review-start' | 'review-stop' | 'review-restart', id: string): Promise<boolean> {
     const task = this.tasks.find(candidate => candidate.id === id)
-    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') return false
+    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') {
+      this.refuse('the review environment can only be controlled from the review column', id)
+      return false
+    }
     if (this.deps.transport === undefined) return false
-    return await this.commitRemote({ kind, taskId: id }, id)
+    this.enqueue({ kind, taskId: id }, id)
+    return true
   }
 
   /**
@@ -680,19 +836,23 @@ export class BoardController {
    * merges the card's feature branch into its base branch and the card moves on
    * to `done`. A conflict is not the human's problem — the Host starts that merge
    * in the card's own worktree and lets the card's agent resolve it — while every
-   * other failure lands in `failed` with the reason.
+   * other failure lands in `failed` with the reason (and a notice).
    *
    * Only a card standing in the review column may ask; the Host is the authority
    * for that and refuses anything else.
-   * @returns whether the Host accepted the action.
+   * @returns whether the action was accepted locally.
    */
   async approveMerge(id: string): Promise<boolean> {
     const task = this.tasks.find(candidate => candidate.id === id)
-    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') return false
+    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') {
+      this.refuse('the merge can only be released from the review column', id)
+      return false
+    }
     if (this.deps.transport === undefined) return false
     // The release may open the conflict-resolution run, so the asking session
     // travels with it the way it does for `run`.
-    return await this.commitRemote({ kind: 'approve-merge', taskId: id }, id, currentOf(this.deps.sessions))
+    this.enqueue({ kind: 'approve-merge', taskId: id }, id, {}, currentOf(this.deps.sessions))
+    return true
   }
 
   /**
@@ -733,24 +893,26 @@ export class BoardController {
    * column and its execution record, the Host stops the run's session. The
    * board's bulk button sends every in-progress card at once, so one click
    * suspends the whole column in a single ledger write.
-   * @returns whether the Host accepted the action.
+   * @returns whether the action was accepted locally.
    */
   async pauseTasks(ids: readonly string[]): Promise<boolean> {
     const unique = [...new Set(ids)]
     if (unique.length === 0 || this.deps.transport === undefined) return false
-    return await this.commitRemote({ kind: 'pause', taskIds: unique })
+    this.enqueue({ kind: 'pause', taskIds: unique })
+    return true
   }
 
   /**
    * Resume paused runs: the Host clears the pause and writes the "continue"
    * turn into each run's own conversation (a run that never got a session goes
    * back into the launch queue).
-   * @returns whether the Host accepted the action.
+   * @returns whether the action was accepted locally.
    */
   async resumeTasks(ids: readonly string[]): Promise<boolean> {
     const unique = [...new Set(ids)]
     if (unique.length === 0 || this.deps.transport === undefined) return false
-    return await this.commitRemote({ kind: 'resume', taskIds: unique })
+    this.enqueue({ kind: 'resume', taskIds: unique })
+    return true
   }
 
   // --- internals ---------------------------------------------------------------
@@ -774,39 +936,260 @@ export class BoardController {
     this.notify()
   }
 
-  private async commitRemote(action: TaskBoardAction, taskId?: string, initiator?: string): Promise<boolean> {
-    const transport = this.deps.transport
-    if (transport === undefined) return true
-    if (taskId === undefined) return await this.performRemote(action, initiator)
-    const previous = this.taskQueues.get(taskId) ?? Promise.resolve()
-    const operation = previous.catch(() => {}).then(async () => await this.performRemote(action, initiator))
-    const tail = operation.then(() => {}, () => {})
-    this.taskQueues.set(taskId, tail)
-    this.pendingTaskIds.add(taskId)
+  // --- outbox ------------------------------------------------------------------
+
+  /**
+   * Accept one action and hand it to the Host in the background. The UI is
+   * acknowledged immediately; the card's FIFO chain keeps actions in order and
+   * the same requestId is reused on retries, so a connection loss can never
+   * apply an action twice.
+   *
+   * A queued action never blocks the user: it does not disable any control, and
+   * a slow or unreachable Host only makes the banner count it. A repeated
+   * identical action is dropped (a double click expresses one intent).
+   */
+  private enqueue(
+    action: TaskBoardAction,
+    taskId?: string,
+    hooks: { onAccepted?: () => void; onRejected?: (message: string) => void } = {},
+    initiator?: string,
+    dedupe = true,
+  ): void {
+    if (this.deps.transport === undefined) return
+    const fingerprint = `${taskId ?? '*'}:${JSON.stringify(action)}`
+    if (dedupe && this.outbox.some(entry => entry.fingerprint === fingerprint)) return
+    const entry: OutboxEntry = {
+      requestId: this.uuid(),
+      action,
+      ...(taskId === undefined ? {} : { taskId }),
+      ...(initiator === undefined || initiator === '' ? {} : { initiator }),
+      attempts: 0,
+      state: 'queued',
+      createdAt: this.now(),
+      fingerprint,
+      ...(hooks.onAccepted === undefined ? {} : { onAccepted: hooks.onAccepted }),
+      ...(hooks.onRejected === undefined ? {} : { onRejected: hooks.onRejected }),
+    }
+    this.outbox.push(entry)
     this.notify()
-    try {
-      return await operation
-    } finally {
-      if (this.taskQueues.get(taskId) === tail) {
-        this.taskQueues.delete(taskId)
-        this.pendingTaskIds.delete(taskId)
-        this.notify()
-      }
+    this.kick(entry.taskId ?? '*')
+  }
+
+  /** Await the Host's verdict for one action (compatibility seams and tests). */
+  private enqueueConfirmed(action: TaskBoardAction, taskId?: string, initiator?: string): Promise<boolean> {
+    return new Promise<boolean>(resolve => {
+      this.enqueue(action, taskId, {
+        onAccepted: () => resolve(true),
+        onRejected: () => resolve(false),
+      }, initiator, false)
+    })
+  }
+
+  /**
+   * Start draining one card's queue. The loop is intentionally **head-of-line
+   * blocking**: an action that is waiting for a retry keeps the later actions of
+   * the same card queued (otherwise a second move could overtake the first),
+   * while every other card keeps its own loop. A waiting head ends the loop; its
+   * retry timer starts it again.
+   */
+  private kick(key: string): void {
+    if (this.outboxDraining.has(key)) {
+      // The loop is between two sends; remember to look again once it ends,
+      // otherwise an entry pushed in that window would sit forever.
+      this.outboxKickPending.add(key)
+      return
+    }
+    this.outboxDraining.add(key)
+    const operation = this.drainKey(key).catch(() => {}).finally(() => {
+      this.outboxDraining.delete(key)
+      this.outboxDrains.delete(key)
+      if (this.outboxKickPending.delete(key)) this.kick(key)
+    })
+    this.outboxDrains.set(key, operation)
+  }
+
+  private async drainKey(key: string): Promise<void> {
+    for (;;) {
+      // Head-of-line: the first entry of this card decides. A waiting head stops
+      // the loop, so later actions of the same card can never overtake it.
+      const entry = this.outbox.find(candidate => (candidate.taskId ?? '*') === key)
+      if (entry === undefined || entry.state === 'waiting') return
+      const outcome = await this.send(entry)
+      if (outcome === 'waiting') return
     }
   }
 
-  private async performRemote(action: TaskBoardAction, initiator?: string): Promise<boolean> {
+  private async send(entry: OutboxEntry): Promise<'done' | 'waiting'> {
+    if (!this.outbox.includes(entry)) return 'done'
     const transport = this.deps.transport
-    if (transport === undefined) return true
-    this.transportError = undefined
+    if (transport === undefined) return 'done'
+    entry.state = 'sending'
     this.notify()
     try {
-      const accepted = this.acceptRemote(await transport.action(action, initiator))
-      return accepted || await this.refreshRemote()
+      const snapshot = await transport.action(entry.action, entry.initiator, entry.requestId)
+      const accepted = this.acceptRemote(snapshot)
+      this.removeEntry(entry)
+      this.outboxError = undefined
+      this.transportError = undefined
+      entry.onAccepted?.()
+      this.notify()
+      // A stale response (an older revision than the board already applies) is
+      // not an error: read the authoritative state instead of applying it.
+      if (!accepted) await this.refreshRemote()
+      return 'done'
     } catch (error) {
-      await this.refreshRemote(messageOf(error))
-      return false
+      const failure = typeof (error as { failure?: unknown }).failure === 'string'
+        ? (error as { failure: string }).failure
+        : 'unexpected'
+      const message = messageOf(error)
+      if (isRetryable(failure)) {
+        entry.state = 'waiting'
+        entry.error = message
+        entry.attempts += 1
+        this.outboxError = message
+        this.notify()
+        this.scheduleRetry(entry)
+        return 'waiting'
+      }
+      // A definitive refusal (status forbidden, validation, authentication):
+      // tell the user, drop the entry and re-read the authority's state.
+      this.removeEntry(entry)
+      this.pushNotice('failed', `${this.actionLabel(entry)}: ${message}`, entry.taskId)
+      // A broken transport is also the board's global error; a status refusal
+      // is not (it belongs to the card's action, not to the connection).
+      if (failure !== 'rejected' && failure !== 'unauthorized') this.transportError = message
+      entry.onRejected?.(message)
+      this.notify()
+      return 'done'
     }
+  }
+
+  private scheduleRetry(entry: OutboxEntry): void {
+    const delay = Math.min(OUTBOX_RETRY_BASE_MS * 2 ** Math.min(Math.max(entry.attempts - 1, 0), 6), OUTBOX_RETRY_MAX_MS)
+    const timer = setTimeout(() => {
+      this.outboxTimers.delete(entry.requestId)
+      if (!this.outbox.includes(entry)) return
+      entry.state = 'queued'
+      this.kick(entry.taskId ?? '*')
+    }, delay)
+    this.outboxTimers.set(entry.requestId, timer)
+  }
+
+  private removeEntry(entry: OutboxEntry): void {
+    const index = this.outbox.indexOf(entry)
+    if (index !== -1) this.outbox.splice(index, 1)
+    const timer = this.outboxTimers.get(entry.requestId)
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      this.outboxTimers.delete(entry.requestId)
+    }
+    this.notify()
+  }
+
+  /** Re-send every waiting action now (the banner's retry button). */
+  retryOutbox(): void {
+    this.outboxError = undefined
+    for (const entry of [...this.outbox]) {
+      const timer = this.outboxTimers.get(entry.requestId)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        this.outboxTimers.delete(entry.requestId)
+      }
+      if (entry.state !== 'waiting') continue
+      entry.state = 'queued'
+      entry.attempts = 0
+      this.kick(entry.taskId ?? '*')
+    }
+    this.notify()
+  }
+
+  /** Drop every waiting action (the banner's discard button). */
+  discardOutbox(): void {
+    // Only actions that are waiting for a retry can be discarded without
+    // losing one that is already on the wire. The next action of the same card
+    // (if any) starts again after its blocked head is gone.
+    const keys = new Set<string>()
+    for (const entry of [...this.outbox]) {
+      if (entry.state !== 'waiting') continue
+      keys.add(entry.taskId ?? '*')
+      this.removeEntry(entry)
+    }
+    this.outboxError = undefined
+    for (const key of keys) this.kick(key)
+    this.notify()
+  }
+
+  /** Report a locally refused action (status-forbidden) as a notice. */
+  refuse(message: string, taskId?: string): void {
+    this.pushNotice('refused', message, taskId)
+  }
+
+  dismissNotice(id: string): void {
+    const index = this.noticeList.findIndex(notice => notice.id === id)
+    if (index === -1) return
+    this.noticeList.splice(index, 1)
+    this.notify()
+  }
+
+  private pushNotice(kind: BoardNotice['kind'], message: string, taskId?: string): void {
+    this.noticeList.push({
+      id: this.uuid(),
+      kind,
+      message,
+      ...(taskId === undefined ? {} : { taskId }),
+      at: this.now(),
+    })
+    while (this.noticeList.length > NOTICE_LIMIT) this.noticeList.shift()
+    this.notify()
+  }
+
+  private taskRefusal(id: string, verb: 'run'): string {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined) return 'the card no longer exists'
+    if (task.archivedAt !== undefined) return `the card is archived, so it cannot ${verb}`
+    if (task.status === 'running') return 'the card is already running'
+    return `the card cannot ${verb} in status "${task.status}"`
+  }
+
+  private actionLabel(entry: OutboxEntry): string {
+    switch (entry.action.kind) {
+      case 'create': return 'create task'
+      case 'update': return 'save task'
+      case 'move': return 'move task'
+      case 'move-many': return 'move tasks'
+      case 'delete': return 'delete task'
+      case 'archive': return 'archive task'
+      case 'restore': return 'restore task'
+      case 'run': return 'start task'
+      case 'rerun': return 'start task'
+      case 'pause': return 'pause run'
+      case 'resume': return 'resume run'
+      case 'approve-merge': return 'release merge'
+      case 'review-start': return 'start review environment'
+      case 'review-stop': return 'stop review environment'
+      case 'review-restart': return 'restart review environment'
+      case 'set-schedule': return 'save schedule'
+      case 'confirm-permission': return 'confirm permission'
+      case 'import': return 'import tasks'
+    }
+  }
+
+  /** Show Host-derived notices once (deduped by their Host-generated id). */
+  private ingestHostNotices(notices: readonly TaskBoardNotice[] | undefined): void {
+    if (notices === undefined) return
+    for (const notice of notices) {
+      if (this.seenHostNotices.has(notice.id)) continue
+      if (this.seenHostNotices.size > 200) this.seenHostNotices.clear()
+      this.seenHostNotices.add(notice.id)
+      this.noticeList.push({
+        id: notice.id,
+        kind: 'host',
+        message: notice.message,
+        ...(notice.taskId === undefined ? {} : { taskId: notice.taskId }),
+        at: notice.at,
+      })
+    }
+    while (this.noticeList.length > NOTICE_LIMIT) this.noticeList.shift()
   }
 
   private async initializeRemote(): Promise<boolean> {
@@ -860,7 +1243,9 @@ export class BoardController {
         ...(event.maxDoneTasks === undefined ? {} : { maxDoneTasks: event.maxDoneTasks }),
         ...(event.awaitingAnswer === undefined ? {} : { awaitingAnswer: event.awaitingAnswer }),
         ...(event.reviewPlans === undefined ? {} : { reviewPlans: event.reviewPlans }),
+        ...(event.pendingReleases === undefined ? {} : { pendingReleases: event.pendingReleases }),
       }
+      this.ingestHostNotices(event.notices)
       this.notify()
       return
     }
@@ -908,7 +1293,9 @@ export class BoardController {
       // The review plans are derived per read like the waiting questions: an
       // older Host sends none, and the board then simply offers no review block.
       ...(snapshot.reviewPlans === undefined ? {} : { reviewPlans: snapshot.reviewPlans }),
+      ...(snapshot.pendingReleases === undefined ? {} : { pendingReleases: snapshot.pendingReleases }),
     }
+    this.ingestHostNotices(snapshot.notices)
     this.transportError = undefined
     if (this.selectedTaskId !== undefined && !this.tasks.some(task => task.id === this.selectedTaskId)) {
       this.selectedTaskId = undefined

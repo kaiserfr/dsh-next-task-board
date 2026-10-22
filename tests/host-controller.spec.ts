@@ -63,7 +63,8 @@ describe('Host-backed BoardController', () => {
     const controller = new BoardController({ store: new InMemoryTaskStore(), sessions: sessions(), transport })
     controller.start()
     await Promise.resolve()
-    expect(await controller.runTask('task-a')).toBe(false)
+    expect(await controller.runTask('task-a')).toBe(true)
+    await controller.whenIdle()
     expect(controller.getSnapshot().tasks).toEqual([confirmed])
     expect(controller.getSnapshot().transportError).toBe('host unavailable')
 
@@ -143,6 +144,7 @@ describe('Host-backed BoardController', () => {
     controller.start()
     await controller.retryHostSync()
     expect(await controller.runTask('task-a')).toBe(true)
+    await controller.whenIdle()
     expect(state).toHaveBeenCalledOnce()
     expect(controller.getSnapshot().tasks[0].title).toBe('fresh')
 

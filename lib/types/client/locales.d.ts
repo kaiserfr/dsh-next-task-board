@@ -29,6 +29,15 @@ export declare const zh: {
     'board.updated': string;
     'board.created': string;
     'board.hostError': string;
+    'board.outbox.waiting': string;
+    'board.outbox.retry': string;
+    'board.outbox.discard': string;
+    'board.notice.dismiss': string;
+    'board.refused.archived': string;
+    'board.refused.running': string;
+    'board.refused.same': string;
+    'board.refused.run': string;
+    'board.refused.transition': string;
     'board.hostError.notMounted': string;
     'board.hostError.unauthorized': string;
     'board.hostError.locked': string;
@@ -54,6 +63,8 @@ export declare const zh: {
     'new.aiParseRun': string;
     'new.aiParseCancel': string;
     'new.aiParseEmpty': string;
+    'new.aiParseConflict': string;
+    'new.aiParseApply': string;
     'new.aiParseNoModel': string;
     'new.aiParseUnavailable': string;
     'new.aiParseTimeout': string;
@@ -80,6 +91,7 @@ export declare const zh: {
     'detail.freeze.redacted': string;
     'card.frozen': string;
     'card.running': string;
+    'card.releasePending': string;
     'card.queued': string;
     'card.waiting': string;
     'card.waitingOn': string;
@@ -255,6 +267,7 @@ export declare const zh: {
     'review.unavailable': string;
     'review.unknownError': string;
     'review.pendingAction': string;
+    'review.releasePending': string;
     'review.ports': string;
     'review.release': string;
     'review.releaseHint': string;

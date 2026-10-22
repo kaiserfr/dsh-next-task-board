@@ -1,7 +1,7 @@
 import type { TaskCompose, TaskReview } from './core/tasks.ts';
 import { type ExecutionRecord, type TaskRecord } from './core/tasks.ts';
 import { type StateMachine } from './core/state-machine.ts';
-import { type TaskBoardAction, type TaskBoardSchedulerSnapshot } from './protocol.ts';
+import { type TaskBoardAction, type TaskBoardNotice, type TaskBoardSchedulerSnapshot } from './protocol.ts';
 import { type TaskPermission } from './core/handover.ts';
 import { type GitWorkflow } from './git-workflow.ts';
 export interface LedgerState {
@@ -129,6 +129,23 @@ export declare class HostTaskLedger {
     get maxDoneTasksLimit(): number;
     /** The configurable state machine that validates every move and names its actions. */
     private machine;
+    /**
+     * Per-card work chain: every heavy git job (branch/worktree creation, commit,
+     * merge, worktree removal) runs here, off the action request and strictly in
+     * order for one card. The action path therefore stays synchronous and fast;
+     * an action that needs the result of earlier work awaits the chain first
+     * ({@link awaitCard}), which the service does before applying it.
+     */
+    private readonly cardWork;
+    /** Last background git failure per card (branch/worktree creation). */
+    private readonly gitFailures;
+    /** Cards whose merge release is running right now (derived, never persisted). */
+    private readonly releases;
+    /** Recent derived messages for the board's toast area. */
+    private readonly noticeList;
+    /** Runs opened by a background job (conflict resolution); the service takes them. */
+    private pendingRuns;
+    private disposed;
     constructor(dir?: string, now?: () => number, options?: {
         sessionDefaultPermission?: TaskPermission;
         git?: GitWorkflow;
@@ -149,6 +166,46 @@ export declare class HostTaskLedger {
      * card, or a cleanup notice after the card is gone.
      */
     task(taskId: string): TaskRecord | undefined;
+    /**
+     * Wait until every background git job queued for one card has finished.
+     *
+     * The action path calls this before applying an action that depends on the
+     * card's git state (a commit must be stamped before the card can be released,
+     * a branch must exist before a run starts). It never blocks the browser: the
+     * UI has already accepted the action into its outbox, and the event loop keeps
+     * serving `/state`, `/parse` and SSE while this promise waits.
+     */
+    awaitCard(taskId: string): Promise<void>;
+    /** Merge releases currently running, as the derived snapshot marker. */
+    pendingReleases(): Record<string, {
+        startedAt: number;
+    }>;
+    /** Recent derived Host messages (git failures, refused releases), newest last. */
+    notices(): TaskBoardNotice[];
+    /** Runs opened by a background job; the service schedules them and calls this again. */
+    takeRuns(): OpenedRun[];
+    /**
+     * Make sure the card stands on its feature branch and worktree before a run
+     * starts. Awaits earlier background work first, then creates the branch when
+     * the card has a repository but no branch yet. Fails closed: a git error is
+     * thrown to the caller (which fails the run visibly), never silently ignored.
+     */
+    ensureBranch(taskId: string): Promise<TaskRecord | undefined>;
+    /**
+     * Queue one heavy job on a card's chain. Jobs never reject the chain (their
+     * own errors become notices/card records), so one failure cannot wedge the
+     * card's later work; the chain resolves when the job has written its outcome.
+     */
+    private enqueueCardWork;
+    /**
+     * Patch one card in place and persist when it really changed. Background jobs
+     * use this so a card moved/deleted while the job ran is not resurrected and
+     * an untouched document is not rewritten.
+     */
+    private patchTask;
+    /** Record one derived user-facing message (kept short-lived; never persisted). */
+    private pushNotice;
+    private notify;
     /**
      * Cheap projection for the review plan map: the cards standing in the review
      * column. The derived plans are recomputed on every ledger change, so this
@@ -239,26 +296,31 @@ export declare class HostTaskLedger {
      * Ensure the card has a feature branch before it starts. The backlog →
      * clarification pull normally opens it; a cron trigger or the detail Run
      * button may bypass that, and those runs must not land on the base branch.
-     * No-op without a repository or when a branch already exists.
+     * The branch is created on the card's work chain (off the action request);
+     * the run waits for it in `HostTaskBoardService.launch`, which calls
+     * {@link ensureBranch}.
      */
-    private withFeatureBranch;
+    private ensureFeatureBranchLater;
+    /** Queue `git.openBranch` for one card (no-op when a branch already exists). */
+    private enqueueOpenBranch;
     /**
-     * The card after a transition's git hooks ran, in configured order. Only the
-     * first git action of a transition applies; `"git": false` skips them
-     * entirely; without a repository the hooks are no-ops. Shared by the
-     * single-card and the batch move so a group drop fires exactly the hooks a
-     * single drop of the same card would.
+     * The card after a transition's git hooks were **scheduled**. Only the first
+     * git action of a transition applies; `"git": false` skips them entirely;
+     * without a repository the hooks are no-ops. The hooks run on the card's work
+     * chain instead of inside the action, so a commit or worktree creation never
+     * blocks the event loop or the user. Shared by the single-card and the batch
+     * move so a group drop fires exactly the hooks a single drop would.
      */
     private transitionGit;
     /**
-     * Commit the card's worktree onto its feature branch, stamping `committedAt`.
-     * A git failure never fails the move or the settle — the worktree is the
-     * human's to repair — so the error is appended to the card's newest *settled*
-     * execution `error`, which its execution history shows. A card without one
-     * (never ran, or only a clarification round is open) has nothing to carry it
-     * and only gets a Host warning.
+     * Queue a commit of the card's worktree onto its feature branch. A git failure
+     * never fails the move or the settle — the worktree is the human's to repair —
+     * so the error is appended to the card's newest *settled* execution `error`
+     * and surfaced as a notice. A card without a settled execution has nothing to
+     * carry it and only gets the Host warning + notice.
      */
-    private commitWork;
+    private enqueueCommit;
+    private recordCommitError;
     /**
      * Commit the work an implementation run left behind as it settles, so the
      * worktree never keeps uncommitted card work — not even when the run failed
@@ -274,6 +336,8 @@ export declare class HostTaskLedger {
      * showing the state of the review before it.
      */
     private clearRelease;
+    /** The merge record a release starts from (destructured out of the current card). */
+    private releaseBase;
     /**
      * Release the worktrees of cards that just became archived — the explicit
      * archive action and the Done-column limit alike. Archiving is the last board
@@ -293,32 +357,37 @@ export declare class HostTaskLedger {
     archivedWorktrees(): TaskRecord[];
     /**
      * The merge release of one card: replay its feature branch onto the base
-     * branch as that stands now (other cards may have merged meanwhile) and merge
-     * it back into the base — and, when that replay conflicts, hand the conflict
-     * to the card's agent in the card's own worktree. One automatic resolution run
-     * per release; when that does not resolve it, the release fails visibly.
+     * branch as that stands now and merge it back. The git work is queued on the
+     * card's work chain and the action returns at once with `pending: true`: the
+     * card stays in `ready_for_test` (a derived "release running" marker explains
+     * the wait) until the outcome is written back. Nothing optimistic ever claims
+     * a column the Host has not written.
      *
      * The decision table (the human's "Freigeben (Merge)"):
      *
      * - no branch at all (no repository, or a workspace outside git): the release
-     *   is the plain move to `done`, recorded as {@link TaskMerge.skipped} so the
-     *   card says "no branch" instead of pretending it merged something,
+     *   is the plain move to `done`, recorded as skipped so the card says "no
+     *   branch" instead of pretending it merged something,
      * - merge succeeds: `done`, `TaskGit.mergedAt` and {@link TaskMerge.mergedAt}
      *   stamped,
      * - merge refused (dirty worktree, moved branch, no reviewed commit) or fails:
-     *   the card goes to `failed` with the reason, which is what the review column
-     *   is for — the human sends it back and re-releases it,
-     * - the replay onto the base conflicts: the half-done rebase is left in the
-     *   card's own worktree, where the conflict is in front of the agent; the card
-     *   goes to `running` on a `merge` run whose settle retries the release
-     *   ({@link finishMergeRun}).
-     * @param task - the card being released.
-     * @param now - instant the release (or the failure) is stamped with.
-     * @param initiator - session that asked for the release, for the run record.
-     * @returns the card as it stands afterwards, plus the resolution run if one
-     *   was opened.
+     *   the card goes to `failed` with the reason,
+     * - the replay conflicts: the half-done rebase is left in the card's own
+     *   worktree and the card goes to `running` on a `merge` run; one automatic
+     *   resolution run per release, whose settle retries the release.
      */
-    private releaseCard;
+    private beginRelease;
+    private enqueueRelease;
+    /**
+     * The background half of a release: check the card is still the card the
+     * human approved, then run the merge and write the outcome back. A card that
+     * left the review column meanwhile is never moved by a late release.
+     */
+    private runRelease;
+    /** Write a finished release back to the ledger (the only place a release moves a card). */
+    private finishRelease;
+    /** Persist one release result and keep the Done-column limit converged. */
+    private applyReleaseResult;
     /**
      * Hand the release's conflict to the card's agent. The replay onto the base is
      * already sitting in the card's own worktree — conflict markers, a rebase
@@ -332,14 +401,15 @@ export declare class HostTaskLedger {
      */
     private resolveConflict;
     /**
-     * What the release does once its resolution run settled. A run that did not
+     * What happens once a conflict-resolution run settled. A run that did not
      * succeed (or one that ended with the replay still unfinished) leaves the
      * conflict unresolved: the worktree is put back into a clean state, the card
      * says why, and the release ends in `failed` — the second attempt the decision
-     * allows is used up. A run that did resolve it makes the Host retry the merge,
-     * which either finishes the release (`done`) or fails it.
+     * allows is used up. A run that did resolve it queues the release retry after
+     * that run's settle commit, which either finishes the release (`done`) or
+     * fails it.
      */
-    private finishMergeRun;
+    private onMergeRunSettled;
     dispose(): void;
     applyRequest(requestId: string, action: TaskBoardAction, initiator?: string): {
         state: LedgerState;
@@ -390,6 +460,5 @@ export declare class HostTaskLedger {
     /** Atomic write of the scheduler heartbeat sidecar (0600, tmp + rename + fsync). */
     private writeSchedulerSidecar;
     private commit;
-    private notify;
     private acquireLock;
 }
