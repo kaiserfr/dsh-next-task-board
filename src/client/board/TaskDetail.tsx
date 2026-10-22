@@ -1,17 +1,19 @@
 /**
  * Task detail: the full view of one task — content, prompt, execution
- * history — and the only place execution can be triggered. Also offers
- * delete (with confirmation), manual status moves, and a jump to the
- * execution's session transcript.
+ * history — and the only place a manual transition (including a run start) can
+ * be triggered. Offers delete (with confirmation), the transition buttons with
+ * their queued/disabled reasons, and a jump to the execution's session
+ * transcript.
  */
 import { useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron } from '../../core/schedule.ts'
-import { resolveStateMachine, type TaskStatus } from '../../core/state-machine.ts'
+import { resolveStateMachine } from '../../core/state-machine.ts'
 import { TASK_PERMISSIONS, isTaskPaused, openExecution, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
+import { transitionBlockerOf, transitionStartsExecution } from '../../core/transitions.ts'
 import { canEditTaskContent } from '../../core/use-cases/task-update.ts'
 import { requiresPermissionConfirmation } from '../../core/handover.ts'
-import { dictionary, t, type TaskBoardKey } from '../locales.ts'
+import { t, type TaskBoardKey } from '../locales.ts'
 import { SCHEDULE_PRESETS } from '../schedule-presets.ts'
 import css from '../board.module.css'
 import { ConfirmDialog } from './ConfirmDialog.tsx'
@@ -20,16 +22,7 @@ import { NewTaskModal } from './NewTaskModal.tsx'
 import { ReviewSection } from './ReviewSection.tsx'
 import { formatHostTimestamp, formatTime } from './TaskCard.tsx'
 import { STATUS_KEY } from './status-key.ts'
-
-/**
- * Label of a manual-move chip. The machine may name a target the shipped
- * dictionary has no wording for (a custom column); the column's own label is
- * then better than a missing-key artifact.
- */
-function moveLabel(status: TaskStatus): string {
-  const key = `status.move.${status}` as TaskBoardKey
-  return key in dictionary() ? t(key) : t(STATUS_KEY[status])
-}
+import { blockerText, moveLabel, queuedTransitionText, transitionErrorText } from './transition-text.ts'
 
 /** Execution outcome → locale key. */
 const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TaskBoardKey> = {
@@ -307,7 +300,6 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
   }, [task.id])
   const current = latest
   const snapshot = controller.getSnapshot()
-  const running = current.status === 'running'
   // Any open execution — the run in `running` and the clarification run the
   // card holds in `clarification` alike — turns the footer's play button into
   // the run's pause/play control.
@@ -325,13 +317,25 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
   const transportError = snapshot.transportError
   const timeZone = snapshot.host?.scheduler.timeZone
   const permissionPending = requiresPermissionConfirmation(current, snapshot.host?.sessionDefaultPermission)
-  // Manual move targets come from the machine the Host enforces, so a chip is
-  // never offered for a move the Host would refuse. A target whose transition
-  // carries the `run` action is an execution start (this card's own Run
-  // button), not a status move.
+  // Every manual transition the Host's machine allows from this column gets a
+  // button — including the `clarify` step and the `run` starts. The old footer
+  // Run button is gone: a start is a transition like any other, so it cannot
+  // bypass the clarification step from backlog/done.
   const machine = resolveStateMachine(snapshot.host?.stateMachine).machine
   const moveTargets = machine.targets(current.status)
-    .filter(status => !machine.actionsFor(current.status, status).includes('run'))
+  const queuedTransition = (snapshot.pendingTransitions ?? []).find(entry => entry.taskId === current.id)
+  const transitionError = snapshot.transitionErrors?.[current.id]
+  const blockerFor = (status: typeof moveTargets[number]) =>
+    transitionBlockerOf(current, machine, status, snapshot.host?.sessionDefaultPermission)
+  const startsExecution = (status: typeof moveTargets[number]) =>
+    transitionStartsExecution(machine, current.status, status)
+  const reasonFor = (status: typeof moveTargets[number]): string | undefined => {
+    const blocker = blockerFor(status)
+    if (blocker !== undefined) return blockerText(blocker)
+    if (queuedTransition?.to === status) return t('detail.transition.queuedHint')
+    if (startsExecution(status)) return t('status.move.startsHint')
+    return undefined
+  }
 
   return (
     <div className={css.modalBackdrop} onMouseDown={event => { if (event.target === event.currentTarget) controller.closeTask() }}>
@@ -389,6 +393,64 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
             <h4>{t('detail.description')}</h4>
             <p className={css.detailText}>{current.description !== '' ? current.description : '—'}</p>
           </section>
+
+          {!archived && (
+            <section className={css.detailSection} data-dsh-part="detail-transitions">
+              <h4>{t('board.status')}</h4>
+              {moveTargets.length === 0 ? (
+                <p className={css.detailText}>{t('detail.transition.none')}</p>
+              ) : (
+                <div className={css.moveRow}>
+                  {moveTargets.map(status => {
+                    const blocker = blockerFor(status)
+                    const queuedHere = queuedTransition?.to === status
+                    const starts = startsExecution(status)
+                    return (
+                      // The wrapper owns the tooltip: a disabled native button
+                      // does not reliably show one, and the reason is exactly
+                      // what the empty/disabled control has to explain.
+                      <span key={status} className={css.moveButtonWrap} title={reasonFor(status)}>
+                        <button
+                          type="button"
+                          className={css.ghostButton}
+                          disabled={blocker !== undefined || queuedHere}
+                          title={reasonFor(status)}
+                          data-dsh-part="transition-button"
+                          data-target={status}
+                          data-blocker={blocker}
+                          data-queued={queuedHere || undefined}
+                          data-starts={starts || undefined}
+                          onClick={() => { controller.moveTask(current.id, status) }}
+                        >
+                          {queuedHere
+                            ? t('detail.transition.waitingShort')
+                            : (
+                              <>
+                                {starts && <span aria-hidden="true">▶ </span>}
+                                {moveLabel(status)}
+                              </>
+                            )}
+                        </button>
+                      </span>
+                    )
+                  })}
+                </div>
+              )}
+              {queuedTransition !== undefined && (
+                <p className={css.transitionQueued} data-dsh-part="transition-queued" role="status">
+                  <span>{queuedTransitionText(queuedTransition)}</span>
+                  <button type="button" className={css.linkButton} onClick={() => { controller.cancelTransition(current.id) }}>
+                    {t('detail.transition.cancel')}
+                  </button>
+                </p>
+              )}
+              {transitionError !== undefined && (
+                <p className={css.formError} data-dsh-part="transition-error">
+                  {transitionErrorText(transitionError)}
+                </p>
+              )}
+            </section>
+          )}
 
           {current.tags !== undefined && current.tags.length > 0 && (
             <section className={css.detailSection} data-dsh-part="tags">
@@ -513,25 +575,6 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
             )}
           </section>
 
-          {!archived && (
-            <section className={css.detailSection}>
-              <h4>{t('board.status')}</h4>
-              <div className={css.moveRow}>
-                {moveTargets.map(status => (
-                  <button
-                    key={status}
-                    type="button"
-                    className={css.ghostButton}
-                    disabled={current.status === status || running || pending}
-                    onClick={() => { controller.moveTask(current.id, status) }}
-                  >
-                    {moveLabel(status)}
-                  </button>
-                ))}
-              </div>
-            </section>
-          )}
-
           {!archived && current.reworkAt !== undefined && (
             <section className={css.detailSection} data-dsh-part="rework-stamp">
               <h4>{t('detail.rework')}</h4>
@@ -594,24 +637,6 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
             >
               <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>{' '}
               {paused ? t('detail.continue') : t('detail.pause')}
-            </button>
-          )}
-          {!archived && !paused && !openRun && (
-            <button
-              type="button"
-              className={css.primaryButton}
-              // A human run is the go-ahead: the Host closes the card's open
-              // clarification round and continues its session with the
-              // implementation, so the button is offered like the drop.
-              disabled={pending}
-              onClick={() => {
-                void Promise.resolve(controller.rerunTask(current.id)).then(() => {
-                  if (controller.getSnapshot().transportError === undefined) controller.closeTask()
-                })
-              }}
-            >
-              <span aria-hidden="true">▶</span>{' '}
-              {current.executions.length === 0 ? t('detail.run') : t('detail.rerun')}
             </button>
           )}
           {archived ? (

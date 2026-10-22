@@ -21,14 +21,14 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 1 | **Mehr können** | Host-erzwungenes WIP-Limit **je Workspace/Lane** `maxConcurrentRuns` (Default `1`) mit FIFO-Queue — gilt für **Implementierungsläufe** („In progress", Cron); Klärungsläufe in „Klärung" sind WIP-frei (siehe 14 und 17) |
 | 2 | Datenschutz | Installations-Heartbeat an `dsh-market.com` entfernt |
 | 3 | Paketierung | Eigenständiges Repo statt Monorepo (Build-Preset vendored in `build/`) |
-| 4 | **Mehr können** | Karte auf „In Arbeit" ziehen startet den Task (Host-Aktion `rerun`) |
+| 4 | **Mehr können** | Karte auf „In Arbeit" ziehen startet den Task (Host-Übergang `move` mit `run`, über die asynchrone Übergangs-Queue) |
 | 5 | Paketierung | `lib/` wird committet → Installation ohne Build-Schritt |
 | 6 | **Mehr können** | Agentic-Programming-Defaults: Spalte „Ready for test" vor „Done", neue Tasks ins Backlog, git-Feature-Branch-Automatik |
 | 7 | **Mehr können** | Host-erzwungenes Done-Spalten-Limit `maxDoneTasks` (Default `9`) mit FIFO-Verdrängung ins Archiv |
 | 8 | **Mehr können** | Konfigurierbare State-Engine (`stateMachine`): Spalten = Zustände, erlaubte Übergänge + Übergangs-Aktionen deklarativ, Drag & Drop dagegen validiert |
 | 9 | **Mehr können** | Läuft-jetzt-Karte unübersehbar markiert (Rahmen, Warn-Hintergrund, Ring, Abzeichen); WIP-Spalte als Queue sortiert (laufende Karte oben, wartende in Ankunftsreihenfolge) |
 | 10 | **Mehr können** | Direkter Sprung von der Karte in die Session: Link in der Karten-Ecke, für aktive und inaktive Sessions; `#session=<id>`-Deep-Link (neuer Tab / kopierte URL), Roster-Refresh vor dem Retry |
-| 11 | **Mehr können** | Mehrfachauswahl und Gruppen-Verschieben: Karten per Klick, Ctrl/Cmd-Klick und Shift-Bereich markieren (Doppelklick öffnet weiterhin das Detail), eine markierte Karte ziehen bewegt die ganze Auswahl als **eine** atomare Host-Aktion `move-many` |
+| 11 | **Mehr können** | Mehrfachauswahl und Gruppen-Verschieben: Karten per Klick, Ctrl/Cmd-Klick und Shift-Bereich markieren (Doppelklick öffnet weiterhin das Detail), eine markierte Karte ziehen trägt die ganze Auswahl; Host-seitig bekommt jede Karte ihren eigenen Übergang in der asynchronen Queue |
 | 12 | **Mehr können** | Korrektur nach Test: Karte von „Ready for test" zurück nach „Klärung" mit Anmerkung; die Anmerkung geht als **eigene neue Nachricht** in die vorherige Session (der ursprüngliche Prompt bleibt unverändert) |
 | 13 | **Mehr können** | Inhalte bleiben editierbar, solange die Karte in „Backlog"/„Klärung" wartet — auch nach einem früheren Lauf; der Text der Box „Parse with AI" liegt als `parseText` an der Karte und wird beim Bearbeiten wiederverwendet |
 | 14 | **Mehr können** | Klärungsschritt vor der Implementierung *(seit 23 in der eigenen Spalte „Klärung“ statt in Todo)*: `backlog → clarification` startet für **jede** Karte ihren Lauf (Aktion `clarify`) — dieselbe Execution wie in der In-Progress-Spalte (gleiche Start-Queue, aber **WIP-frei**: startet sofort statt „Queued", pausierbar), nur der Prompt ist der Karten-Prompt plus Klärungsblock („Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts." … „Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".") samt System-Prompt-Stoppregel, die in jedem Turn gilt; **der Agent stellt seine offenen Fragen im Chat der Karte**, der Nutzer antwortet dort (kein Fragenfeld, kein `openQuestions`/`questionsResolvedAt`); die Karte bleibt in Klärung, das Ziehen nach In Progress schließt die Runde und setzt **dieselbe Session** mit „Bitte jetzt implementieren." fort, direktes Ziehen Backlog → In Progress bleibt unmöglich |
@@ -96,10 +96,11 @@ Die englische Fassung dieser Übersicht steht im README unter
      `scripts/`-Werkzeuge des Monorepos existieren hier nicht.
 4. **Ziehen nach „In Arbeit" startet den Task** — die `running`-Spalte ist ein
    Drop-Ziel: eine Karte aus einer anderen Spalte dorthin zu ziehen sendet
-   dieselbe Host-Aktion wie der „Run"-Button im Detail (`rerun`), der Task läuft
-   also wirklich über die Host-Queue an und wird nicht nur manuell umgebucht.
-   Wartende und bereits laufende Karten werden ignoriert; `backlog` bleibt ein
-   reiner manueller Spaltenwechsel. Seit dem Klärungsschritt (Punkt 14) startet
+   denselben Host-Übergang `move` (mit `run`) wie die Übergangs-Buttons im
+   Detail; der Task läuft also wirklich über die Host-Queue an und wird nicht
+   nur manuell umgebucht. Eine Karte mit laufender Host-Aktion wird eingereiht,
+   bereits laufende/archivierte/ungültige Karten werden mit Grund abgelehnt;
+   `backlog` bleibt ein reiner manueller Spaltenwechsel. Seit dem Klärungsschritt (Punkt 14) startet
    auch `backlog → todo` einen echten Lauf (über dieselbe Start-Queue, aber
    WIP-frei — siehe Punkt 14 —, mit Klärungs-Prompt); `backlog → running` existiert nicht mehr, und ein
    unbeaufsichtigter Lauf (cron) startet eine Karte mit ungeklärten offenen
@@ -285,15 +286,15 @@ Die englische Fassung dieser Übersicht steht im README unter
       mit; Ziehen an einer nicht markierten Karte bewegt weiterhin nur diese
       eine Karte. Das Drag-Payload hält die Lead-Id in `text/plain` (wie bisher)
       und die ganze Id-Liste in `application/x-dsh-taskboard-cards`.
-    - Der Host bekommt **eine** atomare Aktion `move-many`: er prüft die ganze
-      Gruppe vor dem Schreiben, ein ungültiger Eintrag lässt den gesamten Stapel
-      unverändert (`revision` steigt genau einmal). Karten, die die
-      Zustandsmaschine nicht in die Zielspalte lässt, bleiben zurück; ist keine
-      ziehbar, passiert gar nichts und die Auswahl bleibt stehen.
-    - Die Reihenfolge der bewegten Karten untereinander bleibt erhalten (der
-      Host behält die Ledger-Reihenfolge). Ablage auf der „In Arbeit"-Spalte
-      startet jede gültige Karte nacheinander über den bestehenden
-      `rerun`-Pfad, damit die Einzel-Lauf-Invariante des Runners gilt.
+    - Der Host bekommt **pro Karte** einen Übergang in der asynchronen Queue; die
+      frühere atomare `move-many`-Aktion wird vom Browser nicht mehr gesendet.
+      Karten, die die Zustandsmaschine nicht in die Zielspalte lässt, bleiben
+      zurück und tragen den Grund an der Karte; ist keine ziehbar, passiert gar
+      nichts und die Auswahl bleibt stehen.
+    - Jede Karte behält ihre eigene letzte Absicht (ein neuer Klick ersetzt
+      sie). Ablage auf der „In Arbeit"-Spalte reiht für jede gültige Karte
+      ihren `move`-Übergang ein; die Einzel-Lauf-Invariante des Runners gilt
+      weiterhin.
     - Rückmeldung: markierte Karten tragen Akzentrahmen und Tönung, die gezogenen
       Karten werden abgedunkelt, ein Zähler nennt die Anzahl. Die Auswahl ist
       reiner Browser-Zustand (wie der Filter) und steht nicht im Ledger; nach

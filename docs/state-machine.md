@@ -92,7 +92,7 @@ every card — the column is where the agent asks before anything is implemented
   rule interpolates the very lines the run sends (`CLARIFICATION_ADDENDUM`). It
   keeps the card in `clarification` — settling the run never changes the column.
 * **The human closes the step by starting the work.** Pulling the card from
-  `clarification` straight on to the run column — or its Run button — is the
+  `clarification` straight on to the run column — or its Running transition button — is the
   **go-ahead**: it closes the card's open clarification round (recorded as
   cancelled; a round whose launch has not started yet is dropped, and one whose
   session is still being created has that late session stopped instead of
@@ -108,10 +108,10 @@ every card — the column is where the agent asks before anything is implemented
 * A drag straight from `backlog` to `running` has no transition at all: the
   card must pass `clarification` first. From `clarification` the run column is
   reachable directly.
-* A **group drop** (`move-many`) never opens executions: a batch onto a
-  transition that carries `run` *or* `clarify` is refused, so a batch can never
-  start runs and never park a card in the clarification column without its
-  round.
+* The Host's own **`move-many`** action never opens executions: a batch onto a
+  transition that carries `run` *or* `clarify` is refused. The board's group
+  drop no longer uses that batch action — it queues one ordinary transition per
+  card, so each card keeps its own source/target and may start its own run.
 
 ## Actions attached to transitions
 
@@ -120,7 +120,7 @@ every card — the column is where the agent asks before anything is implemented
 | `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch **and its own worktree** under `$DSH_HOME/task-board/worktrees/<id>`: the run session is created on that directory, so the main checkout keeps the branch the human left it on. A branch that already exists is re-attached; where `git worktree` refuses, the historical shared checkout is used instead. No-op without a git repository. |
 | `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp) and stamps the resulting head as `reviewedCommit` — the commit the review column shows, cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
 | `git.mergeBranch`   | Replays the feature branch onto its base branch as that stands now (`git rebase` — other cards may have merged meanwhile) and merges it back — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused before anything is replayed. On the release into `done` this is the merge release: a refusal or a failure parks the card in `failed` with the reason, and a **conflict** in the replay is resolved by the card's own agent instead (see *Merge release*). |
-| `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start from `clarification` closes the open clarification round and continues the card's clarification session; the detail Run button and cron do the same. It never checks a specification release: starting the work *is* the go-ahead. |
+| `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start from `clarification` closes the open clarification round and continues the card's clarification session; the detail transition buttons and cron do the same. It never checks a specification release: starting the work *is* the go-ahead. |
 | `clarify`           | Opens the card's clarification run: the same execution as `run` (same queue, but WIP-free — the clarification column starts without waiting for a lane slot), its prompt asks the agent's open questions in the card's chat and stops, it checks no branch out, and settling it leaves the card in its column. |
 | `{ kind: "stamp", field: "doneAt" }` | Writes a timestamp into a task field.                    |
 
@@ -145,7 +145,7 @@ Work on a card happens on its **feature branch**, and the worktree is never left
 holding uncommitted card work:
 
 * The branch is cut when the card enters `clarification` (and at run start when
-  a cron trigger or the Run button skipped that step). The card gets its **own
+  a cron trigger or a manual transition skipped that step). The card gets its **own
   worktree** there, and the run's session is created in it (`cwd`), so the main
   checkout is never used as the card's workspace: a clarification round of
   another card of the same workspace cannot yank a working run's directory, and
@@ -277,10 +277,10 @@ Host action) — go through the same Host routine, so the two can never disagree
   release failed keeps that merge section — the reason is what the correction is
   written about — while the column's controls (release, start/stop) are gone with
   the column.
-* **Group drops stay strict.** `move-many` never starts runs (nor resolution
-  runs), so a batch onto Done keeps the plain merge hook: a card that cannot be
-  merged aborts the whole drop and nothing moves. The release with its automatic
-  resolution is the single-card path.
+* **Group drops are per-card.** The Host's `move-many` action still never starts
+  runs (nor resolution runs), but the board no longer sends it: each card queues
+  its own transition, so a group onto Done releases each card independently — a
+  merge failure parks that card in `failed` without aborting the others.
 
 
 ## Repository discovery: `repoSubpath`

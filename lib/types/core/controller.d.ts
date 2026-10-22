@@ -13,6 +13,7 @@
  */
 import type { TaskStore } from './store.ts';
 import { type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts';
+import { type QueuedTransition, type TransitionBlocker, type TransitionError } from './transitions.ts';
 import { type TaskUpdatePatch } from './use-cases/task-update.ts';
 import type { TaskBoardAction, TaskBoardEventPayload, TaskBoardParseDraft, TaskBoardParseRequest, TaskBoardReviewRequest, TaskBoardReviewResponse, TaskBoardSnapshot } from '../protocol.ts';
 export interface TaskBoardTransport {
@@ -141,6 +142,14 @@ export interface ControllerSnapshot {
     /** Recent user-facing messages (refusals, Host rejections, background failures). */
     notices?: readonly BoardNotice[];
     /**
+     * Transition intents waiting for their turn (at most one per card; a newer
+     * click replaces the older intent). Browser view state only, never ledger
+     * state: the Host confirms the move before the card changes column.
+     */
+    pendingTransitions?: readonly QueuedTransition[];
+    /** The last transition failure per card, cleared by the card's next action. */
+    transitionErrors?: Readonly<Record<string, TransitionError>>;
+    /**
      * Keys of the modal form drafts the controller currently holds (see
      * {@link BoardController.saveFormDraft}). The board marks "new task" while
      * the blank form's draft waits, so a kept draft is visible before the popup
@@ -199,6 +208,17 @@ export declare class BoardController {
     private outboxError;
     private readonly noticeList;
     private readonly seenHostNotices;
+    /**
+     * Transition intents (a status move that starts a run/clarify included).
+     * One per card: a newer click replaces the older intent. They wait outside
+     * the outbox until no action for the card is in flight, then enter it; the
+     * outbox owns retries and request-id idempotency.
+     */
+    private readonly transitionQueue;
+    /** Last transition failure per card; cleared by the card's next action. */
+    private readonly transitionErrors;
+    private transitionPumpQueued;
+    private pumpingTransitions;
     /**
      * Modal form drafts, keyed per modal (the client owns the key vocabulary).
      * They live here — not in the popup components — so closing a popup by an
@@ -306,20 +326,35 @@ export declare class BoardController {
      */
     parseTaskDraft(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>;
     /**
-     * Move one card. Host-backed: accepted immediately and queued per card; the
-     * card moves when the Host confirms (or the rejection arrives as a notice).
+     * Ask for a manual status move. Host-backed this only enqueues the intent:
+     * the controller sends it (through the outbox) when no other action for the
+     * card is in flight and the machine/preconditions allow it, then waits for
+     * the confirmed snapshot. The legacy in-memory path still applies the move
+     * synchronously.
      */
     moveTask(id: string, status: TaskStatus): void;
     /**
-     * Move a group of cards to one status as a single ledger action (group drag).
-     * The Host validates the whole batch before writing any card, so the move is
-     * all-or-nothing and the cards keep their order among themselves.
+     * Move a group of cards to one status. Host-backed each card gets its own
+     * queued intent (the "last click wins" rule is per card), so one card's
+     * blocker never holds back the others; the legacy path keeps the single
+     * in-memory write.
      * @param ids - the dragged cards; duplicates are ignored.
      * @param status - the target column.
-     * @returns whether the batch was accepted locally (always true on the legacy
-     * in-memory path); the board clears its selection on that.
+     * @returns whether the intents were accepted into the queue (always true on
+     * the legacy path); the board clears its selection on success only.
      */
     moveTasks(ids: readonly string[], status: TaskStatus): Promise<boolean>;
+    /**
+     * Drop the card's waiting transition intent. A move already handed to the
+     * outbox is not retracted (the intent leaves the queue before that), so the
+     * cancel control only exists while the card is actually waiting.
+     */
+    cancelTransition(taskId: string): void;
+    /**
+     * Record why a drop/click could not even be queued (hard blocker). The card
+     * shows a badge and the detail the reason until its next action.
+     */
+    noteTransitionBlocked(taskId: string, blocker: TransitionBlocker, to?: TaskStatus): void;
     deleteTask(id: string): void;
     /**
      * Archive a task from any status but `running`, whose lifecycle the runner
@@ -457,6 +492,30 @@ export declare class BoardController {
      */
     private onSessionsChanged;
     private persistAndNotify;
+    /** The machine the Host currently enforces (the shipped one as fallback). */
+    private transitionMachine;
+    /**
+     * Queue one manual move for the card. Hard blockers are refused at once (the
+     * button is disabled for them anyway) and recorded so the popup/card can say
+     * why; a valid intent replaces any older waiting intent for the same card.
+     */
+    private enqueueTransition;
+    private failTransition;
+    /** Schedule a pump after the current microtask queue (deduped). */
+    private scheduleTransitionPump;
+    /**
+     * Send every intent whose card is free. A card with an outbox action is
+     * skipped (the outbox hooks pump again when that action settles); a card
+     * whose source column changed, or that hit a hard blocker in the meantime,
+     * loses its intent with a recorded reason.
+     */
+    private pumpTransitionQueue;
+    /**
+     * Hand one intent to the outbox. The outbox serialises per card, retries a
+     * broken connection with the same request id and reports a definitive
+     * rejection through the hook, so the intent queue never duplicates that work.
+     */
+    private sendQueuedTransition;
     /**
      * Accept one action and hand it to the Host in the background. The UI is
      * acknowledged immediately; the card's FIFO chain keeps actions in order and

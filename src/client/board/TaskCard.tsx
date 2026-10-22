@@ -1,10 +1,10 @@
 /**
  * Task card: the board's column item. A plain click marks the card (the
  * board owns the Ctrl/Shift/Space rules), a double click opens the task
- * detail — it never executes anything directly (detail holds the Run button).
- * A card whose latest execution carries a session also renders a direct
- * session link, for a running (active) and a settled (inactive) execution
- * alike.
+ * detail — it never executes anything directly (detail holds the transition
+ * buttons, including the run starts). A card whose latest execution carries a
+ * session also renders a direct session link, for a running (active) and a
+ * settled (inactive) execution alike.
  *
  * The link is a sibling of the card button, not a child: a button may not hold
  * interactive content, and a nested anchor would not be keyboard-reachable.
@@ -18,10 +18,12 @@
 import { memo, type DragEvent, type KeyboardEvent, type MouseEvent } from 'react'
 import type { TaskRecord, WaitingReason } from '../../core/tasks.ts'
 import { isTaskExecuting, isTaskPaused, tagTone } from '../../core/tasks.ts'
+import type { QueuedTransition, TransitionError } from '../../core/transitions.ts'
 import { mergeStateOf, type MergeState } from '../../core/merge.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import { sessionLinkHref } from '../session-link.ts'
 import css from '../board.module.css'
+import { queuedTransitionText, statusLabel, transitionErrorText } from './transition-text.ts'
 
 /** Badge wording of one merge state (the card's own one-word verdict). */
 const MERGE_KEY: Record<MergeState, TaskBoardKey> = {
@@ -60,20 +62,33 @@ export function formatTime(ms: number, timeZone?: string): string {
 /**
  * Whether a card may be dragged at all: archived cards are read-only and a card
  * the runner owns (`running`) must not be moved while its execution settles.
- * A card with an action in the outbox is deliberately **not** excluded any more:
- * further actions queue behind it, so the user is never blocked by a running
- * backend call. The board reuses this to decide which cards a group drag may
- * carry.
+ * A card with an action in the outbox is deliberately **not** excluded: further
+ * actions queue behind it, so the user is never blocked by a running backend
+ * call. The board reuses this to decide which cards a group drag may carry.
  */
 export function isCardDraggable(task: TaskRecord): boolean {
   return task.archivedAt === undefined && task.status !== 'running'
 }
 
-function TaskCardInner({ task, pending, releasePending, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+/**
+ * Whether a card may take part in the selection's bulk archive/delete. The
+ * broader drag rule deliberately does not apply here: archiving a card while a
+ * Host action for it is on the wire would race that action, so pending cards
+ * remain out of the bulk actions even though they can be dragged.
+ */
+export function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean {
+  return isCardDraggable(task) && !pending
+}
+
+function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
   task: TaskRecord
   pending: boolean
   /** A merge release of this card runs in the Host's background. */
   releasePending?: boolean
+  /** The card's waiting transition intent (one per card), if any. */
+  pendingTransition?: QueuedTransition
+  /** The last discarded/failed transition, until the card's next action. */
+  transitionError?: TransitionError
   timeZone?: string
   selected: boolean
   dragging: boolean
@@ -108,6 +123,8 @@ function TaskCardInner({ task, pending, releasePending, timeZone, selected, drag
   const executing = !archived && isTaskExecuting(task)
   const queued = !archived && !executing && !paused && !pending && latest !== undefined && latest.endedAt === undefined
   const isDraggable = isCardDraggable(task)
+  const transitionErrorTextOf = transitionError === undefined ? undefined : transitionErrorText(transitionError)
+  const transitionQueuedTextOf = pendingTransition === undefined ? undefined : queuedTransitionText(pendingTransition)
   // The pause button covers every open run of the card: the executing one (its
   // session is stopped) and the queued one (it never starts). A paused card
   // offers the same button as a play button to resume the run. The card's
@@ -155,7 +172,7 @@ function TaskCardInner({ task, pending, releasePending, timeZone, selected, drag
         onClick={onClick}
         onKeyDown={onKeyDown}
         onDoubleClick={onDoubleClick}
-        title={waitingTooltip ?? (task.description !== '' ? task.description : task.title)}
+        title={transitionErrorTextOf ?? waitingTooltip ?? (task.description !== '' ? task.description : task.title)}
       >
         <span className={css.cardTitle}>{task.title}</span>
         {task.tags !== undefined && task.tags.length > 0 && (
@@ -177,6 +194,23 @@ function TaskCardInner({ task, pending, releasePending, timeZone, selected, drag
         {task.description !== '' && <span className={css.cardExcerpt}>{task.description}</span>}
         <span className={css.cardMeta}>
           <span className={css.cardTime}>{t('board.updated')} {formatTime(task.updatedAt)}</span>
+          {pendingTransition !== undefined && (
+            // The waiting intent stays visible after the detail popup closes:
+            // one target per card, the last click wins.
+            <span className={css.cardTransition} data-dsh-part="card-transition-queued" title={transitionQueuedTextOf}>
+              → {statusLabel(pendingTransition.to)}
+            </span>
+          )}
+          {transitionError !== undefined && (
+            <span
+              className={css.cardTransition}
+              data-error="true"
+              data-dsh-part="card-transition-error"
+              title={transitionErrorTextOf}
+            >
+              !
+            </span>
+          )}
           {task.freeze !== undefined && (
             <span className={css.cardSchedule} title={task.freeze.goal}>{t('card.frozen')}</span>
           )}

@@ -18,14 +18,14 @@
 | --- | --- | --- |
 | **执行并发** | 到点即启动，不限制同时持有会话的运行数。 | **Host 侧按工作区计的 WIP 上限** `maxConcurrentRuns`（默认 **1**）：同一工作区超出的运行先入 FIFO 队列，按先来后到、在名额空出后立刻启动；不同工作区各自成 lane，可并行。名额由**已挂上会话且尚未结算**的实现运行占据：会话名册的「空闲」只表示此刻没有 turn 在跑，并不等于运行结束——agent 中途提问而结束回合的运行仍持有 worktree 与分支，因此不释放名额（否则同一 lane 的第二条会话会并发改同一份检出）。名额只由结算（会话结束后的自动结算）或暂停释放。**澄清列不受 WIP 限制**：拖进澄清列的卡片其澄清运行立即启动，即使同一工作区已有卡片在实现。 |
 | **Done 列** | 无上限增长；归档只能手动。 | **Host 侧 Done 列上限** `maxDoneTasks`（默认 **9**）：移入 Done 后若超出上限，按进入 Done 的先后自动把最早的卡片（FIFO）归档，只归档到刚好满足上限为止；不删除，可在归档视图找回。应用上限时（Host 启动或设置变更）也会立即收敛已超限的列。 |
-| **从看板启动** | 拖拽只是在 `backlog` 与 `todo` 之间手动改状态。 | **把卡片拖到 running 列即启动任务**，与详情页「运行」按钮走同一个宿主动作。 |
-| **多选卡片** | 一次只能拖一张；批量移动只能逐张拖。 | **多选 + 整组拖拽**：点卡片标记（Ctrl/Cmd 点击增减、Shift 点击选区间），再拖任意一张已标记的卡片，整组一起移动；双击卡片打开详情，点看板空白处或清除按钮清空选择，未标记的卡片仍然只移动自己。Host 收到的是**一个**原子动作 `move-many`——要么全部移动、要么一张都不动；状态机不允许进入目标列的卡片留在原地。 |
+| **从看板启动** | 拖拽只是在 `backlog` 与 `todo` 之间手动改状态。 | **把卡片拖到 running 列即启动任务**，与详情页状态转移按钮走同一个宿主转移。 |
+| **多选卡片** | 一次只能拖一张；批量移动只能逐张拖。 | **多选 + 整组拖拽**：点卡片标记（Ctrl/Cmd 点击增减、Shift 点击选区间），再拖任意一张已标记的卡片，整组一起移动；双击卡片打开详情，点看板空白处或清除按钮清空选择，未标记的卡片仍然只移动自己。Host 侧每张卡片各自入队状态转移（后来的一次点击只替换该卡片自己的意图），不再是一个原子的 `move-many` 动作；状态机不允许进入目标列的卡片留在原地并显示原因。 |
 | **卡片直达会话** | 卡片只为最近一次执行显示一个会话符号；要查看 transcript 得先打开详情、再找到执行记录。 | **每张带会话的卡片都直接链接到该会话**：卡片角上的链接直接跳到 transcript，运行中（active）与已结束（inactive）的执行都一样，无需打开详情。链接是带 `#session=<id>` 深链的锚点，因此中键 / Ctrl 点击或复制 URL 也能打开会话——本地名录还没有该 id 时会先刷新会话名录，确实未知的会话会明确报错而不是静默失败。 |
 | **运行中卡片与 WIP 顺序** | `running` 列与其他列外观一致，卡片按账本顺序排列。 | **此刻持有会话**的卡片一眼可辨（加粗警告色边框、警告色底、脉冲光环与 “Running now” 徽标）；仍在等待 WIP 名额的卡片保持细边框并标记 “Queued”。该列按队列排序：正在运行的卡片在最上，等待中的运行按到达顺序排列——最后拖入的卡片在最下面。 |
 | **暂停运行中的任务** | 运行中的卡片只能在聊天界面里取消会话；卡片随后按结果落到对应列。 | **运行中可暂停/继续**：看板顶栏按钮**一次点击暂停「进行中」列的全部卡片**（每张卡片保留所在列与执行记录），运行打开时卡片角上是暂停符号、暂停后是播放符号，详情页的执行按钮就是同一个控件。暂停会停止该运行的会话，该运行不再算「正在运行」（不再被监控、不占 WIP 名额）；继续时在同一会话里写入一条简短的 **「继续」消息** —— 卡片全程不换列。只剩已暂停卡片时，批量按钮变为「全部继续」。 |
 | **看板流程** | 五列；新任务落在 `todo`。 | **面向 agentic programming 的默认值**：六列——**Backlog → 澄清（Clarification）→ In progress → 待测试（Ready for test）→ Failed → Done**，**待测试**紧邻 Failed 之前，**Done** 为最后一列；新任务落在 **Backlog**；执行成功后卡片停在 Ready for test，Done 只能手动到达。 |
 | **状态机** | 列与允许的移动写死在代码里。 | **可配置状态机** `stateMachine`：列即任务状态，`transitions` 声明存在哪些转移，每个转移带自己的 `actions`（`git.openBranch`、`git.commitBranch`、`git.mergeBranch`、`run`、`clarify`、`stamp`）。未声明的 `move` 一律被 Host 拒绝，且 Host 把已解析的状态机随快照下发给浏览器，拖放校验与实际执行完全一致。详见 [`docs/state-machine.md`](docs/state-machine.md)。 |
-| **开工前先澄清** | 任务直接开始实现，不清楚的地方在运行中才暴露。 | **澄清列**：`backlog → clarification` 会为每张卡片在澄清列启动它的运行（动作 `clarify`）——与拖到运行列完全相同：同一条启动队列，但**不占 lane WIP 名额**（澄清列无 WIP 限制，因此立即启动并挂上会话，同样可暂停/继续），唯一区别是 Prompt：卡片正常 Prompt 加上澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」。**开放问题由 agent 在那条会话里提出**，用户在聊天里回答，agent 问完就停；卡片留在澄清列，卡片上**没有让用户填写问题的字段**。把卡片直接从澄清列拖到 In progress（或点运行按钮）就是放行：关闭尚未结算的澄清运行，并在同一会话里补一句「Bitte jetzt implementieren.」。没有单独的 Todo 列，也没有规格放行步骤。从 Backlog 直接拖到 In progress 没有任何转移，一律拒绝；从澄清列过去则是正常路径。 |
+| **开工前先澄清** | 任务直接开始实现，不清楚的地方在运行中才暴露。 | **澄清列**：`backlog → clarification` 会为每张卡片在澄清列启动它的运行（动作 `clarify`）——与拖到运行列完全相同：同一条启动队列，但**不占 lane WIP 名额**（澄清列无 WIP 限制，因此立即启动并挂上会话，同样可暂停/继续），唯一区别是 Prompt：卡片正常 Prompt 加上澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」。**开放问题由 agent 在那条会话里提出**，用户在聊天里回答，agent 问完就停；卡片留在澄清列，卡片上**没有让用户填写问题的字段**。把卡片直接从澄清列拖到 In progress（或点状态转移按钮）就是放行：关闭尚未结算的澄清运行，并在同一会话里补一句「Bitte jetzt implementieren.」。没有单独的 Todo 列，也没有规格放行步骤。从 Backlog 直接拖到 In progress 没有任何转移，一律拒绝；从澄清列过去则是正常路径。 |
 | **等待回答** | agent 提问过的卡片和别的卡片长得一样，要打开会话读聊天才知道它在等。 | **卡片自己说明它在等，并跳转到问题**：只要卡片的会话里存在 agent 提出后停下等待的问题，卡片左上角就出现一个问号锚点。问题出现它就出现，问题被回答它就消失（Host 按 5 秒轮询重读会话）；点它直接跳到那条会话——问题卡片就在该会话的输入区，或提问的聊天就在眼前。深链与会话锚点相同（`#session=<id>`）。 |
 | **完工上报** | 运行结束后要到会话彻底静止才离开 `running`；若会话一直保持「运行中」，卡片看起来永远在忙，只有手动暂停才能推进。 | **运行自己上报完工，是否移动由会话决定**：agent 最后一次回答以独立一行 `FERTIG: <简短总结>` 结束，这一行是给聊天里的人看的。卡片只有在会话**确实结束**后（没有在跑的 turn、没有排队消息、没有在跑的后台 job）才进入 **Ready for test**；只要名册还把这个会话记为 running，卡片就留在「进行中」，聊天里写没写那行都一样。 |
 | **Git 集成** | 无。 | 卡片钉住的工作区若是本地 git 仓库：**进入澄清列时开 `task/<slug>-<id8>` 分支，运行时检出该分支，卡片一进入 Ready for test 就提交（每次运行结算都提交），进入 Done 时先把它这次提交重放到当前基线分支上（`git rebase`——期间可能已有别的卡片合并），再合并回基线分支**——工作区里不会留下未提交的卡片工作，验收的工作总是面对当前基线（没有仓库时全部为 no-op）。 |
@@ -54,16 +54,16 @@
 
 ### 拖到 running 列即启动
 
-- `running` 列是拖放目标，发送与详情页「运行」按钮相同的 Host `rerun` 动作，任务真正经过 Host 队列启动，而不是仅在本地改状态。
-- 排队中、运行中、已归档以及未知的卡片一律忽略；`backlog`/`clarification` 仍是纯手动状态切换。
+- `running` 列是拖放目标，发送与详情页状态转移按钮相同的 Host `move` 转移（带 `run` 动作），任务真正经过 Host 队列启动，而不是仅在本地改状态。
+- 已有 Host 动作在执行的卡片会入队；运行中、已归档、未知或状态机不允许的卡片会被拒绝并显示原因；`backlog`/`clarification` 仍是纯手动状态切换。
 
 ### 多选与整组拖拽
 
 - 标记方式与文件管理器一致：普通点击选中该卡片（替换原有选择），Ctrl/Cmd 点击把该卡片加入或移出选择，Shift 点击选中从锚点卡片到被点卡片之间的区间（按看板顺序：列从左到右，列内从上到下）。点看板空白处或顶栏芯片里的清除按钮清空选择。
 - 因为普通点击现在用于标记，**双击**打开任务详情；焦点卡片上按 **Enter** 同样直接打开详情，按**空格**则像普通点击一样标记（Shift 为区间、Ctrl/Cmd 为切换）——卡片自行消费该 keydown，因此既不会产生按钮的合成点击，也不会滚动页面。打开详情不会清空选择。
 - 拖已标记的卡片会带上**整份可拖拽的选择**；拖未标记的卡片仍然只移动那一张，因此单卡拖拽行为不变。拖拽载荷在 `text/plain` 里保留领队卡片 id（向前兼容），并在 `application/x-dsh-taskboard-cards` 里带上完整 id 列表。
-- Host 收到的是**一个**原子动作 `move-many`：写账本前先校验整组，任一条目非法则整批不变（`revision` 只涨一次）。状态机不允许进入目标列的卡片留在原地；若没有一张可移动，则什么都不发生，选择也保留。
-- 被移动的卡片彼此之间的顺序保持不变（Host 保留账本顺序）。整组拖到 running 列时，每张合法卡片依次走既有的 `rerun` 路径启动，runner 的单次运行不变量依然成立。
+- Host 侧每张卡片各自入队状态转移（后来的一次点击只替换该卡片自己的意图），不再是一个原子的 `move-many` 动作。状态机不允许进入目标列的卡片留在原地并显示原因；若没有一张可移动，则什么都不发生，选择也保留。
+- 每张卡片各自保留最后一次选择的状态转移；整组拖到 running 列时，每张合法卡片各自入队其 `move` 转移，由 Host 在通道空出时启动，runner 的单次运行不变量依然成立。
 - 反馈：已标记卡片带强调色边框与底色，正在拖拽的卡片变暗，并用计数器说明本次会移动几张。选择是纯浏览器视图状态（和筛选一样），不进账本；移动成功后选择为空。
 
 ### 运行中卡片的标记与 WIP 列顺序
@@ -78,7 +78,7 @@
 
 - 列顺序：`backlog → clarification → running → ready_for_test → failed → done`。
 - 新任务创建在 **Backlog**。把卡片拖进 **澄清（Clarification）** 就是澄清步骤，并在那里启动卡片的运行——与拖到运行列启动的是同一种执行（同一条启动队列、同样有会话链接与暂停控件，但不占 WIP 名额，因此立即启动），只有 Prompt 不同：让 agent 先问清它需要知道的东西，然后停下（见下节）。问完后人工把卡片直接拖到 **In progress**（或退回 Backlog）。
-- 卡片靠**人工启动**（拖拽或运行按钮）进入 **In progress**：该动作同时关闭卡片尚未结算的澄清运行，并在那条会话里继续实现。从 Backlog 或澄清列直接拖到 In progress 没有任何转移，一律拒绝；规格未放行时手动运行也会被拒绝（见下）。
+- 卡片靠**人工启动**（拖拽或状态转移按钮）进入 **In progress**：该动作同时关闭卡片尚未结算的澄清运行，并在那条会话里继续实现。从 Backlog 直接拖到 In progress 没有转移，一律拒绝；从澄清列拖过去则是正常放行。
 - **每张卡片自己的容器栈（本分支新增）**：卡片 worktree 里有 compose 文件（设置 `composeFile`，默认 `docker-compose.yml`）时，Host 在实现运行拿到 Prompt **之前**用项目名 `dsh-tb-<卡片 id>` 起一套该卡专属的栈（设置 `composeEnv` 里的 `{port}`/`{port2}` 会为该卡分配各自空闲的宿主端口并记住，例如 `PORT={port}` 或 `JOBSUCHE_PORT={port},JOBSUCHE_CDP_PORT={port2}`）（容器/网络/数据卷互不干扰），并把它发布的宿主端口显示在卡片详情里；卡片离开运行/审阅列、被删除或归档时用 `docker compose down -v` 停掉并删卷；启动失败会让这次运行失败并把 docker 的输出留在卡片上。详见 [`docs/state-machine.md`](docs/state-machine.md#task-environments-docker-compose)。
 - 执行成功把卡片停在 **Ready for test**（失败则进入 Failed）；runner 不会产生 `done`，验收永远是人工动作。
 - 这个停靠是**会话结束的结论**：Host 会等到该执行所属会话真正停下来——最新一轮 turn 已结束、名册显示会话空闲、它的 prompt 收件箱为空、且没有仍在运行的后台 job——才移动卡片。单个 turn 边界从不单独触发停靠，因为会话会把每个排队 prompt、每次 job 唤醒都当作新的一轮继续跑。只有以 `completed` 收尾的 turn 才算成功：被用户中止、撞上模型 token 上限、被 interrupt 或报错的运行会带着原因进入 Failed，未完成的运行因此永远不会显示为可测试。会话仍在工作时，卡片保持 **In progress**。
@@ -101,7 +101,7 @@
 - 它的 Prompt 是卡片正常 Prompt 加上澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」。
 - **问题是 agent 的**：它在卡片的聊天里提问，用户在聊天里回答，agent 问完就结束本轮。卡片上**故意没有**问题输入字段——那个清单属于用户，而需要澄清的是 agent 还不知道的东西。
 - **停止规则覆盖后续每一轮**：看板的系统提示段落里有一条澄清会话停止规则，以该块首行为触发（`CLARIFICATION_ADDENDUM` 常量），且**每一轮都会重新下发**：判定为澄清会话时 agent 什么都不实现——每次回答后要么提出下一个问题并停下，要么在问完后停下。提示词与规则来自同一个常量，不会各自漂移。
-- **把卡片拖到运行列（或点运行按钮）就是放行**：Host 关闭尚未结算的澄清运行，并在同一会话里只补一句「Bitte jetzt implementieren.」——Agent 的上下文里已经有卡片 Prompt、它提出的问题和答案。若放行时该澄清运行仍在启动过程中，它同样会被关闭：迟到的会话被停掉而不是被挂上，因此一张卡片始终只有一条未结算运行和一条会话。
+- **把卡片拖到运行列（或点状态转移按钮）就是放行**：Host 关闭尚未结算的澄清运行，并在同一会话里只补一句「Bitte jetzt implementieren.」——Agent 的上下文里已经有卡片 Prompt、它提出的问题和答案。若放行时该澄清运行仍在启动过程中，它同样会被关闭：迟到的会话被停掉而不是被挂上，因此一张卡片始终只有一条未结算运行和一条会话。
 - `backlog → running` 没有转移，因此无法用拖拽跳过澄清步骤；从澄清列可以直接拖到运行列。
 - 之后的执行**延续澄清会话**（`clarificationSessionId`），不再新建对话：答案已在它的上下文里；再次经过该步骤也只是重进这条会话。该会话不存在或正忙时，运行与可选会话复用一样退化为新建会话。
 
@@ -130,14 +130,14 @@
 
 ## 功能
 
-- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供六列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。新任务落在 Backlog，卡片可在 Backlog、澄清列、Ready for test、Done 之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页「运行」按钮相同的宿主动作，真正启动该任务**（本分支新增）**。最近一次执行带会话的卡片，角上还有一个直达会话的链接，对运行中与已结束的会话都可用**（本分支新增）**。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
-- **开工前的澄清列（本分支新增）**：把卡片拖进澄清列会在那里启动卡片的运行——与 In progress 用同一条启动队列，但不占 WIP 名额（澄清列无 WIP 限制），因此立即启动、同样可暂停——Prompt 是卡片 Prompt 加澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」，并由系统提示里的停止规则保证每次回答后依然生效。Agent 在那条聊天里提出自己的开放问题，用户在那里回答（卡片上没有问题输入字段）；把卡片直接从澄清列拖到 In progress（或点运行按钮）即关闭该轮，并在同一会话里补一句「Bitte jetzt implementieren.」。没有单独的 Todo 列，也没有规格放行闸门。详见[澄清列](#澄清列clarification)。
+- **任务看板 UI**：新会话按钮下方的侧边栏入口在宽栏显示图标和文字、在折叠 rail 显示图标；看板提供六列布局、搜索、任务详情、归档/恢复、执行历史和执行会话跳转。新任务落在 Backlog，卡片可在 Backlog、澄清列、Ready for test、Done 之间拖拽以手动改状态；把卡片拖到 running 列会发送与详情页状态转移按钮相同的宿主转移，真正启动该任务**（本分支新增）**。最近一次执行带会话的卡片，角上还有一个直达会话的链接，对运行中与已结束的会话都可用**（本分支新增）**。归档任务除恢复、删除和查看 transcript 外保持只读，恢复前不能手动或定时执行。
+- **开工前的澄清列（本分支新增）**：把卡片拖进澄清列会在那里启动卡片的运行——与 In progress 用同一条启动队列，但不占 WIP 名额（澄清列无 WIP 限制），因此立即启动、同样可暂停——Prompt 是卡片 Prompt 加澄清块「Bitte kläre jetzt alle offenen Fragen — und implementiere noch nichts.」「Stelle deine Fragen und stoppe dann.」「Wenn noch Fragen offen sind, stelle die nächsten und stoppe wieder.」「Wenn du alles geklärt hast stoppe und fasse nur kurz zusammen.」「Die Implementierung beginnt erst mit dem Auftrag „Bitte jetzt implementieren".」，并由系统提示里的停止规则保证每次回答后依然生效。Agent 在那条聊天里提出自己的开放问题，用户在那里回答（卡片上没有问题输入字段）；把卡片直接从澄清列拖到 In progress（或点状态转移按钮）即关闭该轮，并在同一会话里补一句「Bitte jetzt implementieren.」。没有单独的 Todo 列，也没有规格放行闸门。详见[澄清列](#澄清列clarification)。
 - **Host 侧按工作区计的 WIP 并发上限（本分支新增）**：同一工作区同一时间最多 `maxConcurrentRuns` 个任务运行持有会话（默认 `1`）；该工作区其余手动与 cron 运行进入 FIFO 队列，在名额空出后按先来后到启动；不同工作区互不影响、可并行。名额从会话挂上起一直占到该执行结算或卡片暂停为止，空闲会话不释放名额；澄清列里的澄清运行完全不占名额，拖进即启动**（本分支新增）**。详见[本分支相对上游的增强](#本分支相对上游的增强)。
 - **运行自行上报完工（本分支新增）**：实现运行在最后一次回答里以独立一行 `FERTIG: <总结>` 上报完工，这一行供人阅读；Host 只有在会话本身结束之后才结算该运行并把卡片移到 Ready for test——名册仍记为 running 的会话会挡住这次移动。详见[运行自己上报完工](#运行自己上报完工)。
 - **Host 侧 Done 列上限（本分支新增）**：`done` 列最多 `maxDoneTasks` 张卡片（默认 `9`）；移入 Done 超出上限时按进入顺序归档最早的卡片（FIFO），只归档所需张数，不删除，可在归档视图恢复；应用上限时也会立即收敛已超限的列。详见[本分支相对上游的增强](#本分支相对上游的增强)。
 - **运行中卡片标记与 WIP 列顺序（本分支新增）**：此刻真正在运行的卡片（最后一次执行仍打开且已附加 session）用加粗警告色边框、警告色底、脉冲光环与 “Running now” 徽标突出显示；同一列中仍在等待 WIP 名额的卡片保持细边框并标记 “Queued”（拖进澄清列的卡片从不排队，其澄清运行立即启动）。runner 拥有的列按队列排序：正在运行的卡片在最上，等待中的运行按到达顺序排列（最后拖入的在最下）；其他列保持账本顺序。
 - **暂停/继续运行中的任务（本分支新增）**：看板顶栏的暂停按钮**一次点击挂起所有持有未结算运行的卡片（含澄清列里的澄清运行）**——每张卡片保留所在列与未结算的执行记录，只有该运行的会话被停掉（`session/cancel`），因此已暂停的卡片既不算「正在运行」也不算「排队」，不占 WIP 名额，也不会被结算监控碰（被中止的回合不会把卡片打到 `failed`）。只剩已暂停卡片时，同一按钮变为「全部继续」（播放符号）；每张卡片的右上角是该运行的暂停/播放控件，详情页的执行按钮也是同一控件。继续会清除暂停标记，并在**该运行自己的会话里写入一条简短的「继续」消息**，Agent 带着上下文接着做；从未拿到会话的排队运行则在继续时正常启动。已暂停的卡片仍是 `running`（标记为 `pausedAt`），Host 重启后保持暂停。
-- **多选与整组拖拽（本分支新增）**：点卡片标记（Ctrl/Cmd 点击增减、Shift 点击选区间、焦点卡片上按空格同样标记），再拖任意一张已标记的卡片，就会以一个原子 `move-many` 宿主动作移动整组——要么全部移动、要么一张都不动，`revision` 只涨一次。状态机不允许进入目标列的卡片留在原地；整组拖到 running 列时依次启动每张合法卡片。点看板空白处或按顶栏芯片的清除按钮会清空选择，未标记的卡片仍然只移动自己。
+- **多选与整组拖拽（本分支新增）**：点卡片标记（Ctrl/Cmd 点击增减、Shift 点击选区间、焦点卡片上按空格同样标记），再拖任意一张已标记的卡片，就会带上整组已标记卡片。Host 侧每张卡片各自入队状态转移（后来的一次点击只替换该卡片自己的意图），不再是一个原子的 `move-many` 宿主动作；状态机不允许进入目标列的卡片留在原地并显示原因，整组拖到 running 列时逐张入队其运行转移。点看板空白处或按顶栏芯片的清除按钮会清空选择，未标记的卡片仍然只移动自己。
 - **续接卡片（数据面）**：新建任务时可粘贴会话输出的 `<<<FREEZE … >>>FREEZE` 冻结块，解析为「目标/进度/下一步」快照随任务持久化（v3 账本）；卡片带冻结徽标，详情页可读完整快照与冻结时间，搜索覆盖快照文本，归档/恢复与普通任务一致。快照在协议层复用冻结安全门：敏感模式自动替换为 `[REDACTED]` 并标记、以 `/` 开头的命令行整体拒绝、每字段 8 KiB 上限。
 - **交接包与权限确认门**：续接卡片可附交接包——钉住三元组（工作区/agent 预设/权限）加文档与脚本引用。执行时交接包三元组覆盖普通钉住字段，引用以交接前言随 Prompt 下发。有效权限高于 `sessionDefaultPermission`（默认 `read-only`）的绑定处于待确认状态：手动执行被拒绝、cron 跳过该卡并滚动到下一触发点，任务详情中的确认按钮完成人工确认；此后任何权限或交接包变更都会重新武装确认门。
 - **领卡来源声明包裹与来源审计**：执行续接卡片（带冻结快照的卡片）时，任务指令被来源声明模板强制包裹——冻结时间、来源会话与未经人工审查提示，组合在交接前言之后，使接手 Agent 对卡片文本中的存储型提示注入保持警惕。create/update 动作的发起方会话织入快照（frozenBy，快照被替换时重新盖章），run/rerun 的发起方会话连同冻结来源的捕获副本一起落在执行记录（initiatedBy）上，两者均可在任务详情查看。发起方为客户端断言的审计元数据，不构成信任边界。
