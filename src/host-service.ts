@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { nextRunAtMs } from './core/schedule.ts'
 import { reusableSessionId } from './core/session-reuse.ts'
@@ -6,10 +7,21 @@ import { HostTaskLedger, type OpenedRun, type OpenExecutionReference, type Pause
 import type { TaskCompose, TaskRecord as ComposeTaskRecord, TaskReview } from './core/tasks.ts'
 import { ComposeWorkflow, composeDir, composeProject, type TaskComposeController } from './compose-workflow.ts'
 import { ReviewWorkflow } from './review-workflow.ts'
-import { HostExecutionRunner, SessionLaunchError, type GatewayPeer, type SessionCommandDispatcher, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import { HostExecutionRunner, SessionLaunchError, type GatewayPeer, type SessionCommandDispatcher, type SessionControl, type SessionSummary, type TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import type { CommandRunner } from './command-runner.ts'
 import { GitWorkflow } from './git-workflow.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
-import { TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardReviewPlan, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts'
+import {
+  TASK_BOARD_SCHEMA_VERSION,
+  type TaskBoardAction,
+  type TaskBoardActionResult,
+  type TaskBoardEventPayload,
+  type TaskBoardPendingWork,
+  type TaskBoardReviewPlan,
+  type TaskBoardReviewRequest,
+  type TaskBoardReviewResponse,
+  type TaskBoardSnapshot,
+} from './protocol.ts'
 import type { TaskPermission } from './core/handover.ts'
 
 const SESSION_POLL_MS = 5_000
@@ -112,6 +124,31 @@ export class TaskBoardHostService {
   private readonly worktreeWarnings = new Set<string>()
   /** Per-card review action chain: a second review click waits for the first. */
   private readonly reviewWork = new Map<string, Promise<void>>()
+  /** Card id → controller aborting its running review/release command. */
+  private readonly workControllers = new Map<string, AbortController>()
+  /**
+   * Serialized action lane: the `202` route accepts an action and this chain
+   * applies it in arrival order. Every apply is ledger-synchronous and fast —
+   * the long work it opens is queued behind it — so the ordering guarantee costs
+   * no waiting.
+   */
+  private actionChain: Promise<void> = Promise.resolve()
+  /** Outcomes waiting for the next SSE frame (bounded; the browser resolves its outbox from them). */
+  private readonly actionResults: TaskBoardActionResult[] = []
+  /**
+   * Last task objects a delta was built from, keyed by id. The ledger replaces a
+   * changed card with a new object, so an identity comparison is the cheapest
+   * correct "what changed since the last frame".
+   */
+  private lastSentTasks = new Map<string, ComposeTaskRecord>()
+  /** Human messages a hard stop removed from a card's inbox, re-sent on resume. */
+  private readonly preservedMessages = new Map<string, string[]>()
+  /** Command runner the Host entry injected (worker-backed); absent in tests. */
+  private readonly commandRunner?: CommandRunner
+  /** Last `updatedAt` the orphan watchdog read a conversation at (per session). */
+  private readonly orphanScans = new Map<string, number>()
+  /** Sessions the watchdog already explained, so one orphan is not toasted every 5 s. */
+  private readonly orphanNoticed = new Set<string>()
   /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
   private reviewPlans: Record<string, TaskBoardReviewPlan> = {}
   private readonly now: () => number
@@ -134,9 +171,23 @@ export class TaskBoardHostService {
     stateMachine?: unknown
     /** Operator Peer the gateway calls speak for; dsh 0.2.1 requires one. */
     peer?: GatewayPeer
+    /**
+     * Runner for the heavy commands (git, docker, review). The Host entry passes
+     * the worker-backed runner so card work never shares its event loop and
+     * "Abbrechen" can kill a running command. Absent: each workflow's own
+     * in-process runner (tests).
+     */
+    commandRunner?: CommandRunner
+    /** Live agent/job handles for the escalating stop (Host entry only). */
+    sessionControl?: SessionControl
   } = {}) {
-    this.git = options.git ?? new GitWorkflow(options.workspaceRegistry)
-    this.compose = options.compose ?? new ComposeWorkflow({ ...(options.composeFile === undefined ? {} : { file: options.composeFile }) })
+    const commandRunner = options.commandRunner
+    this.commandRunner = commandRunner
+    this.git = options.git ?? new GitWorkflow(options.workspaceRegistry, commandRunner === undefined ? {} : { runner: commandRunner })
+    this.compose = options.compose ?? new ComposeWorkflow({
+      ...(options.composeFile === undefined ? {} : { file: options.composeFile }),
+      ...(commandRunner === undefined ? {} : { runner: commandRunner }),
+    })
     this.review = options.review ?? new ReviewWorkflow({
       compose: this.compose,
       ...(options.workspaceRegistry === undefined ? {} : { workspaceRegistry: options.workspaceRegistry }),
@@ -145,9 +196,45 @@ export class TaskBoardHostService {
       // link and the configured commands address the repository, not the folder
       // that contains it.
       repoDirectory: workspacePath => this.git.repositoryOf(workspacePath),
+      ...(commandRunner === undefined ? {} : {
+        runCommand: async (command: string, runOptions: { cwd: string; env: Record<string, string>; timeoutMs: number; signal?: AbortSignal; scope?: string }) => {
+          const shell = existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh'
+          const onAbort = (): void => { if (runOptions.scope !== undefined) commandRunner.cancelScope(runOptions.scope) }
+          runOptions.signal?.addEventListener('abort', onAbort, { once: true })
+          try {
+            const result = await commandRunner.run({
+              command: shell,
+              args: ['-lc', command],
+              cwd: runOptions.cwd,
+              env: runOptions.env,
+              timeoutMs: runOptions.timeoutMs,
+              ...(runOptions.scope === undefined ? {} : { scope: runOptions.scope }),
+            })
+            return { code: result.aborted ? -1 : result.code ?? -1, stdout: result.stdout, stderr: result.aborted ? `${result.stderr}\ncancelled by the operator` : result.stderr }
+          } finally {
+            runOptions.signal?.removeEventListener('abort', onAbort)
+          }
+        },
+        runFixed: async (command: string, args: readonly string[], runOptions: { cwd: string; timeoutMs: number; signal?: AbortSignal; scope?: string }) => {
+          const onAbort = (): void => { if (runOptions.scope !== undefined) commandRunner.cancelScope(runOptions.scope) }
+          runOptions.signal?.addEventListener('abort', onAbort, { once: true })
+          try {
+            const result = await commandRunner.run({
+              command,
+              args,
+              cwd: runOptions.cwd,
+              timeoutMs: runOptions.timeoutMs,
+              ...(runOptions.scope === undefined ? {} : { scope: runOptions.scope }),
+            })
+            return { code: result.aborted ? -1 : result.code ?? -1, stdout: result.stdout, stderr: result.aborted ? `${result.stderr}\ncancelled by the operator` : result.stderr }
+          } finally {
+            runOptions.signal?.removeEventListener('abort', onAbort)
+          }
+        },
+      }),
     })
     this.ledger = options.ledger ?? new HostTaskLedger(undefined, undefined, { sessionDefaultPermission: options.sessionDefaultPermission, git: this.git, stateMachine: options.stateMachine })
-    this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, options.peer)
+    this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, options.peer, options.sessionControl)
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
     // Environments survive a Host restart (the review keeps its stack); the
@@ -174,6 +261,10 @@ export class TaskBoardHostService {
       this.lastPowerJson = json
       this.emit()
     })
+    // The delta baseline starts at the state the Host booted with: a browser
+    // that connects later receives a full snapshot, every later frame only the
+    // cards that changed.
+    this.lastSentTasks = new Map(this.ledger.tasksReference().map(task => [task.id, task]))
   }
 
   start(): void {
@@ -357,12 +448,28 @@ export class TaskBoardHostService {
       reviewPlans: { ...this.reviewPlans },
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
+      pendingWork: this.pendingWork(),
     }
   }
 
-  /** SSE frame payload; deliberately skips the tasks deep-clone of {@link snapshot}. */
+  /**
+   * SSE frame payload: every derived host field, plus only the cards that
+   * changed since the previous frame. The first frame after a connection is a
+   * full snapshot (the route sends it), so a board with hundreds of cards never
+   * resends the ledger on a heartbeat.
+   */
   eventPayload(): TaskBoardEventPayload {
     const { revision, scheduler } = this.ledger.summary()
+    const next = new Map<string, ComposeTaskRecord>()
+    const changed: ComposeTaskRecord[] = []
+    for (const task of this.ledger.tasksReference()) {
+      next.set(task.id, task)
+      if (this.lastSentTasks.get(task.id) !== task) changed.push(task)
+    }
+    const removedTaskIds: string[] = []
+    for (const id of this.lastSentTasks.keys()) if (!next.has(id)) removedTaskIds.push(id)
+    this.lastSentTasks = next
+    const actionResults = this.actionResults.splice(0, this.actionResults.length)
     return {
       revision,
       scheduler,
@@ -375,7 +482,31 @@ export class TaskBoardHostService {
       reviewPlans: { ...this.reviewPlans },
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
+      pendingWork: this.pendingWork(),
+      ...(changed.length === 0 ? {} : { tasks: changed }),
+      ...(removedTaskIds.length === 0 ? {} : { removedTaskIds }),
+      ...(actionResults.length === 0 ? {} : { actionResults }),
     }
+  }
+
+  /**
+   * Work in flight per card, for the card's "Abbrechen" control. Derived from
+   * the service's own queues and the command runner's live scopes; never ledger
+   * state.
+   */
+  private pendingWork(): Record<string, TaskBoardPendingWork> {
+    const work: Record<string, TaskBoardPendingWork> = {}
+    const now = this.now()
+    for (const [taskId, release] of Object.entries(this.ledger.pendingReleases())) {
+      work[taskId] = { kind: 'release', startedAt: release.startedAt }
+    }
+    for (const taskId of this.reviewBusy.keys()) {
+      work[taskId] = { kind: 'review', startedAt: work[taskId]?.startedAt ?? now }
+    }
+    for (const taskId of this.commandRunner?.busyScopes() ?? []) {
+      if (work[taskId] === undefined) work[taskId] = { kind: 'command', startedAt: now }
+    }
+    return work
   }
 
   subscribe(listener: () => void): () => void {
@@ -385,12 +516,21 @@ export class TaskBoardHostService {
 
   async apply(requestId: string, action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot> {
     if (!this.active) throw new Error('task board is disabled')
-    // Run the action behind the heavy work already queued for its card(s): a
-    // release must see the commit of the park it approves, and a run must see the
-    // branch its transition created. The browser never waits for this — it has
-    // already accepted the action into its outbox — and the event loop stays free
-    // while the card's work chain runs git in the background.
-    for (const taskId of actionTaskIds(action)) await this.ledger.awaitCard(taskId)
+    // Manual actions never wait for the card's heavy git work. They used to run
+    // behind `ledger.awaitCard`, which meant a pause could sit behind a commit,
+    // a worktree creation or a rebase for minutes (the git safety net is 10
+    // minutes) — while the human was pressing "stop" on a running agent. The
+    // action is ledger-synchronous now; the work it opens is queued behind the
+    // card's chain, and the one action that genuinely needs a finished commit
+    // (the merge release) waits for it *inside its background job*.
+    if (action.kind === 'cancel-work') {
+      this.cancelWork(action.taskId)
+      return this.snapshot()
+    }
+    if (action.kind === 'hard-stop') {
+      this.hardStop(action.taskId)
+      return this.snapshot()
+    }
     const result = this.ledger.applyRequest(requestId, action, initiator)
     // A clarification run is a run: both go through the launch queue below, but
     // only the implementation run is gated by the lane WIP limit; the
@@ -403,6 +543,12 @@ export class TaskBoardHostService {
     // The pause is already in the ledger (so the monitor no longer touches the
     // run); stopping the sessions happens next, off this call.
     for (const paused of result.paused ?? []) this.stopPausedRun(paused)
+    // A card whose run already settled but whose conversation is still attached
+    // (a background-job wake-up, or a failure settled before this Host) has no
+    // open execution for the pause to suspend. The human's pause must still
+    // reach that session, otherwise the button does nothing at all — the exact
+    // shape of the incident this change is for.
+    if (action.kind === 'pause') for (const taskId of action.taskIds) this.stopOrphanSession(taskId)
     for (const resumed of result.resumed ?? []) this.resumePausedRun(resumed)
     // Review environments take minutes to come up (compose builds images, a
     // start script boots the app), so they are carried out off this call: the
@@ -416,6 +562,73 @@ export class TaskBoardHostService {
   }
 
   /**
+   * Accept one action for the `202` route: enqueue it on the action lane and
+   * answer at once. The outcome travels as an `action-result` event (the browser
+   * resolves its outbox from it), and a replayed `requestId` is re-answered from
+   * the ledger's request cache — the browser's retry after a reconnect gets the
+   * same result again instead of applying the action twice.
+   * @returns false when the board is disabled (the route answers 409).
+   */
+  acceptAction(requestId: string, action: TaskBoardAction, initiator?: string): boolean {
+    if (!this.active) return false
+    this.actionChain = this.actionChain.then(async () => {
+      try {
+        await this.apply(requestId, action, initiator)
+        this.pushActionResult({ requestId, ok: true, at: this.now() })
+      } catch (error) {
+        this.pushActionResult({ requestId, ok: false, error: error instanceof Error ? error.message : String(error), at: this.now() })
+      }
+      this.emit()
+    })
+    return true
+  }
+
+  private pushActionResult(result: TaskBoardActionResult): void {
+    this.actionResults.push(result)
+    while (this.actionResults.length > 200) this.actionResults.shift()
+  }
+
+  /**
+   * Abort the card's running work. The command runner kills every child in the
+   * card's scope (commit, worktree, merge, review command, compose), the review
+   * intent's controller aborts a wait that is not inside a command, and the card
+   * keeps the visible reason. Idempotent: cancelling nothing is not an error.
+   */
+  cancelWork(taskId: string): void {
+    this.workControllers.get(taskId)?.abort()
+    const killed = this.commandRunner?.cancelScope(taskId) ?? 0
+    this.ledger.note(taskId, killed > 0
+      ? `Laufende Arbeit der Karte wurde abgebrochen (${killed} Befehl${killed === 1 ? '' : 'e'}).`
+      : 'Laufende Arbeit der Karte wurde abgebrochen.')
+  }
+
+  /**
+   * Stop the card's conversation for good, with the human's confirmation behind
+   * the button: cancel the turn, kill the jobs, drop the queued input (this is
+   * the destructive level — the pause preserves human messages, the hard stop
+   * does not), force the agent to rest if the runtime disagrees, and settle the
+   * open run as cancelled so the card leaves the run column instead of waiting
+   * for a session that no longer works.
+   */
+  hardStop(taskId: string): void {
+    const task = this.ledger.task(taskId)
+    if (task === undefined) return
+    const open = task.executions.filter(execution => execution.endedAt === undefined)
+    const sessionId = latestSessionId(task)
+    void (async () => {
+      if (sessionId !== undefined) {
+        const report = await this.runner.stopSession(sessionId, { preserveUserMessages: false })
+        if (report.attached && !report.stopped) {
+          this.ledger.note(taskId, 'Die Session ließ sich auch mit erzwungenem Reset nicht anhalten.')
+          return
+        }
+      }
+      for (const execution of open) this.ledger.settle(taskId, execution.id, 'cancelled', 'Session hart gestoppt (offline).')
+      this.ledger.note(taskId, 'Session hart gestoppt; der Lauf wurde als abgebrochen abgerechnet.')
+    })().catch(error => { safeConsoleError(`[dsh-task-board] hard stop of task ${taskId} failed`, error) })
+  }
+
+  /**
    * Queue one review action on the card's review chain: a second click on the
    * same card waits for the first action instead of being refused. The card's
    * derived plan shows `pending` while anything is queued, and the buttons stay
@@ -425,14 +638,17 @@ export class TaskBoardHostService {
     this.reviewBusy.set(intent.taskId, intent.intent)
     this.refreshReviewPlans()
     this.emit()
+    const controller = new AbortController()
+    this.workControllers.set(intent.taskId, controller)
     const previous = this.reviewWork.get(intent.taskId) ?? Promise.resolve()
     const operation = previous.catch(() => {}).then(async () => {
-      await this.runReviewIntent(intent)
+      await this.runReviewIntent(intent, controller.signal)
     }).catch(error => {
       safeConsoleError(`[dsh-task-board] review action ${intent.intent} failed for task ${intent.taskId}`, error)
     })
     this.reviewWork.set(intent.taskId, operation)
     void operation.finally(() => {
+      if (this.workControllers.get(intent.taskId) === controller) this.workControllers.delete(intent.taskId)
       if (this.reviewWork.get(intent.taskId) === operation) this.reviewWork.delete(intent.taskId)
       if (!this.reviewWork.has(intent.taskId)) this.reviewBusy.delete(intent.taskId)
       this.refreshReviewPlans()
@@ -448,7 +664,7 @@ export class TaskBoardHostService {
    * `stop` on a card that never started is a no-op the Host still reports as
    * stopped.
    */
-  private async runReviewIntent(intent: ReviewIntent): Promise<void> {
+  private async runReviewIntent(intent: ReviewIntent, signal?: AbortSignal): Promise<void> {
     // Read the card fresh: the ledger may have moved it out of the review
     // column (or dropped it) while this action waited in the card's queue.
     const task = this.ledger.task(intent.taskId)
@@ -468,18 +684,18 @@ export class TaskBoardHostService {
         // Nothing the board started: there is no environment to stop, and the
         // card's (possibly failed) record stays as it is.
         if (current === undefined) return
-        await this.review.stop(task.id, current)
+        await this.review.stop(task.id, current, signal)
         this.reviewEnvs.delete(task.id)
         this.forgetComposeRecord(task, current)
         this.ledger.noteReview(task.id, stoppedReview(current, this.now()))
         return
       }
       if (intent.intent === 'restart' && current !== undefined) {
-        await this.review.stop(task.id, current)
+        await this.review.stop(task.id, current, signal)
         this.reviewEnvs.delete(task.id)
         this.forgetComposeRecord(task, current)
       }
-      const review = await this.review.start(task)
+      const review = await this.review.start(task, signal)
       this.reviewEnvs.set(task.id, review)
       this.ledger.noteReview(task.id, review)
     } catch (error) {
@@ -680,13 +896,48 @@ export class TaskBoardHostService {
     const sessionId = paused.sessionId
     if (sessionId === undefined) return
     void (async () => {
-      try {
-        await this.runner.cancel(sessionId)
-      } catch (error) {
+      const report = await this.runner.stopSession(sessionId, { preserveUserMessages: true })
+      if (report.preserved.length > 0) this.preservedMessages.set(paused.taskId, report.preserved)
+      if (!report.attached && !report.stopped) {
+        // The run already ended (or the Host restarted): there is nothing to
+        // stop, and freezing the card would be wrong. Undo the pause so the
+        // monitor can settle the run.
         this.ledger.clearPause(paused.taskId)
-        safeConsoleError(`[dsh-task-board] pausing task ${paused.taskId} could not stop its session; the run stays unpaused`, error)
+        return
+      }
+      // A stop that did not come to rest is the one case the human must see:
+      // the card stays paused (so no new turn is started from the board) and the
+      // watchdog keeps trying, but the reason is on the card instead of a
+      // silent no-op.
+      if (!report.stopped) {
+        this.ledger.note(paused.taskId, 'Die Session ließ sich nicht anhalten; das Board versucht es beim nächsten Durchlauf erneut.')
+        return
+      }
+      if (report.phaseReset) {
+        this.ledger.note(paused.taskId, 'Die Session ließ sich nur mit einem erzwungenen Phasen-Reset anhalten.')
       }
     })().catch(error => { safeConsoleError('[dsh-task-board] pause handling failed', error) })
+  }
+
+  /**
+   * Stop the conversation of a card that has no open run any more. Such a session
+   * is invisible to the ledger's pause (there is no execution to suspend), yet it
+   * is exactly what a late job wake-up leaves behind. The human's pause must
+   * reach it; the card is not marked paused (it has no run to resume), the
+   * session is simply stopped.
+   */
+  private stopOrphanSession(taskId: string): void {
+    const task = this.ledger.task(taskId)
+    if (task === undefined) return
+    if (task.executions.some(execution => execution.endedAt === undefined)) return
+    const sessionId = latestSessionId(task)
+    if (sessionId === undefined) return
+    void this.runner.stopSession(sessionId, { preserveUserMessages: true }).then(report => {
+      if (report.preserved.length > 0) this.preservedMessages.set(taskId, report.preserved)
+      if (report.attached && !report.stopped) {
+        this.ledger.note(taskId, 'Die Session ließ sich nicht anhalten; das Board versucht es beim nächsten Durchlauf erneut.')
+      }
+    }).catch(error => { safeConsoleError(`[dsh-task-board] stopping the orphaned session of task ${taskId} failed`, error) })
   }
 
   /**
@@ -701,9 +952,15 @@ export class TaskBoardHostService {
       this.scheduleLaunch({ task: resumed.task, execution: resumed.execution })
       return
     }
+    const preserved = this.preservedMessages.get(resumed.task.id)
+    if (preserved !== undefined) this.preservedMessages.delete(resumed.task.id)
     void (async () => {
       try {
-        await this.runner.launch(resumed.task, { reuseSessionId: sessionId, resume: true })
+        await this.runner.launch(resumed.task, {
+          reuseSessionId: sessionId,
+          resume: true,
+          ...(preserved === undefined || preserved.length === 0 ? {} : { resumeMessages: preserved }),
+        })
       } catch (error) {
         // The conversation is gone (deleted, or the Host lost it): the run
         // cannot continue, so it fails visibly instead of hanging in progress.
@@ -877,6 +1134,10 @@ export class TaskBoardHostService {
     // No unconditional emit here: real changes already emit through the
     // ledger subscription (settles) and the gated power listener above.
     await this.reconcileExecutions(running.items, runtime.openExecutions)
+    // Safety net for conversations that outlived their run: a settlement that
+    // happened before the job gate existed, a paused run that a late notice woke
+    // again, or a card that left the board while its session kept working.
+    await this.stopOrphanedSessions(running.items)
     // A card that parked in the review/failed column and whose human then wrote
     // in its own chat is a rework: the Host sends it back to `clarification` and
     // stamps it, and the correction itself stays in that conversation.
@@ -1000,11 +1261,86 @@ export class TaskBoardHostService {
       try {
         const result = await this.runner.inspect(execution.sessionId, execution.startedAt, sessions)
         if (result.outcome === 'pending') continue
+        // A turn the human stopped in the card's own chat is a pause, not a
+        // failed run: the conversation stays, the execution stays open, and the
+        // card can continue exactly there. Settling it as failed was what left
+        // the card in `failed` while its session kept working (and left the
+        // board unable to pause a run it no longer owned).
+        if (result.outcome === 'failed' && result.error === 'agent turn was aborted by the user') {
+          try {
+            const paused = this.ledger.applyRequest(`chat-stop:${execution.taskId}:${execution.startedAt}`, {
+              kind: 'pause',
+              taskIds: [execution.taskId],
+            })
+            for (const run of paused.paused ?? []) this.stopPausedRun(run)
+          } catch (error) {
+            // No pause transition for this card (custom machine) or it changed
+            // column in between: fall back to the ordinary settlement.
+            this.ledger.settle(execution.taskId, execution.executionId, result.outcome, result.error)
+            console.warn(`[dsh-task-board] could not pause task ${execution.taskId} after a chat stop`, error)
+          }
+          continue
+        }
         this.ledger.settle(execution.taskId, execution.executionId, result.outcome, 'error' in result ? result.error : undefined)
       } catch {
         // A transient inspection failure never settles a running execution.
       }
     }
+  }
+
+  /**
+   * Stop conversations that run without a run of their own.
+   *
+   * A settled run's session is the card's conversation and must stay usable for
+   * the human (rework happens by writing into it), so this is deliberately
+   * conservative:
+   *
+   * - a **paused** card's session must never run: the pause is the human's
+   *   "stop", and a late job notice that woke the agent again is exactly what
+   *   must not survive it;
+   * - a **done/archived** card has no work left to do;
+   * - any other settled card is stopped only if the human has **not** written in
+   *   its chat since the run settled — a conversation the human just used is
+   *   theirs, a conversation a background job woke is an orphan.
+   *
+   * Fail-safe: an unreadable history is no evidence and leaves the session
+   * alone; the next poll retries.
+   * @param sessions - the roster the poll already fetched.
+   */
+  private async stopOrphanedSessions(sessions: readonly SessionSummary[]): Promise<void> {
+    if (this.disposed || !this.active) return
+    const byId = new Map(sessions.map(item => [item.sessionId as string, item]))
+    for (const row of this.ledger.sessionWatch()) {
+      const summary = byId.get(row.sessionId)
+      if (summary === undefined || summary.running !== true) continue
+      let stop = false
+      if (row.paused) {
+        stop = true
+      } else if (row.open) {
+        continue
+      } else if (row.archived || row.status === 'done') {
+        stop = true
+      } else if (row.settledAt !== undefined) {
+        const scannedAt = summary.updatedAt
+        if (scannedAt !== undefined && this.orphanScans.get(row.sessionId) === scannedAt) continue
+        const human = await this.runner.newestHumanTurn(row.sessionId, row.settledAt)
+        if (!human.known) continue
+        if (scannedAt !== undefined) this.orphanScans.set(row.sessionId, scannedAt)
+        stop = human.at === undefined
+      }
+      if (!stop) continue
+      const report = await this.runner.stopSession(row.sessionId, { preserveUserMessages: true })
+      if (report.preserved.length > 0) this.preservedMessages.set(row.taskId, report.preserved)
+      if (!this.orphanNoticed.has(row.sessionId)) {
+        this.orphanNoticed.add(row.sessionId)
+        this.ledger.note(row.taskId, 'Eine Session lief ohne offenen Lauf; das Board hat sie gestoppt.')
+      }
+    }
+    for (const sessionId of [...this.orphanNoticed]) {
+      const summary = byId.get(sessionId)
+      if (summary === undefined || summary.running !== true) this.orphanNoticed.delete(sessionId)
+    }
+    for (const sessionId of [...this.orphanScans.keys()]) if (!byId.has(sessionId)) this.orphanScans.delete(sessionId)
   }
 
   private async tickSchedule(first: boolean): Promise<void> {
@@ -1169,6 +1505,15 @@ export function safeConsoleError(message: string, ...args: unknown[]): void {
   } catch {
     // Best-effort stderr write; ignore write errors when stderr stream fails
   }
+}
+
+/** The most recent conversation a card ever ran in (open or settled). */
+function latestSessionId(task: ComposeTaskRecord): string | undefined {
+  for (let index = task.executions.length - 1; index >= 0; index -= 1) {
+    const sessionId = task.executions[index].sessionId
+    if (sessionId !== undefined) return sessionId
+  }
+  return task.clarificationSessionId
 }
 
 /** Cards an action touches, for waiting on their background work before applying it. */

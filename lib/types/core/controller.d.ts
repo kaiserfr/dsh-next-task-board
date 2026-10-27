@@ -15,7 +15,11 @@ import type { TaskStore } from './store.ts';
 import { type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts';
 import { type QueuedTransition, type TransitionBlocker, type TransitionError } from './transitions.ts';
 import { type TaskUpdatePatch } from './use-cases/task-update.ts';
-import type { TaskBoardAction, TaskBoardEventPayload, TaskBoardParseDraft, TaskBoardParseRequest, TaskBoardReviewRequest, TaskBoardReviewResponse, TaskBoardSnapshot } from '../protocol.ts';
+import type { TaskBoardAction, TaskBoardEventFrame, TaskBoardEventPayload, TaskBoardParseDraft, TaskBoardParseRequest, TaskBoardReviewRequest, TaskBoardReviewResponse, TaskBoardSnapshot } from '../protocol.ts';
+/** What one action request answers: accepted (202) or already applied (compat). */
+export type TaskBoardActionReply = {
+    requestId: string;
+} | TaskBoardSnapshot;
 export interface TaskBoardTransport {
     bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>;
     state(): Promise<TaskBoardSnapshot>;
@@ -27,8 +31,18 @@ export interface TaskBoardTransport {
      * persisted request cache then returns the already-applied result instead of
      * applying it twice.
      */
-    action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot>;
-    subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void;
+    /**
+     * Submit one action. The Host answers `202 accepted`; the outcome arrives as
+     * an `action-result` event, which is what resolves the outbox entry. A
+     * transport that answers with the applied state instead (an embedded Host, a
+     * test harness) is treated as already confirmed.
+     */
+    action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardActionReply>;
+    /**
+     * The event stream: a full snapshot when it opens, deltas afterwards. A bare
+     * payload (a Host that predates the frame envelope) is read as a delta.
+     */
+    subscribe(listener: (event?: TaskBoardEventFrame | TaskBoardEventPayload) => void): () => void;
     /**
      * One-shot model parse of pasted text (issue #1540). Optional: a deployment
      * that cannot parse simply omits it, and the form hides the section.
@@ -171,7 +185,7 @@ export interface ControllerSnapshot {
      * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
      */
     sessionOpenError?: string;
-    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases'>;
+    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork'>;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
@@ -230,6 +244,8 @@ export declare class BoardController {
     private transportError;
     private sessionOpenError;
     private hostState;
+    /** Liveness net for accepted actions whose result event was lost (reconnect). */
+    private outboxSweep;
     private remoteSubscribed;
     private remoteInitialization;
     /** @param deps - store and the sessions navigation face. */
@@ -472,6 +488,10 @@ export declare class BoardController {
      * suspends the whole column in a single ledger write.
      * @returns whether the action was accepted locally.
      */
+    /** Abort the card's running work (merge, review command, commit, compose). */
+    cancelWork(id: string): void;
+    /** Stop the card's conversation for good; the open run is cancelled. */
+    hardStop(id: string): void;
     pauseTasks(ids: readonly string[]): Promise<boolean>;
     /**
      * Resume paused runs: the Host clears the pause and writes the "continue"
@@ -562,6 +582,24 @@ export declare class BoardController {
      * re-serialize the whole ledger per tab even while nothing changes.
      */
     private onRemoteEvent;
+    /** Apply the derived host fields a frame or a snapshot carries. */
+    private applyHostFields;
+    /**
+     * Merge a task delta into the board: changed cards replace their entries in
+     * place (the column order is the ledger's, and a Done column's FIFO depends on
+     * it), removed ids leave, new cards append.
+     */
+    private applyTaskDelta;
+    /**
+     * Resolve the outbox from the Host's action results. Success removes the entry
+     * and lets the card's next action start (the order the human acted in);
+     * a refusal removes it too, but says why on the card.
+     */
+    private resolveActionResults;
+    /** Re-send every accepted action whose result never arrived (same requestId). */
+    private resendAccepted;
+    /** Liveness sweep: an accepted action without a result after a while is re-sent. */
+    private sweepAccepted;
     private refreshRemote;
     private acceptRemote;
     private notify;

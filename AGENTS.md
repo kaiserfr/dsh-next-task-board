@@ -28,6 +28,20 @@ dsh Web GUI 的 Host 权威多列任务看板。任务通过真实 DSH 会话执
 - **通知**：Host 派生的 `notices`（commit 失败、放行失败、分支创建失败）只保留短时间、按 id 去重，随 snapshot/SSE 下发，由卡片 toast 显示；服务内存，不写账本。
 - 测试：`tests/outbox.spec.ts`、`tests/host-controller.spec.ts`、`tests/host-api.spec.ts`、`tests/git-workflow.spec.ts`、`tests/host-merge.spec.ts`、`tests/host-review.spec.ts`、`tests/board-view.spec.tsx`、`tests/review-ui.spec.tsx`、`tests/ai-parse.spec.tsx`。
 
+## 硬停止、事件协议与命令 Worker（2026-10-27）
+
+- **动作协议**：`POST /api/task-board/action` 只做校验并入队，立即返回 `202 { ok, requestId }`；结果通过 SSE 的 `action-result` 帧（`requestId`、`ok`、`error`）下发，浏览器 outbox 以事件解除等待。连接中断或事件丢失时用**同一个 requestId** 重发（账本 request cache 幂等），Host 重新广播结果；`subscribe` 仍兼容只发 payload 的旧帧。`GET /events` 连上先发一帧 `{ type: "snapshot", snapshot }`，之后只发增量 `{ type: "delta", payload }`（`tasks` 变化的卡片、`removedTaskIds`、`actionResults`、`pendingWork`），不再每帧重发整本账本；卡片顺序保持账本顺序，新卡追加。
+- **手动动作不再等待卡片 Git**：`apply()` 去掉了 `awaitCard`。暂停/继续/停止/运行/放行都是账本同步写入，随后的重活排在卡片工作链后面；唯一需要“停靠提交已就绪”的合并放行本就在账本的后台链里执行。此前暂停可能排在 10 分钟 Git 超时后面，这正是“按了停止没反应”的来源之一。
+- **会话硬停止（`HostExecutionRunner.stopSession`）**：顺序固定为「杀掉该会话的后台 Job → `cancel({kind:'user'},{keepInbox:false})` → ≤2 秒轮询确认 `status !== 'running'` → 仍为 running 时强制 `setPhase(idle)` 再确认」。Job 必须死在 cancel 之前，否则它的完成通知会把 Agent 重新唤醒（实测：15:07 停止后，15:18 的 pytest 通知新建了 Turn 3 并继续跑了 20 分钟）。`keepInbox:false` 防止排队消息立刻开新 Turn；但**人类消息先被收集**并在继续时随 continue 提示重新发出，只有 Job 通知被丢弃。暂停失败时不再静默撤销：卡片保持暂停，原因作为 Host notice 显示，看门狗每轮重试。
+- **结算不再信任“只是没有 Turn 在跑”**：`inspect()` 在 `sessionEnded()` 之外还要求 `hasLiveJobs(sessionId) === false`；后台 Job 未结束时运行保持 `pending`，卡片留在进行中（名额也被它占着），这样 Job 完成后的新 Turn 仍属于这个运行，而不是一个看门狗追不上的孤儿。
+- **聊天里的停止 = 暂停**：`reconcileExecutions()` 看到 `turn/end` 的 abort 原因是 user 时，走 `pause`（经状态机校验）而不是结算成 `failed`；卡片留在原列、执行记录保持打开、可在同一会话里继续。
+- **孤立会话看门狗（5 秒轮询）**：`ledger.sessionWatch()` 给出每张卡最近的会话、是否仍有未结算运行、是否暂停、结算时刻。看门狗只停止：暂停卡的会话（暂停后又被 Job 通知唤醒）、`done`/归档卡的会话、以及**结算后人类没有再写话**的会话（用 `newestHumanTurn` 判定；读不到历史就保留并下轮重试）。人类刚在聊天里用的会话绝不停止（返工就是那样发生的）。每次停止会留一条 notice，同一会话只提示一次。
+- **手动暂停也能停没有运行记录的会话**：`pause` 除了停 `result.paused` 里的运行，还对没有未结算运行的卡片调用 `stopOrphanSession()`——即“卡片已经结算、会话却还在跑”的那种孤儿；卡片不写 `pausedAt`（没有可继续的运行），只把会话停掉。
+- **`cancel-work` / `hard-stop` 动作**：前者用命令运行器按卡片 scope 杀掉正在跑的 Git/Docker/Review 子进程并中止 review 链（卡片出现 `pendingWork` 时详情页显示「取消正在进行的操作」）；后者是人类确认后的破坏性级别：cancel + 杀 Job + 丢弃队列（不保留人类消息）+ 强制 reset，并把打开的运行结算为 `cancelled`，卡片离开运行列（详情页按钮带 `confirm`）。
+- **命令 Worker**：`src/command-runner.ts` 提供 `CommandRunner`（`run`/`cancelScope`/`busyScopes`/`dispose`）。Host 入口传入 worker 线程实现（`src/command-worker.ts`，`tsdown` 的独立入口）；Git 的 `runAsync`、Compose 的 `exec`、Review 的 shell/固定参数命令都走它。子进程输出、超时和 kill 因此不在 Host 的事件循环里，`/state`、`/parse`、SSE 在构建镜像或跑长测试时仍然可服务；worker 起不来或崩溃时退回进程内实现，绝不会因为线程问题让卡片失败。scope 就是卡片 id，`pendingWork` 从 `busyScopes()` 派生（`release`/`review`/`command`）。
+- **Parse and fill 与服务解耦**：路由用固定的 `parseModel`（设置项，默认 `deepseek-official/deepseek-flash`）和 `parseTimeoutMs`（默认 120000），不再跟随表单里的模型选择，也不再可能与占用本地单槽模型的运行抢资源；表单只显示已用秒数并提供取消，`parse` 仍是独立 HTTP 路由，不经过动作队列。解析结果仍只填「请求开始后未改过」的字段。
+- 测试：`tests/hard-stop.spec.ts`、`tests/command-runner.spec.ts`，以及按新协议更新的 `tests/pause-runner.spec.ts`、`tests/host-routes.spec.ts`、`tests/host-controller.spec.ts`、`tests/controller.spec.ts`、`tests/host-api.spec.ts`、`tests/host-ai.spec.ts`。
+
 ## 状态机（State Engine）
 
 - 看板的列就是任务状态。`src/core/state-machine.ts` 是唯一权威：`DEFAULT_STATE_MACHINE`（`states` 列 / `transitions` 允许的状态转移 / 每个转移的 `actions`）是内置默认，设置命名空间 `task-board` 的 `stateMachine` 字段（JSON）可整体覆盖；配置无效时整份拒绝（`normalizeStateMachine` 给出原因）并继续沿用当前状态机，不得半套生效。

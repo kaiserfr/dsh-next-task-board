@@ -12,8 +12,14 @@
 import { createUserMessage, type GenerateOptions, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import type { TaskBoardParseDraft, TaskBoardParseRequest } from './protocol.ts'
 
-/** How long one parse may take before the Host gives up on the model. */
-export const TASK_PARSE_TIMEOUT_MS = 45_000
+/**
+ * How long one parse may take before the Host gives up on the model. Two
+ * minutes, because the reply is short but the provider is shared: a running
+ * session must not starve the form, and the user can still cancel at any time.
+ */
+export const TASK_PARSE_TIMEOUT_MS = 120_000
+/** Route a parse uses when the caller names none: a fast, always-available model. */
+export const TASK_PARSE_DEFAULT_MODEL = 'deepseek-official/deepseek-flash'
 /** Largest pasted text one parse accepts (bytes). */
 export const TASK_PARSE_MAX_INPUT = 16 * 1024
 /** Longest title the form is willing to receive from a model. */
@@ -117,13 +123,14 @@ export async function parseTaskDraft(
   llm: LlmRuntime,
   request: TaskBoardParseRequest,
   signal?: AbortSignal,
+  timeoutMs: number = TASK_PARSE_TIMEOUT_MS,
 ): Promise<TaskBoardParseDraft> {
   const text = request.text.trim()
   if (text === '') throw new TaskParseError('parse-failed', 'there is nothing to parse')
-  const route = splitModelRoute(request.model)
-  if (route === undefined) throw new TaskParseError('no-model', 'no model route was selected for parsing')
+  const route = splitModelRoute(request.model ?? TASK_PARSE_DEFAULT_MODEL)
+  if (route === undefined) throw new TaskParseError('no-model', 'the configured parse route is not a provider/model id')
   const timeout = new AbortController()
-  const timer = setTimeout(() => { timeout.abort() }, TASK_PARSE_TIMEOUT_MS)
+  const timer = setTimeout(() => { timeout.abort() }, timeoutMs)
   const abortFromCaller = (): void => { timeout.abort() }
   signal?.addEventListener('abort', abortFromCaller, { once: true })
   try {
@@ -142,7 +149,7 @@ export async function parseTaskDraft(
   } catch (error) {
     if (error instanceof TaskParseError) throw error
     if (timeout.signal.aborted) {
-      throw new TaskParseError('timeout', `the model did not answer within ${TASK_PARSE_TIMEOUT_MS / 1_000}s`)
+      throw new TaskParseError('timeout', `the model did not answer within ${Math.round(timeoutMs / 1_000)}s`)
     }
     throw new TaskParseError('model-error', error instanceof Error ? error.message : String(error))
   } finally {

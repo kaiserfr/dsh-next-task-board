@@ -193,7 +193,13 @@ export function makeTaskBoardRoutes(
         if (parsed.action.kind !== 'import' && Buffer.byteLength(body.raw) > ACTION_LIMIT) {
           return writeJson(res, 413, { ok: false, error: 'body-too-large' }, { 'cache-control': 'no-store' })
         }
-        writeJson(res, 200, await service.apply(parsed.requestId, parsed.action, parsed.initiator), { 'cache-control': 'no-store' })
+        // Accepted, not applied: the action enters the Host's lane and its
+        // outcome travels as an `action-result` event. The browser never waits
+        // for a card's git work or a session stop on this request.
+        const accepted = service.acceptAction(parsed.requestId, parsed.action, parsed.initiator)
+        writeJson(res, accepted ? 202 : 409, accepted
+          ? { ok: true, requestId: parsed.requestId }
+          : { ok: false, error: 'task board is disabled' }, { 'cache-control': 'no-store' })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         writeJson(res, message === 'body-too-large' ? 413 : 400, { ok: false, error: message }, { 'cache-control': 'no-store' })
@@ -215,9 +221,12 @@ export function makeTaskBoardRoutes(
         'cache-control': 'no-cache',
         connection: 'keep-alive',
       })
+      // The stream opens with a full snapshot (the browser has no state yet or
+      // reconnected); every later frame is a delta, so hundreds of cards are
+      // never resent on a heartbeat.
+      res.write(`data: ${JSON.stringify({ type: 'snapshot', snapshot: service.snapshot() })}\n\n`)
       const push = (): void => {
-        const payload = service.eventPayload()
-        res.write(`data: ${JSON.stringify(payload)}\n\n`)
+        res.write(`data: ${JSON.stringify({ type: 'delta', payload: service.eventPayload() })}\n\n`)
       }
       const unsubscribe = service.subscribe(push)
       const heartbeat = setInterval(() => { res.write(': ping\n\n') }, HEARTBEAT_MS)
@@ -227,7 +236,6 @@ export function makeTaskBoardRoutes(
       }
       req.once('close', close)
       res.once('close', close)
-      push()
     },
   }
   const parse: WebRoute = {

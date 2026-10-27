@@ -17,7 +17,7 @@
  * a missing compose file means "no environment", not an error — the feature is
  * discovered per workspace, not configured.
  */
-import { spawn } from 'node:child_process'
+import { LocalCommandRunner, type CommandRunner } from './command-runner.ts'
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { isAbsolute, join } from 'node:path'
@@ -46,6 +46,15 @@ const PORT_PROBES = 50
 
 /** Per-call options of one compose invocation. */
 export interface ComposeRunOptions {
+  /**
+   * Card id the command works for, for cancellation. The task record already
+   * provides it; a teardown after the card is gone has only the id.
+   */
+  scope?: string
+  /**
+   * Kill the command when this signal aborts (the operator pressed "Abbrechen").
+   */
+  signal?: AbortSignal
   /**
    * Docker context the command addresses (`docker --context <name> compose …`).
    * The board's own default context is the one the Host runs under; a workspace
@@ -87,6 +96,8 @@ interface ComposeWorkflowOptions {
   portBase?: number
   /** Timeout of one compose command. */
   timeoutMs?: number
+  /** Command runner (the Host injects the worker-backed one; tests fake it). */
+  runner?: CommandRunner
 }
 
 interface CommandResult {
@@ -112,6 +123,7 @@ export class ComposeWorkflow implements TaskComposeController {
   private readonly portBase: number
   private readonly dockerCommand: string
   private readonly timeoutMs: number
+  private readonly runner: CommandRunner
 
   constructor(options: ComposeWorkflowOptions = {}) {
     this.file = options.file ?? DEFAULT_COMPOSE_FILE
@@ -119,6 +131,7 @@ export class ComposeWorkflow implements TaskComposeController {
     this.portBase = options.portBase ?? DEFAULT_COMPOSE_PORT_BASE
     this.dockerCommand = options.dockerCommand ?? 'docker'
     this.timeoutMs = options.timeoutMs ?? COMPOSE_TIMEOUT_MS
+    this.runner = options.runner ?? new LocalCommandRunner()
   }
 
   /** Point the workflow at another environment template (settings). */
@@ -221,42 +234,30 @@ export class ComposeWorkflow implements TaskComposeController {
    * command reaches the daemon the workspace named instead of the Host's
    * default one.
    */
-  private exec(dir: string, args: readonly string[], task?: TaskRecord, extra: Record<string, string> = {}, options: ComposeRunOptions = {}): Promise<CommandResult> {
+  private async exec(dir: string, args: readonly string[], task?: TaskRecord, extra: Record<string, string> = {}, options: ComposeRunOptions = {}): Promise<CommandResult> {
     const argv = [...(options.context === undefined || options.context === '' ? [] : ['--context', options.context]), ...args]
-    return new Promise(resolve => {
-      const child = spawn(this.dockerCommand, argv, {
+    const scope = options.scope ?? task?.id
+    const env = {
+      ...(task === undefined ? {} : { DSH_TASK_ID: task.id, COMPOSE_PROJECT_NAME: composeProject(task) }),
+      ...extra,
+    }
+    const onAbort = (): void => { if (scope !== undefined) this.runner.cancelScope(scope) }
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      const result = await this.runner.run({
+        command: this.dockerCommand,
+        args: argv,
         cwd: dir,
-        shell: false,
-        env: {
-          ...process.env,
-          ...(task === undefined ? {} : { DSH_TASK_ID: task.id, COMPOSE_PROJECT_NAME: composeProject(task) }),
-          ...extra,
-        },
+        env,
+        timeoutMs: this.timeoutMs,
+        ...(scope === undefined ? {} : { scope }),
       })
-      let stdout = ''
-      let stderr = ''
-      let settled = false
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        child.kill('SIGKILL')
-        resolve({ code: -1, stdout, stderr: `${stderr}\ntimed out after ${this.timeoutMs} ms` })
-      }, this.timeoutMs)
-      child.stdout?.on('data', chunk => { stdout += String(chunk) })
-      child.stderr?.on('data', chunk => { stderr += String(chunk) })
-      child.on('error', error => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve({ code: -1, stdout, stderr: `${stderr}\n${error.message}` })
-      })
-      child.on('close', code => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve({ code: code ?? -1, stdout, stderr })
-      })
-    })
+      if (result.aborted) return { code: -1, stdout: result.stdout, stderr: `${result.stderr}\ncancelled by the operator` }
+      if (result.timedOut) return { code: -1, stdout: result.stdout, stderr: `${result.stderr}\ntimed out after ${this.timeoutMs} ms` }
+      return { code: result.code ?? -1, stdout: result.stdout, stderr: result.stderr }
+    } finally {
+      options.signal?.removeEventListener('abort', onAbort)
+    }
   }
 }
 

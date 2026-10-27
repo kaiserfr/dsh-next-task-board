@@ -153,6 +153,89 @@ export type ExecutionInspection =
   | { outcome: 'failed'; error: string }
   | { outcome: 'cancelled'; error: string }
 
+/** One message waiting in a live agent's inbox (structural slice of the loop's inbox). */
+export interface PendingSessionMessage {
+  id?: string
+  role?: string
+  source?: { kind?: string }
+  content?: unknown
+}
+
+/**
+ * Live agent surface the hard stop needs. Structurally typed on purpose: the
+ * board must not import the dsh core's loop internals, and a runtime that lacks
+ * one member simply takes the next escalation step instead.
+ */
+export interface LiveSessionAgent {
+  status: string
+  cancel(cause: { kind: 'user' }, options?: { keepInbox?: boolean }): void
+  inbox?: {
+    nextTurn?: readonly PendingSessionMessage[]
+    nextStep?: readonly PendingSessionMessage[]
+  }
+  phase?: { kind?: string; lastTurn?: number }
+  setPhase?(next: { kind: 'idle'; lastTurn: number }): void
+}
+
+/** Background jobs a session owns; the hard stop kills them so they cannot wake it again. */
+export interface SessionJobControl {
+  list(sessionId: string): readonly { id: string; status: string }[]
+  kill(jobId: string, sessionId: string, reason: string): void
+}
+
+/**
+ * Direct handles for a session's live agent and its background jobs. Supplied by
+ * the Host plugin entry (`ctx.agents`, `ctx.jobs`); absent on a runtime or a test
+ * harness that only wires the gateway, in which case the stop degrades to the
+ * plain `session/cancel` RPC.
+ */
+export interface SessionControl {
+  agent?: (sessionId: string) => LiveSessionAgent | undefined
+  jobs?: SessionJobControl
+}
+
+/** What one hard stop did; the card's execution record keeps the preserved messages. */
+export interface SessionStopReport {
+  /** The session has a live agent on this Host. */
+  attached: boolean
+  /** The agent came to rest (verified) or the cancel RPC was acknowledged. */
+  stopped: boolean
+  /** Background jobs killed on the way, so no completion notice can wake the agent. */
+  jobsKilled: number
+  /**
+   * Human messages the stop removed from the agent's inbox, as plain text in
+   * their original order. The resume turn re-sends them, so pausing never eats
+   * something the human typed.
+   */
+  preserved: string[]
+  /** The agent still reported "running" after the cancel and had to be reset. */
+  phaseReset: boolean
+}
+
+/** Text of one pending inbox message (string content, or its text parts). */
+function pendingText(message: PendingSessionMessage): string | undefined {
+  if (message.source?.kind !== 'user') return undefined
+  if (typeof message.content === 'string') return message.content.trim() === '' ? undefined : message.content
+  if (!Array.isArray(message.content)) return undefined
+  const text = message.content
+    .map(part => (typeof part === 'object' && part !== null && (part as { type?: unknown }).type === 'text'
+      ? String((part as { text?: unknown }).text ?? '')
+      : ''))
+    .join('')
+    .trim()
+  return text === '' ? undefined : text
+}
+
+/** Wait for one condition without polling faster than 50 ms. */
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (predicate()) return true
+    if (Date.now() >= deadline) return false
+    await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(10, deadline - Date.now()))))
+  }
+}
+
 /** A post-create launch failure that still identifies the session to the ledger. */
 export class SessionLaunchError extends Error {
   constructor(readonly sessionId: string, cause: unknown) {
@@ -203,6 +286,11 @@ export interface PromptTextOptions {
    */
   resume?: boolean
   /**
+   * Human messages the hard stop removed from the inbox before they could start
+   * a turn. The resume turn re-sends them, so a pause never loses input.
+   */
+  resumeMessages?: readonly string[]
+  /**
    * This run continues the card's clarification conversation: the human pulled
    * the card on to the run column, so the agent — which already holds the card's
    * instruction, the questions it asked and their answers from that same
@@ -227,6 +315,24 @@ export interface PromptTextOptions {
  */
 function resumePrompt(): string {
   return 'Weitermachen (continue): Die Ausführung wurde pausiert und wird jetzt fortgesetzt. Arbeite an der aktuellen Aufgabe weiter.'
+}
+
+/**
+ * The continue turn, plus the human messages the hard stop removed from the
+ * session's inbox before it could start a turn on them. Pausing must never eat
+ * what the human typed, so the resume turn carries them back into the same
+ * conversation — after the continue instruction, because they belong to the
+ * work that was interrupted.
+ */
+function resumePromptWith(messages: readonly string[] | undefined): string {
+  const base = resumePrompt()
+  if (messages === undefined || messages.length === 0) return base
+  return [
+    base,
+    '',
+    'Vor der Pause waren noch diese Eingaben von dir eingereiht (sie werden hiermit nachgeholt):',
+    ...messages.map(message => `- ${message}`),
+  ].join('\n')
 }
 
 /**
@@ -392,7 +498,7 @@ function environmentNote(task: TaskRecord): string | undefined {
 function implementationTurn(task: TaskRecord, options: PromptTextOptions): string {
   if (options.merge === true) return mergePrompt(task)
   if (options.implement === true) return implementPrompt()
-  if (options.resume === true) return resumePrompt()
+  if (options.resume === true) return resumePromptWith(options.resumeMessages)
   // Only the framing when the corrected conversation continues: repeating the
   // original instruction as a fresh turn would misrepresent the session history
   // the user is looking at (the ask, the work, the review remark).
@@ -498,6 +604,8 @@ export class HostExecutionRunner {
     private readonly workspaceRegistry?: TaskBoardWorkspaceRegistry,
     unavailableRetry?: { attempts?: number; backoffMs?: number },
     private readonly peer?: GatewayPeer,
+    /** Live agent/job handles for the escalating hard stop (Host only). */
+    private readonly control?: SessionControl,
   ) {
     this.unavailableAttempts = unavailableRetry?.attempts ?? SERVICE_UNAVAILABLE_ATTEMPTS
     this.unavailableBackoffMs = unavailableRetry?.backoffMs ?? SERVICE_UNAVAILABLE_BACKOFF_MS
@@ -530,7 +638,7 @@ export class HostExecutionRunner {
    *   continued session.
    * @returns the session id the execution runs in.
    */
-  async launch(task: TaskRecord, options: { reuseSessionId?: string; rework?: boolean; clarification?: boolean; implement?: boolean; merge?: boolean; resume?: boolean } = {}): Promise<string> {
+  async launch(task: TaskRecord, options: { reuseSessionId?: string; rework?: boolean; clarification?: boolean; implement?: boolean; merge?: boolean; resume?: boolean; resumeMessages?: readonly string[] } = {}): Promise<string> {
     // A handover bundle overrides the legacy pin fields: the bundle is the
     // authoritative execution triplet for a continuation card (issue #5).
     const workspaceId = task.handover?.workspaceId ?? task.workspaceId
@@ -558,6 +666,7 @@ export class HostExecutionRunner {
       ...(options.implement === true ? { implement: true } : {}),
       ...(options.merge === true ? { merge: true } : {}),
       ...(options.resume === true ? { resume: true } : {}),
+      ...(options.resumeMessages === undefined || options.resumeMessages.length === 0 ? {} : { resumeMessages: options.resumeMessages }),
     })
     if (reused !== undefined) {
       try {
@@ -633,6 +742,113 @@ export class HostExecutionRunner {
    */
   async cancel(sessionId: string): Promise<void> {
     await this.invoke('session', 'cancel', { sessionId })
+  }
+
+  /**
+   * Whether the session still owns background jobs that are running or stopping.
+   *
+   * A settled turn is not a session at rest: a background job outlives the turn
+   * that started it, and its completion notice wakes the agent into a *new*
+   * turn. Settlement therefore refuses to park or fail a card while one is
+   * live, and the hard stop kills them so the wake-up cannot happen.
+   * @param sessionId - the execution session.
+   * @returns false when this Host cannot see jobs (older runtime/test harness).
+   */
+  async hasLiveJobs(sessionId: string): Promise<boolean> {
+    const jobs = this.control?.jobs
+    if (jobs === undefined) return false
+    try {
+      return jobs.list(sessionId).some(job => job.status === 'running' || job.status === 'stopping')
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Stop one session for good: cancel the turn, kill the jobs that would wake it
+   * again, drop what is queued, and verify that the agent really came to rest.
+   *
+   * The order is deliberate: jobs first (their completion notices must not be
+   * produced while the cancel is in flight), then the cancel with
+   * `keepInbox: false` (a retained queued prompt would start the next turn
+   * immediately), then the verification. Only if the runtime still reports the
+   * agent as running does the last resort force the phase to idle — that is a
+   * statement about the loop's bookkeeping, not a kill, so it is used only after
+   * the honest paths had their chance.
+   *
+   * Human messages that were waiting in the inbox are *collected* before the
+   * cancel and returned as text, so the card can re-send them on resume instead
+   * of silently losing them. Job notifications are not collected: they are the
+   * wake-up this method exists to stop.
+   * @param sessionId - the execution session.
+   * @param options - cancel budget and whether to collect human messages.
+   * @returns what happened, including the preserved human messages.
+   */
+  async stopSession(
+    sessionId: string,
+    options: { timeoutMs?: number; preserveUserMessages?: boolean } = {},
+  ): Promise<SessionStopReport> {
+    const timeoutMs = options.timeoutMs ?? 2_000
+    const agent = this.control?.agent?.(sessionId)
+    if (agent === undefined) {
+      // No live agent handle: either the run already ended (the RPC then says
+      // "not attached") or the runtime does not expose the agent registry. The
+      // RPC is still the honest call; its failure is reported as "not stopped"
+      // so the caller can undo the pause instead of freezing a finished card.
+      try {
+        await this.invoke('session', 'cancel', { sessionId })
+      } catch {
+        return { attached: false, stopped: false, jobsKilled: 0, preserved: [], phaseReset: false }
+      }
+      return { attached: false, stopped: true, jobsKilled: 0, preserved: [], phaseReset: false }
+    }
+    const preserved: string[] = []
+    if (options.preserveUserMessages !== false) {
+      const pending = [...(agent.inbox?.nextTurn ?? []), ...(agent.inbox?.nextStep ?? [])]
+      for (const message of pending) {
+        const text = pendingText(message)
+        if (text !== undefined) preserved.push(text)
+      }
+    }
+    let jobsKilled = 0
+    const jobs = this.control?.jobs
+    if (jobs !== undefined) {
+      try {
+        for (const job of jobs.list(sessionId)) {
+          if (job.status !== 'running' && job.status !== 'stopping') continue
+          try {
+            jobs.kill(job.id, sessionId, 'task board: session stopped by the operator')
+            jobsKilled += 1
+          } catch {
+            // A job that settled in between is not a failure.
+          }
+        }
+      } catch {
+        // The job listing is best-effort: the cancel below still ends the turn.
+      }
+    }
+    try {
+      agent.cancel({ kind: 'user' }, { keepInbox: false })
+    } catch (error) {
+      console.warn(`[dsh-task-board] cancel of session ${sessionId} failed; falling back to the session RPC`, error)
+      try {
+        await this.invoke('session', 'cancel', { sessionId })
+      } catch {
+        // Ignored: the report below says whether the agent is still running.
+      }
+    }
+    if (await waitFor(() => agent.status !== 'running', timeoutMs)) {
+      return { attached: true, stopped: true, jobsKilled, preserved, phaseReset: false }
+    }
+    let phaseReset = false
+    try {
+      agent.setPhase?.({ kind: 'idle', lastTurn: typeof agent.phase?.lastTurn === 'number' ? agent.phase.lastTurn : 0 })
+      phaseReset = true
+    } catch (error) {
+      console.warn(`[dsh-task-board] phase reset of session ${sessionId} failed`, error)
+    }
+    const stopped = phaseReset && await waitFor(() => agent.status !== 'running', timeoutMs)
+    return { attached: true, stopped, jobsKilled, preserved, phaseReset }
   }
 
   async listRunning(): Promise<{ known: true; count: number; items: SessionSummary[] } | { known: false }> {
@@ -774,6 +990,12 @@ export class HostExecutionRunner {
     // every queued prompt and every job wake-up as its own turn), and the
     // roster row inspected above was fetched before this history scan.
     if (!await this.sessionEnded(sessionId)) return { outcome: 'pending' }
+    // A settled turn is not a session at rest: a background job outlives it and
+    // its completion notice starts the next turn. Settling here would park or
+    // fail the card while the session keeps working, and the card would then no
+    // longer own the run that is still running (exactly the orphaned session the
+    // watchdog exists to prevent). Keep the run open until the jobs are gone.
+    if (await this.hasLiveJobs(sessionId)) return { outcome: 'pending' }
     const stop = turnStopError(turnEnd.event.data)
     return stop === undefined
       ? { outcome: 'succeeded' }

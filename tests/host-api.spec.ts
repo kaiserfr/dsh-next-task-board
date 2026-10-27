@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createTask } from '../src/core/tasks.ts'
 import { HostApiError, HttpTaskBoardHostTransport, type HostApiFailure } from '../src/client/host-api.ts'
-import type { TaskBoardEventPayload, TaskBoardSnapshot } from '../src/protocol.ts'
+import type { TaskBoardEventFrame, TaskBoardEventPayload, TaskBoardSnapshot } from '../src/protocol.ts'
 
 const snapshot: TaskBoardSnapshot = {
   schemaVersion: 3,
@@ -23,24 +23,30 @@ class MemoryStorage {
 afterEach(() => { vi.unstubAllGlobals() })
 
 describe('HttpTaskBoardHostTransport migration', () => {
-  it('keeps v1 data, retries with stable ids, and marks import only after Host confirmation', async () => {
+  it('keeps v1 data, retries with stable ids, and marks import only after the Host applied it', async () => {
     const storage = new MemoryStorage()
     const bodies: Array<{ requestId: string; action: { sourceId: string } }> = []
+    const legacy = [createTask({ title: 'legacy', description: '', prompt: '' }, 1, 'legacy')]
     let fail = true
+    let imported = false
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.endsWith('/state')) return new Response(JSON.stringify(snapshot), { status: 200 })
+      // The Host answers the accepted import with 202 and only then applies it;
+      // /state therefore carries the imported card after the action lane ran.
+      if (url.endsWith('/state')) {
+        return new Response(JSON.stringify(imported ? { ...snapshot, tasks: [legacy[0]] } : snapshot), { status: 200 })
+      }
       bodies.push(JSON.parse(String(init?.body)) as typeof bodies[number])
       if (fail) throw new Error('offline')
-      return new Response(JSON.stringify(snapshot), { status: 200, headers: { 'content-type': 'application/json' } })
+      imported = true
+      return new Response(JSON.stringify({ ok: true, requestId: 'request' }), { status: 202, headers: { 'content-type': 'application/json' } })
     }))
-    const legacy = [createTask({ title: 'legacy', description: '', prompt: '' }, 1, 'legacy')]
     const transport = new HttpTaskBoardHostTransport(storage)
     // A refused connection is reported as an unreachable Host, never as the
     // raw fetch rejection (#1528).
     await expect(transport.bootstrap(legacy)).rejects.toMatchObject({ failure: 'unreachable' })
     expect(storage.getItem('dsh.taskBoard.v2.hostImported')).toBeNull()
     fail = false
-    await expect(transport.bootstrap(legacy)).resolves.toEqual(snapshot)
+    await expect(transport.bootstrap(legacy)).resolves.toMatchObject({ tasks: [expect.objectContaining({ id: 'legacy' })] })
     expect(storage.getItem('dsh.taskBoard.v2.hostImported')).toBe('ledger-a')
     expect(bodies[1].requestId).toBe(bodies[0].requestId)
     expect(bodies[1].action.sourceId).toBe(bodies[0].action.sourceId)
@@ -60,13 +66,21 @@ describe('HttpTaskBoardHostTransport migration', () => {
   it('imports the retained v1 backup again for a new Host ledger generation', async () => {
     const storage = new MemoryStorage()
     storage.setItem('dsh.taskBoard.v2.hostImported', 'old-ledger')
+    const backup = createTask({ title: 'backup', description: '', prompt: '' }, 1, 'backup')
+    let imported = false
     const next = { ...snapshot, revision: 0, scheduler: { timeZone: 'UTC', ledgerId: 'recovered-ledger' } }
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify(next), { status: 200 }))
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/state')) {
+        return new Response(JSON.stringify(imported ? { ...next, tasks: [backup] } : next), { status: 200 })
+      }
+      imported = true
+      return new Response(JSON.stringify({ ok: true, requestId: 'request' }), { status: 202 })
+    })
     vi.stubGlobal('fetch', fetchMock)
-    await new HttpTaskBoardHostTransport(storage).bootstrap([
-      createTask({ title: 'backup', description: '', prompt: '' }, 1, 'backup'),
-    ])
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await new HttpTaskBoardHostTransport(storage).bootstrap([backup])
+    // state, accepted import, state (the marker is written after the card is in
+    // the ledger, not on the 202 alone).
+    expect(fetchMock).toHaveBeenCalledTimes(3)
     expect(storage.getItem('dsh.taskBoard.v2.hostImported')).toBe('recovered-ledger')
   })
 
@@ -196,11 +210,13 @@ describe('HttpTaskBoardHostTransport SSE subscription', () => {
     close(): void { this.closed = true }
   }
 
-  const frame: TaskBoardEventPayload = {
+  const payload: TaskBoardEventPayload = {
     revision: 1,
     scheduler: { timeZone: 'UTC', ledgerId: 'ledger-a' },
     power: snapshot.power,
   }
+  const frame: TaskBoardEventFrame = { type: 'delta', payload }
+  const fullFrame: TaskBoardEventFrame = { type: 'snapshot', snapshot }
 
   beforeEach(() => {
     FakeEventSource.instances = []
@@ -218,23 +234,25 @@ describe('HttpTaskBoardHostTransport SSE subscription', () => {
 
   it('forwards parsed event frames and falls back to a bare call on malformed frames', () => {
     const transport = new HttpTaskBoardHostTransport(new MemoryStorage())
-    const calls: Array<TaskBoardEventPayload | undefined> = []
+    const calls: Array<TaskBoardEventFrame | undefined> = []
     const unsubscribe = transport.subscribe(event => { calls.push(event) })
     const source = FakeEventSource.instances.at(-1)
     if (source === undefined) throw new Error('EventSource was not constructed')
+    // The stream opens with a full snapshot, then carries deltas.
+    source.onmessage?.({ data: JSON.stringify(fullFrame) } as MessageEvent<string>)
     source.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent<string>)
-    expect(calls).toEqual([frame])
+    expect(calls).toEqual([fullFrame, frame])
     source.onmessage?.({ data: 'not json' } as MessageEvent<string>)
     source.onmessage?.({ data: JSON.stringify({ hello: 'world' }) } as MessageEvent<string>)
-    expect(calls).toEqual([frame, undefined, undefined])
-    expect(calls[1]).toBeUndefined()
+    expect(calls).toEqual([fullFrame, frame, undefined, undefined])
+    expect(calls[2]).toBeUndefined()
     unsubscribe()
     expect(source.closed).toBe(true)
   })
 
   it('nudges the panel into a state read when the event stream cannot connect (#1528)', () => {
     const transport = new HttpTaskBoardHostTransport(new MemoryStorage())
-    const calls: Array<TaskBoardEventPayload | undefined> = []
+    const calls: Array<TaskBoardEventFrame | undefined> = []
     transport.subscribe(event => { calls.push(event) })
     const source = FakeEventSource.instances.at(-1)
     if (source === undefined) throw new Error('EventSource was not constructed')
@@ -247,7 +265,7 @@ describe('HttpTaskBoardHostTransport SSE subscription', () => {
 
   it('calls the listener on visibilitychange while the tab is visible', () => {
     const transport = new HttpTaskBoardHostTransport(new MemoryStorage())
-    const calls: Array<TaskBoardEventPayload | undefined> = []
+    const calls: Array<TaskBoardEventFrame | undefined> = []
     transport.subscribe(event => { calls.push(event) })
     visibilityListener?.()
     expect(calls).toEqual([undefined])

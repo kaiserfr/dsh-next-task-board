@@ -84,19 +84,20 @@ describe('new-task AI parse section (#1540)', () => {
     expect(container.querySelector('[data-dsh-part="ai-parse"]')).toBeNull()
   })
 
-  it('sends the pasted text and the picked model, then fills the form', async () => {
+  it('sends the pasted text (the route is fixed by the Host setting) and fills the form', async () => {
     const { container, parseTaskDraft } = renderModal()
     const section = container.querySelector('[data-dsh-part="ai-parse"]')
     expect(section).not.toBeNull()
-    // The model roster arrives from the runtime: the first entry is preselected.
-    expect(section!.querySelector('select')!.value).toBe('deepseek/deepseek-chat')
+    // No model picker any more: a parse must not compete with a running card
+    // for a local single-slot model; the Host owns the route.
+    expect(section!.querySelector('select')).toBeNull()
     expect(parseButton(container).disabled).toBe(true)
 
     typeInto(field(container, t('new.aiParsePlaceholder')), '  下周三前把报价发给张工  ')
     await act(async () => { parseButton(container).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
 
     expect(parseTaskDraft).toHaveBeenCalledOnce()
-    expect(parseTaskDraft.mock.calls[0]![0]).toEqual({ text: '下周三前把报价发给张工', model: 'deepseek/deepseek-chat' })
+    expect(parseTaskDraft.mock.calls[0]![0]).toEqual({ text: '下周三前把报价发给张工' })
     expect(field(container, t('new.titlePlaceholder'))).toHaveProperty('value', draft.title)
     expect(field(container, t('new.descriptionPlaceholder'))).toHaveProperty('value', draft.description)
     expect(field(container, t('new.promptPlaceholder'))).toHaveProperty('value', draft.prompt)

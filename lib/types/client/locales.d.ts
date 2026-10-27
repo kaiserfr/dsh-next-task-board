@@ -60,6 +60,7 @@ export declare const zh: {
     'new.aiParseHint': string;
     'new.aiParsePlaceholder': string;
     'new.aiParseModel': string;
+    'new.aiParseElapsed': string;
     'new.aiParseRun': string;
     'new.aiParseCancel': string;
     'new.aiParseEmpty': string;
@@ -151,6 +152,9 @@ export declare const zh: {
     'detail.run': string;
     'detail.rerun': string;
     'detail.pause': string;
+    'detail.cancelWork': string;
+    'detail.hardStop': string;
+    'detail.hardStopConfirm': string;
     'detail.continue': string;
     'detail.paused': string;
     'detail.delete': string;
@@ -314,6 +318,10 @@ export declare const zh: {
     'settings.stateMachine': string;
     'settings.reviewEnvironments': string;
     'settings.reviewEnvironmentsHint': string;
+    'settings.parseModel': string;
+    'settings.parseModelHint': string;
+    'settings.parseTimeoutMs': string;
+    'settings.parseTimeoutMsHint': string;
     'settings.editorCommand': string;
     'settings.repoSubpath': string;
     'settings.repoSubpathHint': string;

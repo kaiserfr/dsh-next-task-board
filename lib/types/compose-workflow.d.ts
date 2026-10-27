@@ -1,3 +1,23 @@
+/**
+ * Task-scoped Docker Compose environments.
+ *
+ * A card whose worktree carries a compose file gets **its own stack**: the
+ * project name is derived from the card id (`dsh-tb-<id8>`), every command runs
+ * inside the card's worktree, and the published host ports are read back from
+ * `docker compose ps` so the board can show the human where the app answers.
+ *
+ * The environment lives exactly as long as the card needs it — it is brought up
+ * when an implementation run starts and torn down when the card leaves the run
+ * and review columns, when it is deleted or archived, or when the Host notices
+ * that the project has no card any more.
+ *
+ * Everything here is asynchronous on purpose: `compose up` builds images and
+ * starts containers, which can take minutes, and the Host must keep serving the
+ * board meanwhile. The command is always a fixed argv with `shell: false`, and
+ * a missing compose file means "no environment", not an error — the feature is
+ * discovered per workspace, not configured.
+ */
+import { type CommandRunner } from './command-runner.ts';
 import type { TaskCompose, TaskRecord } from './core/tasks.ts';
 /** Compose file a task environment is brought up from unless configured otherwise. */
 export declare const DEFAULT_COMPOSE_FILE = "docker-compose.yml";
@@ -11,6 +31,15 @@ export declare const COMPOSE_LOG_TAIL = 200;
 export declare const DEFAULT_COMPOSE_PORT_RANGE = 800;
 /** Per-call options of one compose invocation. */
 export interface ComposeRunOptions {
+    /**
+     * Card id the command works for, for cancellation. The task record already
+     * provides it; a teardown after the card is gone has only the id.
+     */
+    scope?: string;
+    /**
+     * Kill the command when this signal aborts (the operator pressed "Abbrechen").
+     */
+    signal?: AbortSignal;
     /**
      * Docker context the command addresses (`docker --context <name> compose …`).
      * The board's own default context is the one the Host runs under; a workspace
@@ -53,6 +82,8 @@ interface ComposeWorkflowOptions {
     portBase?: number;
     /** Timeout of one compose command. */
     timeoutMs?: number;
+    /** Command runner (the Host injects the worker-backed one; tests fake it). */
+    runner?: CommandRunner;
 }
 /** Project name of a card's environment: stable, unique, easy to spot. */
 export declare function composeProject(task: Pick<TaskRecord, 'id'>): string;
@@ -64,6 +95,7 @@ export declare class ComposeWorkflow implements TaskComposeController {
     private readonly portBase;
     private readonly dockerCommand;
     private readonly timeoutMs;
+    private readonly runner;
     constructor(options?: ComposeWorkflowOptions);
     /** Point the workflow at another environment template (settings). */
     setEnv(env: string): void;

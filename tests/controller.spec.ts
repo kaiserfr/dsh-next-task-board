@@ -403,9 +403,9 @@ describe('run loop', () => {
     await controller.whenIdle()
     expect(controller.getSnapshot().tasks[0].status).toBe('running')
 
-    // The Host settles the execution and broadcasts the frame.
+    // The Host settles the execution and broadcasts the delta with the card.
     remote = snapshot(3, [done])
-    onEvent?.({ revision: 3, scheduler: { timeZone: 'UTC', ledgerId: 'ledger-a' }, power: snapshot(3).power })
+    onEvent?.({ revision: 3, scheduler: { timeZone: 'UTC', ledgerId: 'ledger-a' }, power: snapshot(3).power, tasks: [done] })
     await flush()
     expect(controller.getSnapshot().tasks[0].status).toBe('done')
     expect(controller.getSnapshot().tasks[0].executions[0].result).toBe('succeeded')

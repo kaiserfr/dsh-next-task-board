@@ -62,10 +62,10 @@ export interface ReviewCommandResult {
 }
 
 /** Injection seam for the shell commands (tests replace it). */
-export type ReviewCommandRunner = (command: string, options: { cwd: string; env: Record<string, string>; timeoutMs: number }) => Promise<ReviewCommandResult>
+export type ReviewCommandRunner = (command: string, options: { cwd: string; env: Record<string, string>; timeoutMs: number; signal?: AbortSignal; scope?: string }) => Promise<ReviewCommandResult>
 
 /** Injection seam for fixed-argv calls (git diff; tests replace it). */
-export type ReviewFixedRunner = (command: string, args: readonly string[], options: { cwd: string; timeoutMs: number }) => Promise<ReviewCommandResult>
+export type ReviewFixedRunner = (command: string, args: readonly string[], options: { cwd: string; timeoutMs: number; signal?: AbortSignal; scope?: string }) => Promise<ReviewCommandResult>
 
 /** Injection seam for the editor launch (tests replace it). */
 export type ReviewAppLauncher = (command: string, args: readonly string[]) => Promise<void>
@@ -214,12 +214,20 @@ function detailOf(result: ReviewCommandResult): string {
  * Run one fixed argv without a shell; rejects with the reason (a missing
  * binary) and reports a non-zero exit with the command's own output.
  */
-function spawnFixed(command: string, args: readonly string[], options: { cwd: string; env?: Record<string, string>; timeoutMs: number }): Promise<ReviewCommandResult> {
+function spawnFixed(command: string, args: readonly string[], options: { cwd: string; env?: Record<string, string>; timeoutMs: number; signal?: AbortSignal }): Promise<ReviewCommandResult> {
   return new Promise(resolve => {
     const child = spawn(command, [...args], { cwd: options.cwd, shell: false, env: { ...process.env, ...options.env } })
     let stdout = ''
     let stderr = ''
     let settled = false
+    const onAbort = (): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.kill('SIGKILL')
+      resolve({ code: -1, stdout, stderr: `${stderr}\ncancelled by the operator` })
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true })
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
@@ -238,6 +246,7 @@ function spawnFixed(command: string, args: readonly string[], options: { cwd: st
       if (settled) return
       settled = true
       clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
       resolve({ code: code ?? -1, stdout, stderr })
     })
   })
@@ -250,13 +259,21 @@ function spawnFixed(command: string, args: readonly string[], options: { cwd: st
  * exported. A command that does not finish within the budget is killed and
  * reported as a failure — including its own output, so the reason is visible.
  */
-export function runShellCommand(command: string, options: { cwd: string; env: Record<string, string>; timeoutMs: number }): Promise<ReviewCommandResult> {
+export function runShellCommand(command: string, options: { cwd: string; env: Record<string, string>; timeoutMs: number; signal?: AbortSignal }): Promise<ReviewCommandResult> {
   return new Promise(resolve => {
     const shell = existsSync('/bin/bash') ? '/bin/bash' : '/bin/sh'
     const child = spawn(shell, ['-lc', command], { cwd: options.cwd, shell: false, env: { ...process.env, ...options.env } })
     let stdout = ''
     let stderr = ''
     let settled = false
+    const onAbort = (): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.kill('SIGKILL')
+      resolve({ code: -1, stdout, stderr: `${stderr}\ncancelled by the operator` })
+    }
+    options.signal?.addEventListener('abort', onAbort, { once: true })
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
@@ -275,6 +292,7 @@ export function runShellCommand(command: string, options: { cwd: string; env: Re
       if (settled) return
       settled = true
       clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
       resolve({ code: code ?? -1, stdout, stderr })
     })
   })
@@ -456,20 +474,23 @@ export class ReviewWorkflow {
    * card. Nothing is recorded as running here; only a successful start returns
    * a record with `startedAt`.
    */
-  async start(task: TaskRecord): Promise<TaskReview> {
+  async start(task: TaskRecord, signal?: AbortSignal): Promise<TaskReview> {
     const dir = this.directory(task)
     if (dir === undefined) throw new Error('the card has no directory to run the review environment in')
     const environment = this.environmentFor(task, dir)
-    if (this.composeTarget(task) !== undefined) return await this.startCompose(task, dir, environment)
+    if (this.composeTarget(task) !== undefined) return await this.startCompose(task, dir, environment, signal)
     if (!hasCommands(environment)) {
       throw new Error(`no review environment is configured for ${dir} (set "reviewEnvironments" or add a compose file)`)
     }
-    return await this.startCommand(task, dir, environment)
+    return await this.startCommand(task, dir, environment, signal)
   }
 
-  private async startCompose(task: TaskRecord, dir: string, environment: ReviewEnvironmentConfig | undefined): Promise<TaskReview> {
+  private async startCompose(task: TaskRecord, dir: string, environment: ReviewEnvironmentConfig | undefined, signal?: AbortSignal): Promise<TaskReview> {
     const context = environment?.dockerContext
-    const compose = await this.compose.up(task, context === undefined ? {} : { context })
+    const compose = await this.compose.up(task, {
+      ...(context === undefined ? {} : { context }),
+      ...(signal === undefined ? {} : { signal }),
+    })
     if (compose === undefined) throw new Error(`no compose file in ${dir}`)
     const env = compose.env ?? {}
     // The workspace entry may still name the app's URL (the published ports are
@@ -488,9 +509,9 @@ export class ReviewWorkflow {
     }
   }
 
-  private async startCommand(task: TaskRecord, dir: string, environment: ReviewEnvironmentConfig): Promise<TaskReview> {
+  private async startCommand(task: TaskRecord, dir: string, environment: ReviewEnvironmentConfig, signal?: AbortSignal): Promise<TaskReview> {
     const env = await this.commandEnv(task, environment)
-    const result = await this.runCommand(environment.start as string, { cwd: dir, env, timeoutMs: this.commandTimeoutMs })
+    const result = await this.runCommand(environment.start as string, { cwd: dir, env, timeoutMs: this.commandTimeoutMs, scope: task.id, ...(signal === undefined ? {} : { signal }) })
     if (result.code !== 0) throw new Error(`review start failed: ${detailOf(result)}`)
     const links = reviewLinks(environment.url ?? DEFAULT_REVIEW_URL_TEMPLATE, env, [], task.id)
     return {
@@ -509,9 +530,12 @@ export class ReviewWorkflow {
    * configured stop command in the very environment it was started with — the
    * assigned ports, so it stops this card's instance and not the human's.
    */
-  async stop(taskId: string, review: TaskReview): Promise<void> {
+  async stop(taskId: string, review: TaskReview, signal?: AbortSignal): Promise<void> {
     if (review.mode === 'compose') {
-      await this.compose.down(review.source, review.dir, review.context === undefined ? {} : { context: review.context })
+      await this.compose.down(review.source, review.dir, {
+        ...(review.context === undefined ? {} : { context: review.context }),
+        ...(signal === undefined ? {} : { signal }),
+      })
       return
     }
     const environment = findReviewEnvironment(this.environments, review.dir)
@@ -521,7 +545,7 @@ export class ReviewWorkflow {
     }
     const env = { ...companyEnvironment(environment), ...review.env }
     const expanded = expandCommand(command, review.env ?? {}, taskId)
-    const result = await this.runCommand(expanded, { cwd: review.dir, env, timeoutMs: this.commandTimeoutMs })
+    const result = await this.runCommand(expanded, { cwd: review.dir, env, timeoutMs: this.commandTimeoutMs, scope: taskId, ...(signal === undefined ? {} : { signal }) })
     if (result.code !== 0) throw new Error(`review stop failed: ${detailOf(result)}`)
   }
 
@@ -531,10 +555,13 @@ export class ReviewWorkflow {
    * `logs` command prints what the human wrote into it. Throws when the
    * workspace configures no logs command and the card has no compose file.
    */
-  async logs(taskId: string, review: TaskReview): Promise<string> {
+  async logs(taskId: string, review: TaskReview, signal?: AbortSignal): Promise<string> {
     if (review.mode === 'compose') {
       if (this.compose.logs === undefined) throw new Error('this host cannot read compose logs')
-      return await this.compose.logs(review.source, review.dir, review.context === undefined ? {} : { context: review.context })
+      return await this.compose.logs(review.source, review.dir, {
+        ...(review.context === undefined ? {} : { context: review.context }),
+        ...(signal === undefined ? {} : { signal }),
+      })
     }
     const environment = findReviewEnvironment(this.environments, review.dir)
     const command = environment?.logs
@@ -544,6 +571,8 @@ export class ReviewWorkflow {
       cwd: review.dir,
       env: { ...companyEnvironment(environment), ...review.env },
       timeoutMs: this.readTimeoutMs,
+      scope: taskId,
+      ...(signal === undefined ? {} : { signal }),
     })
     if (result.code !== 0) throw new Error(`review logs failed: ${detailOf(result)}`)
     return result.stdout === '' ? result.stderr : result.stdout
@@ -569,13 +598,18 @@ export class ReviewWorkflow {
    * parked (no reviewed commit) has nothing to compare and reads as an empty
    * diff instead of an error.
    */
-  async reviewDiff(task: TaskRecord): Promise<string> {
+  async reviewDiff(task: TaskRecord, signal?: AbortSignal): Promise<string> {
     const git = task.git
     const base = git?.base
     const commit = git?.reviewedCommit
     if (git === undefined || base === undefined || commit === undefined) return ''
     const cwd = this.directory(task) ?? git.repoPath
-    const result = await this.runFixed('git', ['--no-pager', 'diff', '--stat', '--no-color', base, commit], { cwd, timeoutMs: this.readTimeoutMs })
+    const result = await this.runFixed('git', ['--no-pager', 'diff', '--stat', '--no-color', base, commit], {
+      cwd,
+      timeoutMs: this.readTimeoutMs,
+      scope: task.id,
+      ...(signal === undefined ? {} : { signal }),
+    })
     if (result.code !== 0) throw new Error(`git diff failed: ${detailOf(result)}`)
     return result.stdout
   }

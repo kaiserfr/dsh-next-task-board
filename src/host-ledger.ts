@@ -503,6 +503,72 @@ export class HostTaskLedger {
   }
 
   /**
+   * Live task references (no clone) for the Host's event projection: the delta
+   * builder compares task objects by identity, which is exactly how the ledger
+   * mutates them (a changed card is a new object in a new array). Never serialize
+   * the returned array directly — it is the document's own state.
+   */
+  tasksReference(): readonly TaskRecord[] {
+    return this.document.tasks
+  }
+
+  /** Publish one derived Host message (service-side actions: a refused stop, an abort). */
+  note(taskId: string | undefined, message: string): void {
+    this.pushNotice(taskId, message)
+  }
+
+  /**
+   * The card conversations the orphan watchdog follows, one row per card:
+   * whether that conversation still backs an open run, whether the card is
+   * paused, and when the run settled (the human-turn check anchors there).
+   * Deliberately a cheap projection — it runs on every poll.
+   */
+  sessionWatch(): Array<{
+    taskId: string
+    sessionId: string
+    open: boolean
+    paused: boolean
+    settledAt?: number
+    status: TaskRecord['status']
+    archived: boolean
+  }> {
+    const rows: Array<{
+      taskId: string
+      sessionId: string
+      open: boolean
+      paused: boolean
+      settledAt?: number
+      status: TaskRecord['status']
+      archived: boolean
+    }> = []
+    for (const task of this.document.tasks) {
+      let sessionId: string | undefined
+      let open = false
+      let settledAt: number | undefined
+      for (let index = task.executions.length - 1; index >= 0; index -= 1) {
+        const execution = task.executions[index]
+        if (execution.sessionId === undefined) continue
+        sessionId = execution.sessionId
+        open = execution.endedAt === undefined
+        settledAt = execution.endedAt
+        break
+      }
+      if (sessionId === undefined) sessionId = task.clarificationSessionId
+      if (sessionId === undefined) continue
+      rows.push({
+        taskId: task.id,
+        sessionId,
+        open,
+        paused: task.pausedAt !== undefined,
+        ...(settledAt === undefined ? {} : { settledAt }),
+        status: task.status,
+        archived: task.archivedAt !== undefined,
+      })
+    }
+    return rows
+  }
+
+  /**
    * One card as a live ledger reference (no clone), for Host-side bookkeeping
    * that must not pay for a whole-ledger copy — a review action resolving its
    * card, or a cleanup notice after the card is gone.

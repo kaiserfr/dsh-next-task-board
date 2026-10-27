@@ -31,12 +31,15 @@ describe('task-board HTTP routes', () => {
   let server: Server
   let base: string
   const apply = vi.fn(() => snapshot)
+  const acceptAction = vi.fn(() => true)
 
   beforeEach(async () => {
     apply.mockClear()
+    acceptAction.mockClear()
     const service = {
       snapshot: () => snapshot,
       apply,
+      acceptAction,
       subscribe: () => () => undefined,
     } as unknown as TaskBoardHostService
     const routes = makeTaskBoardRoutes(service)
@@ -60,10 +63,12 @@ describe('task-board HTTP routes', () => {
     const actionResponse = await fetch(`${base}/api/task-board/action`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' }, body: JSON.stringify(valid),
     })
-    expect(actionResponse.status).toBe(200)
+    // Accepted, not applied: the action enters the Host's lane and the outcome
+    // arrives as an action-result event.
+    expect(actionResponse.status).toBe(202)
     expect(actionResponse.headers.get('referrer-policy')).toBe('no-referrer')
     expect(actionResponse.headers.get('cache-control')).toBe('no-store')
-    expect(apply).toHaveBeenCalledOnce()
+    expect(acceptAction).toHaveBeenCalledOnce()
 
     expect((await fetch(`${base}/api/task-board/action`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(valid),
@@ -85,7 +90,7 @@ describe('task-board HTTP routes', () => {
     })).status).toBe(403)
     expect((await fetch(`${base}/api/task-board/action`, {
       method: 'POST', headers: { 'content-type': 'application/json', origin: base.replace('http:', 'https:') }, body: JSON.stringify(valid),
-    })).status).toBe(200)
+    })).status).toBe(202)
     expect((await fetch(`${base}/api/task-board/action`, {
       method: 'POST', headers: { 'content-type': 'text/plain', 'sec-fetch-site': 'same-origin' }, body: JSON.stringify(valid),
     })).status).toBe(415)
@@ -143,20 +148,22 @@ describe('task-board HTTP routes', () => {
     expect(response.status).toBe(413)
     expect(response.headers.get('referrer-policy')).toBe('no-referrer')
     expect(response.headers.get('cache-control')).toBe('no-store')
-    expect(apply).not.toHaveBeenCalled()
+    expect(acceptAction).not.toHaveBeenCalled()
   })
 
-  it('pushes an event frame with revision/scheduler/power and no task list', async () => {
+  it('opens the stream with a full snapshot and then pushes deltas without the task list', async () => {
     const frame = {
       revision: 3,
       scheduler: { timeZone: 'UTC', ledgerId: 'ledger-a', lastTickAt: 7 },
       power: snapshot.power,
     }
+    let push: (() => void) | undefined
     const service = {
       snapshot: () => snapshot,
       apply,
+      acceptAction,
       eventPayload: () => frame,
-      subscribe: () => () => undefined,
+      subscribe: (listener: () => void) => { push = listener; return () => undefined },
     } as unknown as TaskBoardHostService
     const routes = makeTaskBoardRoutes(service)
     const stream = createServer((req, res) => {
@@ -187,8 +194,32 @@ describe('task-board HTTP routes', () => {
         outgoing.once('error', reject)
         outgoing.end()
       })
-      expect(received).toEqual(frame)
-      expect(received).not.toHaveProperty('tasks')
+      expect(received).toEqual({ type: 'snapshot', snapshot })
+      // The next frame is a delta: the derived host fields, and no task list
+      // unless a card changed.
+      const delta = await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const outgoing = request(`http://127.0.0.1:${address.port}/api/task-board/events`, {
+          headers: { 'sec-fetch-site': 'same-origin' },
+        }, response => {
+          let count = 0
+          let buffer = ''
+          response.setEncoding('utf8')
+          response.on('data', (chunk: string) => {
+            buffer += chunk
+            const lines = buffer.split('\n').filter(entry => entry.startsWith('data: '))
+            if (lines.length <= count) return
+            count = lines.length
+            if (count === 1) { push?.(); return }
+            outgoing.destroy()
+            resolve(JSON.parse(lines[1]!.slice('data: '.length)) as Record<string, unknown>)
+          })
+          response.once('error', reject)
+        })
+        outgoing.once('error', reject)
+        outgoing.end()
+      })
+      expect(delta).toEqual({ type: 'delta', payload: frame })
+      expect(delta).not.toHaveProperty('tasks')
     } finally {
       await new Promise<void>((resolve, reject) => { stream.close(error => { if (error) reject(error); else resolve() }) })
     }

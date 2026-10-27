@@ -11,8 +11,14 @@
  */
 import { type LlmRuntime } from '@deepseek-ai/dsh-llm';
 import type { TaskBoardParseDraft, TaskBoardParseRequest } from './protocol.ts';
-/** How long one parse may take before the Host gives up on the model. */
-export declare const TASK_PARSE_TIMEOUT_MS = 45000;
+/**
+ * How long one parse may take before the Host gives up on the model. Two
+ * minutes, because the reply is short but the provider is shared: a running
+ * session must not starve the form, and the user can still cancel at any time.
+ */
+export declare const TASK_PARSE_TIMEOUT_MS = 120000;
+/** Route a parse uses when the caller names none: a fast, always-available model. */
+export declare const TASK_PARSE_DEFAULT_MODEL = "deepseek-official/deepseek-flash";
 /** Largest pasted text one parse accepts (bytes). */
 export declare const TASK_PARSE_MAX_INPUT: number;
 export type TaskParseFailureCode = 'no-model' | 'model-error' | 'parse-failed' | 'timeout';
@@ -48,4 +54,4 @@ export declare function draftFromReply(reply: string, source: string): TaskBoard
  * @returns the draft fields.
  * @throws TaskParseError with a code the route maps onto a status.
  */
-export declare function parseTaskDraft(llm: LlmRuntime, request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>;
+export declare function parseTaskDraft(llm: LlmRuntime, request: TaskBoardParseRequest, signal?: AbortSignal, timeoutMs?: number): Promise<TaskBoardParseDraft>;

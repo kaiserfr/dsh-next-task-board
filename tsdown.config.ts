@@ -11,7 +11,7 @@
  */
 import { clientBundle } from './build/tsdown.client.ts'
 
-export default clientBundle('dsh-next-task-board', ['src/index.ts', 'src/invariant.ts'], {
+export default clientBundle('dsh-next-task-board', ['src/index.ts', 'src/invariant.ts', 'src/command-worker.ts'], {
   libExternal: [
     '@deepseek-ai/dsh-agent-presets',
     '@deepseek-ai/dsh-api-gateway',

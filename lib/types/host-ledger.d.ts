@@ -161,6 +161,30 @@ export declare class HostTaskLedger {
     };
     state(): LedgerState;
     /**
+     * Live task references (no clone) for the Host's event projection: the delta
+     * builder compares task objects by identity, which is exactly how the ledger
+     * mutates them (a changed card is a new object in a new array). Never serialize
+     * the returned array directly — it is the document's own state.
+     */
+    tasksReference(): readonly TaskRecord[];
+    /** Publish one derived Host message (service-side actions: a refused stop, an abort). */
+    note(taskId: string | undefined, message: string): void;
+    /**
+     * The card conversations the orphan watchdog follows, one row per card:
+     * whether that conversation still backs an open run, whether the card is
+     * paused, and when the run settled (the human-turn check anchors there).
+     * Deliberately a cheap projection — it runs on every poll.
+     */
+    sessionWatch(): Array<{
+        taskId: string;
+        sessionId: string;
+        open: boolean;
+        paused: boolean;
+        settledAt?: number;
+        status: TaskRecord['status'];
+        archived: boolean;
+    }>;
+    /**
      * One card as a live ledger reference (no clone), for Host-side bookkeeping
      * that must not pay for a whole-ledger copy — a review action resolving its
      * card, or a cleanup notice after the card is gone.

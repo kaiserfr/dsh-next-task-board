@@ -24,11 +24,15 @@ export type ReviewCommandRunner = (command: string, options: {
     cwd: string;
     env: Record<string, string>;
     timeoutMs: number;
+    signal?: AbortSignal;
+    scope?: string;
 }) => Promise<ReviewCommandResult>;
 /** Injection seam for fixed-argv calls (git diff; tests replace it). */
 export type ReviewFixedRunner = (command: string, args: readonly string[], options: {
     cwd: string;
     timeoutMs: number;
+    signal?: AbortSignal;
+    scope?: string;
 }) => Promise<ReviewCommandResult>;
 /** Injection seam for the editor launch (tests replace it). */
 export type ReviewAppLauncher = (command: string, args: readonly string[]) => Promise<void>;
@@ -113,6 +117,7 @@ export declare function runShellCommand(command: string, options: {
     cwd: string;
     env: Record<string, string>;
     timeoutMs: number;
+    signal?: AbortSignal;
 }): Promise<ReviewCommandResult>;
 /** Start the editor and resolve once it is really running (a missing binary rejects). */
 export declare function launchDetached(command: string, args: readonly string[]): Promise<void>;
@@ -187,7 +192,7 @@ export declare class ReviewWorkflow {
      * card. Nothing is recorded as running here; only a successful start returns
      * a record with `startedAt`.
      */
-    start(task: TaskRecord): Promise<TaskReview>;
+    start(task: TaskRecord, signal?: AbortSignal): Promise<TaskReview>;
     private startCompose;
     private startCommand;
     /**
@@ -196,14 +201,14 @@ export declare class ReviewWorkflow {
      * configured stop command in the very environment it was started with — the
      * assigned ports, so it stops this card's instance and not the human's.
      */
-    stop(taskId: string, review: TaskReview): Promise<void>;
+    stop(taskId: string, review: TaskReview, signal?: AbortSignal): Promise<void>;
     /**
      * Snapshot of the environment's own log or the compose project's container
      * logs (compose's own snapshot size, {@link COMPOSE_LOG_TAIL}); a configured
      * `logs` command prints what the human wrote into it. Throws when the
      * workspace configures no logs command and the card has no compose file.
      */
-    logs(taskId: string, review: TaskReview): Promise<string>;
+    logs(taskId: string, review: TaskReview, signal?: AbortSignal): Promise<string>;
     /**
      * Open the card's directory in the editor, or the `*.code-workspace` it
      * carries (the workspace file is what the human's environment expects, and
@@ -217,7 +222,7 @@ export declare class ReviewWorkflow {
      * parked (no reviewed commit) has nothing to compare and reads as an empty
      * diff instead of an error.
      */
-    reviewDiff(task: TaskRecord): Promise<string>;
+    reviewDiff(task: TaskRecord, signal?: AbortSignal): Promise<string>;
     /**
      * Environment of one command run: the assigned ports first (remembered on the
      * card, so a re-start keeps the URL the human already has open), then the
