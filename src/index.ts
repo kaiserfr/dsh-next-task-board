@@ -116,7 +116,8 @@ export interface Config {
    * [{ "path": "/home/me/proj", "env": "PORT={port}",
    *    "start": "./start.sh", "stop": "./start.sh --stop",
    *    "logs": "tail -n 200 data/server.log",
-   *    "url": "http://127.0.0.1:{port}", "dockerContext": "default" }]
+   *    "url": "http://127.0.0.1:{port}", "dockerContext": "default",
+   *    "data": ["data/app.db"] }]
    * ```
    *
    * `{port}`, `{port2}` … become free host ports assigned to the card and kept
@@ -125,6 +126,12 @@ export interface Config {
    * `DOCKER_CONTEXT`; a compose file in that directory wins over the configured
    * commands. Leaving the review column stops the version again through the
    * configured `stop` — but only one the board itself started.
+   *
+   * `data` lists SQLite files relative to the repository root. Before a start,
+   * the Host snapshots them from the main checkout into the card's own worktree
+   * (read-only source, atomic target replace, overwritten every start), because a
+   * fresh worktree has no gitignored database. A missing or unreadable file fails
+   * the start with the reason.
    */
   reviewEnvironments?: Volatile<string>
   /**

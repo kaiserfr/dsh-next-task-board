@@ -10,7 +10,8 @@
  * [{ "path": "/home/me/proj", "env": "PORT={port}",
  *    "start": "./start.sh", "stop": "./start.sh --stop",
  *    "restart": "./start.sh --restart", "logs": "tail -n 200 data/server.log",
- *    "url": "http://127.0.0.1:{port}", "dockerContext": "default" }]
+ *    "url": "http://127.0.0.1:{port}", "dockerContext": "default",
+ *    "data": ["data/app.db"] }]
  * ```
  *
  * `path` is the repository root; a card matches the longest entry that is its
@@ -18,6 +19,11 @@
  * the workspace above it. Commands run in the card's directory — its own
  * worktree, else its main checkout — which is what makes every action
  * card-scoped rather than global.
+ *
+ * `data` names SQLite files (relative to the repository root) that the review
+ * start snapshots from the **main checkout** into the card's own worktree before
+ * it starts the version. A fresh worktree has no gitignored database, so without
+ * this list the reviewed version would start empty.
  */
 /** One workspace's review setup. */
 export interface ReviewEnvironmentConfig {
@@ -37,10 +43,20 @@ export interface ReviewEnvironmentConfig {
   dockerContext?: string
   /** Extra environment, `KEY=VALUE` pairs separated by commas or newlines. */
   env?: string
+  /**
+   * SQLite files to snapshot from the main checkout into the card's worktree
+   * before a start, relative to the repository root (`data/app.db`). Only a card
+   * that runs in its own worktree is seeded; the copy is never written back, and
+   * every start overwrites the worktree copy from the current main checkout.
+   */
+  data?: string[]
 }
 
-const ENVIRONMENT_KEYS = ['path', 'start', 'stop', 'restart', 'logs', 'url', 'dockerContext', 'env'] as const
+const ENVIRONMENT_KEYS = ['path', 'start', 'stop', 'restart', 'logs', 'url', 'dockerContext', 'env', 'data'] as const
 const COMMAND_KEYS = ['start', 'stop', 'restart', 'logs'] as const
+
+/** File suffixes the review data list accepts (case-insensitive). */
+export const REVIEW_DATA_SUFFIXES = ['.db', '.db3', '.sqlite', '.sqlite3'] as const
 
 function trimmed(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
@@ -72,6 +88,34 @@ export function normalizedReviewPath(value: string): string {
 export function isBelow(dir: string, prefix: string): boolean {
   if (dir === prefix) return true
   return dir.startsWith(`${prefix}/`) || dir.startsWith(`${prefix}\\`)
+}
+
+/**
+ * Validate and normalize one `data` entry: a path relative to the repository
+ * root that names a SQLite file. The returned path always uses `/` as the
+ * separator, so a document written on Windows and one written on POSIX mean the
+ * same file. `error` names the reason a human has to fix.
+ */
+export function normalizeReviewDataPath(value: unknown): { path: string } | { error: string } {
+  if (typeof value !== 'string' || value.trim() === '') return { error: 'must be a non-empty string' }
+  const raw = value.trim()
+  if (isAbsolutePath(raw)) return { error: 'must be relative to the repository root' }
+  if (raw.includes('\0')) return { error: 'must not contain a NUL byte' }
+  if (raw.endsWith('/') || raw.endsWith('\\')) return { error: 'must name a file, not a directory' }
+  const parts: string[] = []
+  for (const segment of raw.replace(/\\/g, '/').split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') return { error: 'must not leave the repository root' }
+    if (segment.toLowerCase() === '.git') return { error: 'must not point into .git' }
+    parts.push(segment)
+  }
+  if (parts.length === 0) return { error: 'must name a file' }
+  const normalized = parts.join('/')
+  const lower = normalized.toLowerCase()
+  if (!REVIEW_DATA_SUFFIXES.some(suffix => lower.endsWith(suffix))) {
+    return { error: `must be a SQLite file (${REVIEW_DATA_SUFFIXES.join(', ')})` }
+  }
+  return { path: normalized }
 }
 
 /**
@@ -136,6 +180,26 @@ export function parseReviewEnvironments(value: unknown): { environments: ReviewE
     const url = trimmed(row.url)
     const dockerContext = trimmed(row.dockerContext)
     const env = trimmed(row.env)
+    let data: string[] | undefined
+    if (row.data !== undefined) {
+      if (!Array.isArray(row.data)) {
+        errors.push(`${label}: "data" must be an array of SQLite file paths relative to the repository root`)
+        return
+      }
+      const files: string[] = []
+      let malformedData = false
+      row.data.forEach((item, dataIndex) => {
+        const entryPath = normalizeReviewDataPath(item)
+        if ('error' in entryPath) {
+          errors.push(`${label}: data[${dataIndex}] ${entryPath.error}`)
+          malformedData = true
+          return
+        }
+        if (!files.includes(entryPath.path)) files.push(entryPath.path)
+      })
+      if (malformedData) return
+      if (files.length > 0) data = files
+    }
     seen.add(normalized)
     environments.push({
       path: normalized,
@@ -143,6 +207,7 @@ export function parseReviewEnvironments(value: unknown): { environments: ReviewE
       ...(url === undefined ? {} : { url }),
       ...(dockerContext === undefined ? {} : { dockerContext }),
       ...(env === undefined ? {} : { env }),
+      ...(data === undefined ? {} : { data }),
     })
   })
   return { environments, errors }

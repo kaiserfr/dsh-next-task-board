@@ -28,11 +28,12 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import type { TaskRecord, TaskReview } from './core/tasks.ts'
 import { findReviewEnvironment, hasCommands, parseReviewEnvironments, type ReviewEnvironmentConfig } from './core/review-config.ts'
 import { COMPOSE_LOG_TAIL, DEFAULT_COMPOSE_PORT_BASE, composeProject, resolveComposeEnv, type TaskComposeController } from './compose-workflow.ts'
 import type { TaskBoardWorkspaceRegistry } from './host-runner.ts'
+import { seedReviewData } from './review-data.ts'
 
 // The declarative half of the review setup lives in `core/`, so the browser's
 // settings card validates exactly the document this workflow executes; the
@@ -455,16 +456,44 @@ export class ReviewWorkflow {
    * A failure throws with the command's own output — the caller puts it on the
    * card. Nothing is recorded as running here; only a successful start returns
    * a record with `startedAt`.
+   *
+   * Before either mode starts, the environment's `data` list is snapshotted from
+   * the card's main checkout into its own worktree: the worktree is a fresh
+   * checkout, so a gitignored database would otherwise be missing. A failed
+   * snapshot fails the start, never silently starting an empty application.
    */
   async start(task: TaskRecord): Promise<TaskReview> {
     const dir = this.directory(task)
     if (dir === undefined) throw new Error('the card has no directory to run the review environment in')
     const environment = this.environmentFor(task, dir)
-    if (this.composeTarget(task) !== undefined) return await this.startCompose(task, dir, environment)
-    if (!hasCommands(environment)) {
+    const compose = this.composeTarget(task)
+    if (compose === undefined && !hasCommands(environment)) {
       throw new Error(`no review environment is configured for ${dir} (set "reviewEnvironments" or add a compose file)`)
     }
+    await this.seedData(task, dir, environment)
+    if (compose !== undefined) return await this.startCompose(task, dir, environment)
+    if (!hasCommands(environment)) {
+      // Unreachable after the check above, but this is what narrows the type.
+      throw new Error(`no start command is configured for ${dir} (set "reviewEnvironments")`)
+    }
     return await this.startCommand(task, dir, environment)
+  }
+
+  /**
+   * Snapshot the configured SQLite files from the main checkout into the card's
+   * own worktree. Only a card that really runs in its worktree is seeded: a card
+   * reviewed in its main checkout already has the data, and a card without git
+   * state has no main checkout to read from. The source is never written.
+   */
+  private async seedData(task: TaskRecord, dir: string, environment: ReviewEnvironmentConfig | undefined): Promise<void> {
+    const files = environment?.data
+    if (files === undefined || files.length === 0) return
+    const repoPath = task.git?.repoPath
+    const worktreePath = task.git?.worktreePath
+    if (repoPath === undefined || worktreePath === undefined) return
+    if (resolve(worktreePath) !== resolve(dir)) return
+    if (resolve(repoPath) === resolve(worktreePath)) return
+    await seedReviewData({ sourceRoot: repoPath, targetRoot: dir, files })
   }
 
   private async startCompose(task: TaskRecord, dir: string, environment: ReviewEnvironmentConfig | undefined): Promise<TaskReview> {

@@ -367,6 +367,41 @@ containers:
   `docker compose -p <project> ...` instead of starting a second one under the
   default project name.
 
+## Review data for a worktree
+
+A card's worktree is a fresh checkout, so a gitignored SQLite database (the
+usual `data/app.db`) is missing there and the reviewed version would start
+empty. The review environment's `data` list names the SQLite files, relative to
+the repository root:
+
+```json
+{ "path": "/home/me/proj", "start": "./start.sh",
+  "data": ["data/app.db"] }
+```
+
+Before every review start — and therefore before every restart — the Host
+snapshots each file from the **main checkout** into the card's own worktree:
+
+* the source is opened **read-only**; the copy is SQLite's online backup, so a
+  live WAL database is copied consistently without being modified;
+* only relative paths are accepted, they must end in `.db`, `.db3`, `.sqlite`
+  or `.sqlite3`, and must not leave the repository root or point into `.git`;
+* the target is written next to the old copy and renamed into place; stale
+  `-wal`/`-shm`/`-journal` sidecars are removed first, so the copy is replaced
+  as a whole and every start begins from the current main checkout, not from the
+  last review's writes;
+* a missing or unreadable source, a failed snapshot, or a timeout fails the
+  start with the reason on the card — the version is never silently started with
+  an empty database;
+* a card reviewed in its main checkout (no own worktree) is not copied, and the
+  board never writes the worktree copy back. The copy lives in the worktree
+  (gitignored) and disappears with it.
+
+Only the `start` action seeds; a version started by hand outside the board is
+not touched. The snapshots use Node's built-in `node:sqlite` backup API; on a
+Node.js build without it the start fails with a clear reason, while the rest of
+the board keeps working.
+
 ## Configuration
 
 ```jsonc

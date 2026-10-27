@@ -10,7 +10,8 @@
  * [{ "path": "/home/me/proj", "env": "PORT={port}",
  *    "start": "./start.sh", "stop": "./start.sh --stop",
  *    "restart": "./start.sh --restart", "logs": "tail -n 200 data/server.log",
- *    "url": "http://127.0.0.1:{port}", "dockerContext": "default" }]
+ *    "url": "http://127.0.0.1:{port}", "dockerContext": "default",
+ *    "data": ["data/app.db"] }]
  * ```
  *
  * `path` is the repository root; a card matches the longest entry that is its
@@ -18,6 +19,11 @@
  * the workspace above it. Commands run in the card's directory — its own
  * worktree, else its main checkout — which is what makes every action
  * card-scoped rather than global.
+ *
+ * `data` names SQLite files (relative to the repository root) that the review
+ * start snapshots from the **main checkout** into the card's own worktree before
+ * it starts the version. A fresh worktree has no gitignored database, so without
+ * this list the reviewed version would start empty.
  */
 /** One workspace's review setup. */
 export interface ReviewEnvironmentConfig {
@@ -37,7 +43,16 @@ export interface ReviewEnvironmentConfig {
     dockerContext?: string;
     /** Extra environment, `KEY=VALUE` pairs separated by commas or newlines. */
     env?: string;
+    /**
+     * SQLite files to snapshot from the main checkout into the card's worktree
+     * before a start, relative to the repository root (`data/app.db`). Only a card
+     * that runs in its own worktree is seeded; the copy is never written back, and
+     * every start overwrites the worktree copy from the current main checkout.
+     */
+    data?: string[];
 }
+/** File suffixes the review data list accepts (case-insensitive). */
+export declare const REVIEW_DATA_SUFFIXES: readonly [".db", ".db3", ".sqlite", ".sqlite3"];
 /** One directory entry without a trailing separator (`/` stays `/`). */
 export declare function normalizedReviewPath(value: string): string;
 /**
@@ -46,6 +61,17 @@ export declare function normalizedReviewPath(value: string): string;
  * this module importing `node:path`.
  */
 export declare function isBelow(dir: string, prefix: string): boolean;
+/**
+ * Validate and normalize one `data` entry: a path relative to the repository
+ * root that names a SQLite file. The returned path always uses `/` as the
+ * separator, so a document written on Windows and one written on POSIX mean the
+ * same file. `error` names the reason a human has to fix.
+ */
+export declare function normalizeReviewDataPath(value: unknown): {
+    path: string;
+} | {
+    error: string;
+};
 /**
  * Parse the `reviewEnvironments` setting: the JSON text, or an already parsed
  * value. Invalid entries are reported with a reason and dropped, so one typo

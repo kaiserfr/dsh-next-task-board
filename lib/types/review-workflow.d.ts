@@ -186,8 +186,20 @@ export declare class ReviewWorkflow {
      * A failure throws with the command's own output — the caller puts it on the
      * card. Nothing is recorded as running here; only a successful start returns
      * a record with `startedAt`.
+     *
+     * Before either mode starts, the environment's `data` list is snapshotted from
+     * the card's main checkout into its own worktree: the worktree is a fresh
+     * checkout, so a gitignored database would otherwise be missing. A failed
+     * snapshot fails the start, never silently starting an empty application.
      */
     start(task: TaskRecord): Promise<TaskReview>;
+    /**
+     * Snapshot the configured SQLite files from the main checkout into the card's
+     * own worktree. Only a card that really runs in its worktree is seeded: a card
+     * reviewed in its main checkout already has the data, and a card without git
+     * state has no main checkout to read from. The source is never written.
+     */
+    private seedData;
     private startCompose;
     private startCommand;
     /**

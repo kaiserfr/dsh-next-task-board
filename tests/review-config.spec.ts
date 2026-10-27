@@ -53,6 +53,42 @@ describe('parseReviewEnvironments', () => {
     expect(parseReviewEnvironments('{oops').errors[0]).toContain('not valid JSON')
     expect(parseReviewEnvironments('{"path":"/"}\n').errors[0]).toContain('must be a JSON array')
   })
+
+  it('accepts relative SQLite data files and normalizes their separators', () => {
+    const { environments, errors } = parseReviewEnvironments([
+      {
+        path: JOBMINER,
+        start: './start.sh',
+        data: ['data/jobminer.db', './data/other.sqlite', 'data\\windows.db3', 'data/jobminer.db'],
+      },
+    ])
+    expect(errors).toEqual([])
+    expect(environments[0]?.data).toEqual(['data/jobminer.db', 'data/other.sqlite', 'data/windows.db3'])
+    // An empty list means "no data configured", not an empty field.
+    const empty = parseReviewEnvironments([{ path: JOBMINER, start: './start.sh', data: [] }])
+    expect(empty.errors).toEqual([])
+    expect(empty.environments[0]?.data).toBeUndefined()
+  })
+
+  it('refuses unsafe or non-SQLite data entries as a whole entry', () => {
+    const { environments, errors } = parseReviewEnvironments([
+      { path: JOBMINER, start: './start.sh', data: ['data/app.db'] },
+      { path: '/tmp/data-not-array', start: './start.sh', data: 'data/app.db' },
+      { path: '/tmp/data-absolute', start: './start.sh', data: ['/etc/app.db'] },
+      { path: '/tmp/data-outside', start: './start.sh', data: ['../app.db'] },
+      { path: '/tmp/data-text', start: './start.sh', data: ['data/app.txt'] },
+      { path: '/tmp/data-git', start: './start.sh', data: ['data/.git/app.db'] },
+      { path: '/tmp/data-directory', start: './start.sh', data: ['data/'] },
+    ])
+    expect(environments.map(entry => entry.path)).toEqual([JOBMINER])
+    expect(errors).toHaveLength(6)
+    expect(errors[0]).toContain('"data" must be an array')
+    expect(errors[1]).toContain('must be relative')
+    expect(errors[2]).toContain('must not leave the repository root')
+    expect(errors[3]).toContain('must be a SQLite file')
+    expect(errors[4]).toContain('must not point into .git')
+    expect(errors[5]).toContain('must name a file, not a directory')
+  })
 })
 
 describe('findReviewEnvironment', () => {

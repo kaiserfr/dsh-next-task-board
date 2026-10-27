@@ -8,6 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
 import { ReviewWorkflow, pickCodeWorkspace, type ReviewCommandRunner } from '../src/review-workflow.ts'
@@ -37,6 +38,25 @@ function fakeRunner(): ReviewCommandRunner & { calls: Array<{ command: string; c
   }) as unknown as ReviewCommandRunner & { calls: typeof calls }
   runner.calls = calls
   return runner
+}
+
+/** A small SQLite database with one row per given name. */
+function createDb(path: string, rows: readonly string[]): void {
+  const db = new DatabaseSync(path)
+  db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT NOT NULL)')
+  const insert = db.prepare('INSERT INTO items (name) VALUES (?)')
+  for (const row of rows) insert.run(row)
+  db.close()
+}
+
+/** Number of rows in such a database (read-only, so a check never writes). */
+function countRows(path: string): number {
+  const db = new DatabaseSync(path, { readOnly: true })
+  try {
+    return Number((db.prepare('SELECT COUNT(*) AS n FROM items').get() as { n: number }).n)
+  } finally {
+    db.close()
+  }
 }
 
 function workflow(options: {
@@ -180,6 +200,102 @@ describe('ReviewWorkflow.start / stop / logs', () => {
     await expect(wf.start(card({ git: { branch: 'b', base: 'main', repoPath: repo } })))
       .rejects.toThrow(/no review environment is configured/)
     expect(wf.describe(card({ git: { branch: 'b', base: 'main', repoPath: repo } }))).toBeUndefined()
+  })
+})
+
+describe('ReviewWorkflow data seeding', () => {
+  it('snapshots the configured SQLite data from the main checkout into the worktree before starting', async () => {
+    const repo = tempDir('review-repo-')
+    const worktree = tempDir('review-worktree-')
+    mkdirSync(join(repo, 'data'))
+    mkdirSync(join(worktree, 'data'))
+    createDb(join(repo, 'data/app.db'), ['main'])
+    let rowsAtStart = -1
+    const wf = workflow({
+      dir: worktree,
+      environments: [{ path: repo, start: './start.sh', data: ['data/app.db'] }],
+      runCommand: async (_command, options) => {
+        rowsAtStart = countRows(join(worktree, 'data/app.db'))
+        expect(options.cwd).toBe(worktree)
+        return { code: 0, stdout: 'ok', stderr: '' }
+      },
+    })
+    const task = card({ git: { branch: 'b', base: 'main', repoPath: repo, worktreePath: worktree } })
+    const review = await wf.start(task)
+    expect(review.dir).toBe(worktree)
+    // The copy exists before the app starts, and the source was only read.
+    expect(rowsAtStart).toBe(1)
+    expect(countRows(join(repo, 'data/app.db'))).toBe(1)
+  })
+
+  it('fails the start before the command when a configured file is missing', async () => {
+    const repo = tempDir('review-repo-')
+    const worktree = tempDir('review-worktree-')
+    const runner = fakeRunner()
+    const wf = workflow({
+      dir: worktree,
+      environments: [{ path: repo, start: './start.sh', data: ['data/missing.db'] }],
+      runCommand: runner,
+    })
+    await expect(wf.start(card({ git: { branch: 'b', base: 'main', repoPath: repo, worktreePath: worktree } })))
+      .rejects.toThrow(/review data .*missing\.db.*is missing/)
+    expect(runner.calls).toHaveLength(0)
+  })
+
+  it('overwrites the worktree copy on the next start', async () => {
+    const repo = tempDir('review-repo-')
+    const worktree = tempDir('review-worktree-')
+    mkdirSync(join(repo, 'data'))
+    mkdirSync(join(worktree, 'data'))
+    createDb(join(repo, 'data/app.db'), ['main'])
+    const wf = workflow({
+      dir: worktree,
+      environments: [{ path: repo, start: './start.sh', data: ['data/app.db'] }],
+    })
+    const task = card({ git: { branch: 'b', base: 'main', repoPath: repo, worktreePath: worktree } })
+    await wf.start(task)
+    const target = join(worktree, 'data/app.db')
+    const db = new DatabaseSync(target)
+    db.exec("DELETE FROM items; INSERT INTO items (name) VALUES ('review-write')")
+    db.close()
+    await wf.start(task)
+    expect(countRows(target)).toBe(1)
+  })
+
+  it('seeds before a compose start as well', async () => {
+    const repo = tempDir('review-repo-')
+    const worktree = tempDir('review-worktree-')
+    mkdirSync(join(repo, 'data'))
+    mkdirSync(join(worktree, 'data'))
+    createDb(join(repo, 'data/app.db'), ['main'])
+    let rowsAtComposeUp = -1
+    const wf = workflow({
+      dir: worktree,
+      environments: [{ path: repo, start: './start.sh', data: ['data/app.db'] }],
+      compose: {
+        file: join(worktree, 'docker-compose.yml'),
+        up: async () => {
+          rowsAtComposeUp = countRows(join(worktree, 'data/app.db'))
+          return { project: 'dsh-tb-card1', file: join(worktree, 'docker-compose.yml') }
+        },
+      },
+    })
+    await wf.start(card({ git: { branch: 'b', base: 'main', repoPath: repo, worktreePath: worktree } }))
+    expect(rowsAtComposeUp).toBe(1)
+  })
+
+  it('does not copy when the card is reviewed in its main checkout', async () => {
+    const repo = tempDir('review-repo-')
+    mkdirSync(join(repo, 'data'))
+    createDb(join(repo, 'data/app.db'), ['main'])
+    const wf = workflow({
+      dir: repo,
+      // A missing file: if the seed ran for a main-checkout review, the start
+      // would fail. It must not run — the card already has the data.
+      environments: [{ path: repo, start: './start.sh', data: ['data/not-seeded-here.db'] }],
+    })
+    await expect(wf.start(card({ git: { branch: 'b', base: 'main', repoPath: repo } }))).resolves.toMatchObject({ dir: repo })
+    expect(countRows(join(repo, 'data/app.db'))).toBe(1)
   })
 })
 
