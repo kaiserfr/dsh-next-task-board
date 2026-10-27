@@ -195,6 +195,15 @@ describe('TaskBoardHostService.acceptAction', () => {
   it('applies asynchronously, reports the result as an event and sends only the changed card afterwards', async () => {
     const ledger = new HostTaskLedger(root(), () => 0)
     const { service } = serviceWith(ledger, {})
+    // Collect what a connected tab would receive: one frame per emit, and
+    // every tab of the same emit reads that same frame.
+    const frames: Array<ReturnType<typeof service.eventPayload>> = []
+    const shared: unknown[] = []
+    service.subscribe(() => {
+      const frame = service.eventPayload()
+      frames.push(frame)
+      shared.push(service.eventPayload())
+    })
     const accepted = service.acceptAction('request-1', {
       kind: 'create',
       id: 'card',
@@ -203,14 +212,15 @@ describe('TaskBoardHostService.acceptAction', () => {
     expect(accepted).toBe(true)
     await new Promise(resolve => { setTimeout(resolve, 0) })
 
-    const frame = service.eventPayload()
-    expect(frame.actionResults).toEqual([{ requestId: 'request-1', ok: true, at: 0 }])
-    expect(frame.tasks?.map(task => task.id)).toEqual(['card'])
+    // The card change and the action result are separate frames, in that order.
+    expect(frames[0]!.tasks?.map(task => task.id)).toEqual(['card'])
+    expect(frames.at(-1)!.actionResults).toEqual([{ requestId: 'request-1', ok: true, at: 0 }])
+    expect(shared[0]).toBe(frames[0])
 
-    // The next frame carries neither the card nor the result again.
-    const next = service.eventPayload()
-    expect(next.tasks).toBeUndefined()
-    expect(next.actionResults).toBeUndefined()
+    // A later change sends only the card it touched, without repeating results.
+    await service.apply('move-1', { kind: 'move', taskId: 'card', status: 'clarification' })
+    expect(frames.some(frame => frame.tasks?.some(task => task.id === 'card') && frame.revision > frames[0]!.revision)).toBe(true)
+    expect(frames.at(-1)!.actionResults).toBeUndefined()
     service.dispose()
   })
 

@@ -114,6 +114,12 @@ export declare class TaskBoardHostService {
      * correct "what changed since the last frame".
      */
     private lastSentTasks;
+    /**
+     * The frame of the last emit. Computed once per change, not per connected
+     * tab: the delta advances the sent-task baseline and drains the action
+     * results, so a second tab reading it separately would see neither.
+     */
+    private pendingFrame;
     /** Human messages a hard stop removed from a card's inbox, re-sent on resume. */
     private readonly preservedMessages;
     /** Command runner the Host entry injected (worker-backed); absent in tests. */
@@ -243,6 +249,7 @@ export declare class TaskBoardHostService {
      * resends the ledger on a heartbeat.
      */
     eventPayload(): TaskBoardEventPayload;
+    private computeFrame;
     /**
      * Work in flight per card, for the card's "Abbrechen" control. Derived from
      * the service's own queues and the command runner's live scopes; never ledger

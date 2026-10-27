@@ -141,6 +141,12 @@ export class TaskBoardHostService {
    * correct "what changed since the last frame".
    */
   private lastSentTasks = new Map<string, ComposeTaskRecord>()
+  /**
+   * The frame of the last emit. Computed once per change, not per connected
+   * tab: the delta advances the sent-task baseline and drains the action
+   * results, so a second tab reading it separately would see neither.
+   */
+  private pendingFrame: TaskBoardEventPayload | undefined
   /** Human messages a hard stop removed from a card's inbox, re-sent on resume. */
   private readonly preservedMessages = new Map<string, string[]>()
   /** Command runner the Host entry injected (worker-backed); absent in tests. */
@@ -459,6 +465,15 @@ export class TaskBoardHostService {
    * resends the ledger on a heartbeat.
    */
   eventPayload(): TaskBoardEventPayload {
+    // One frame per change, shared by every connected tab (the delta advances
+    // the sent-task baseline and drains the action results, so it must not be
+    // computed per listener). It stays readable until the next change, which is
+    // what lets a tab that reconnects right after an action still see its
+    // result. Outside an emit the current delta is computed once.
+    return this.pendingFrame ?? (this.pendingFrame = this.computeFrame())
+  }
+
+  private computeFrame(): TaskBoardEventPayload {
     const { revision, scheduler } = this.ledger.summary()
     const next = new Map<string, ComposeTaskRecord>()
     const changed: ComposeTaskRecord[] = []
@@ -1473,6 +1488,10 @@ export class TaskBoardHostService {
   }
 
   private emit(): void {
+    // One frame per change, written by every connected tab: the delta advances
+    // the sent-task baseline and drains the action results, so it may only be
+    // computed once and must not outlive the notification loop.
+    this.pendingFrame = this.computeFrame()
     for (const listener of [...this.listeners]) listener()
   }
 }
