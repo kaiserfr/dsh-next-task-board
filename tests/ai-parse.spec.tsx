@@ -103,6 +103,37 @@ describe('new-task AI parse section (#1540)', () => {
     expect(field(container, t('new.promptPlaceholder'))).toHaveProperty('value', draft.prompt)
   })
 
+  it('counts the seconds a hanging parse is running, so the form never looks dead', async () => {
+    vi.useFakeTimers()
+    try {
+      const { container, parseTaskDraft } = renderModal({ parseTaskDraft: vi.fn(() => new Promise(() => {})) })
+      typeInto(field(container, t('new.aiParsePlaceholder')), 'some note')
+      await act(async () => { parseButton(container).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      expect(parseTaskDraft).toHaveBeenCalledOnce()
+      expect(container.querySelector('[data-dsh-part="ai-parse-elapsed"]')?.textContent).toContain('0')
+      await act(async () => { await vi.advanceTimersByTimeAsync(3_200) })
+      expect(container.querySelector('[data-dsh-part="ai-parse-elapsed"]')?.textContent).toContain('3')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('gives up visibly when the request never gets an answer at all', async () => {
+    vi.useFakeTimers()
+    try {
+      const { container } = renderModal({ parseTaskDraft: vi.fn((_request: unknown, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
+      })) })
+      typeInto(field(container, t('new.aiParsePlaceholder')), 'some note')
+      await act(async () => { parseButton(container).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(150_200) })
+      expect(container.querySelector('[data-dsh-part="ai-parse"]')!.textContent).toContain(t('new.aiParseStalled', { seconds: '150' }))
+      expect(container.querySelector('[data-dsh-part="ai-parse-elapsed"]')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('shows the reason a parse failed', async () => {
     const { container } = renderModal({ parseTaskDraft: vi.fn(async () => { throw new Error('没有可用的模型') }) })
     typeInto(field(container, t('new.aiParsePlaceholder')), 'some note')

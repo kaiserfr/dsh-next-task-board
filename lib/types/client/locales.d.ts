@@ -69,6 +69,7 @@ export declare const zh: {
     'new.aiParseNoModel': string;
     'new.aiParseUnavailable': string;
     'new.aiParseTimeout': string;
+    'new.aiParseStalled': string;
     'new.aiParseFailed': string;
     'board.retryHost': string;
     'board.hostMeta': string;
@@ -100,6 +101,7 @@ export declare const zh: {
     'board.queuedNotice': string;
     'card.paused': string;
     'card.pause': string;
+    'card.stopSession': string;
     'card.resume': string;
     'board.pauseAll': string;
     'board.resumeAll': string;
@@ -152,6 +154,7 @@ export declare const zh: {
     'detail.run': string;
     'detail.rerun': string;
     'detail.pause': string;
+    'detail.stopSession': string;
     'detail.cancelWork': string;
     'detail.hardStop': string;
     'detail.hardStopConfirm': string;

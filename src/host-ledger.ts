@@ -528,6 +528,7 @@ export class HostTaskLedger {
     sessionId: string
     open: boolean
     paused: boolean
+    pausedAt?: number
     settledAt?: number
     status: TaskRecord['status']
     archived: boolean
@@ -537,6 +538,7 @@ export class HostTaskLedger {
       sessionId: string
       open: boolean
       paused: boolean
+      pausedAt?: number
       settledAt?: number
       status: TaskRecord['status']
       archived: boolean
@@ -560,6 +562,7 @@ export class HostTaskLedger {
         sessionId,
         open,
         paused: task.pausedAt !== undefined,
+        ...(task.pausedAt === undefined ? {} : { pausedAt: task.pausedAt }),
         ...(settledAt === undefined ? {} : { settledAt }),
         status: task.status,
         archived: task.archivedAt !== undefined,

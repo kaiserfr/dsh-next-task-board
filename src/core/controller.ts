@@ -217,7 +217,7 @@ export interface ControllerSnapshot {
    * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
    */
   sessionOpenError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork'>
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -334,7 +334,7 @@ export class BoardController {
   private readonly formDrafts = new Map<string, unknown>()
   private transportError: string | undefined
   private sessionOpenError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork'> | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions'> | undefined
   /** Liveness net for accepted actions whose result event was lost (reconnect). */
   private outboxSweep: ReturnType<typeof setInterval> | undefined
   private remoteSubscribed = false
@@ -998,6 +998,15 @@ export class BoardController {
     this.enqueue({ kind: 'hard-stop', taskId: id }, id)
   }
 
+  /**
+   * Stop the card's running conversation immediately, keeping its column and
+   * execution record (the control the card offers while its session runs, even
+   * when it is paused).
+   */
+  stopSession(id: string): void {
+    this.enqueue({ kind: 'stop-session', taskId: id }, id)
+  }
+
   async pauseTasks(ids: readonly string[]): Promise<boolean> {
     const unique = [...new Set(ids)]
     if (unique.length === 0 || this.deps.transport === undefined) return false
@@ -1455,6 +1464,7 @@ export class BoardController {
       case 'review-restart': return 'restart review environment'
       case 'cancel-work': return 'cancel running work'
       case 'hard-stop': return 'stop the session'
+      case 'stop-session': return 'stop the running session'
       case 'set-schedule': return 'save schedule'
       case 'confirm-permission': return 'confirm permission'
       case 'import': return 'import tasks'
@@ -1558,6 +1568,7 @@ export class BoardController {
       ...(payload.reviewPlans === undefined ? {} : { reviewPlans: payload.reviewPlans }),
       ...(payload.pendingReleases === undefined ? {} : { pendingReleases: payload.pendingReleases }),
       ...(payload.pendingWork === undefined ? {} : { pendingWork: payload.pendingWork }),
+      runningSessions: payload.runningSessions ?? {},
     }
   }
 
@@ -1668,6 +1679,7 @@ export class BoardController {
       ...(snapshot.reviewPlans === undefined ? {} : { reviewPlans: snapshot.reviewPlans }),
       ...(snapshot.pendingReleases === undefined ? {} : { pendingReleases: snapshot.pendingReleases }),
       ...(snapshot.pendingWork === undefined ? {} : { pendingWork: snapshot.pendingWork }),
+      runningSessions: snapshot.runningSessions ?? {},
     }
     this.ingestHostNotices(snapshot.notices)
     this.transportError = undefined

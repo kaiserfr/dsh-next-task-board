@@ -185,7 +185,7 @@ export interface ControllerSnapshot {
      * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
      */
     sessionOpenError?: string;
-    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork'>;
+    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions'>;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
@@ -492,6 +492,12 @@ export declare class BoardController {
     cancelWork(id: string): void;
     /** Stop the card's conversation for good; the open run is cancelled. */
     hardStop(id: string): void;
+    /**
+     * Stop the card's running conversation immediately, keeping its column and
+     * execution record (the control the card offers while its session runs, even
+     * when it is paused).
+     */
+    stopSession(id: string): void;
     pauseTasks(ids: readonly string[]): Promise<boolean>;
     /**
      * Resume paused runs: the Host clears the pause and writes the "continue"

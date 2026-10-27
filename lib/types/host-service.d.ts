@@ -128,6 +128,8 @@ export declare class TaskBoardHostService {
     private readonly orphanScans;
     /** Sessions the watchdog already explained, so one orphan is not toasted every 5 s. */
     private readonly orphanNoticed;
+    /** Card id → its conversation is running right now (roster, derived). */
+    private runningSessions;
     /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
     private reviewPlans;
     private readonly now;
@@ -420,6 +422,21 @@ export declare class TaskBoardHostService {
      * running or still carries an open execution.
      */
     private reconcileExecutions;
+    /**
+     * Publish which conversations are running right now, so a card can offer its
+     * immediate stop even when its ordinary pause control is unavailable (a paused
+     * card whose session was woken again). Derived from the roster, never ledger
+     * state, and only emitted when the set really changed.
+     * @param sessions - the roster the poll already fetched.
+     */
+    private refreshRunningSessions;
+    /**
+     * Stop the card's conversation right now, without touching its column or its
+     * execution record: the immediate stop behind the card's control. Jobs die, so
+     * their completion notices cannot wake it again; human messages are kept for a
+     * later resume.
+     */
+    private stopRunningSession;
     /**
      * Stop conversations that run without a run of their own.
      *

@@ -80,7 +80,7 @@ export function isCardBulkActionable(task: TaskRecord, pending: boolean): boolea
   return isCardDraggable(task) && !pending
 }
 
-function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** A merge release of this card runs in the Host's background. */
@@ -112,6 +112,10 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
   onDragEnd: (event: DragEvent<HTMLButtonElement>) => void
   onOpenSession: (sessionId: string) => void
   onTogglePause: (task: TaskRecord) => void
+  /** Stop the conversation right now (the Host says it is running). */
+  onStopSession: (task: TaskRecord) => void
+  /** Whether the card's conversation is running right now (derived by the Host). */
+  sessionRunning: boolean
 }) {
   const latest = task.executions[task.executions.length - 1]
   const runs = task.executions.length
@@ -131,7 +135,11 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
   // clarification run in `clarification` is a run like any other, so it is
   // pausable too.
   const openRun = latest !== undefined && latest.endedAt === undefined
-  const showPauseControl = !archived && !pending && (paused || openRun)
+  // A paused card whose session is running again (a background job woke it, or
+  // the human typed) cannot be "resumed" meaningfully: the control that helps is
+  // the stop.
+  const showStopControl = !archived && !pending && paused && sessionRunning
+  const showPauseControl = !archived && !pending && (paused || openRun) && !showStopControl
   // One jump target per card: the newest execution's conversation — and a card
   // that only ever had a clarification conversation keeps offering that one. A
   // run that has not attached a session yet has none to offer.
@@ -270,6 +278,19 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
           </span>
         )}
       </button>
+      {showStopControl && (
+        <button
+          type="button"
+          className={css.cardPause}
+          data-dsh-part="card-stop"
+          title={t('card.stopSession')}
+          aria-label={t('card.stopSession')}
+          onClick={(event) => { event.stopPropagation(); onStopSession(task) }}
+          onDoubleClick={(event) => { event.stopPropagation() }}
+        >
+          <span aria-hidden="true">■</span>
+        </button>
+      )}
       {showPauseControl && (
         // Pause/resume sibling of the card button (a button may not nest in a
         // button): the pause glyph while the run is open, the play glyph to

@@ -622,7 +622,7 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
               {canEditTaskContent(current) ? t('detail.duplicate') : t('detail.duplicateAndEdit')}
             </button>
           )}
-          {!archived && (paused || openRun) && (
+          {!archived && (paused || openRun) && !(paused && snapshot.host?.runningSessions?.[current.id] === true) && (
             // The execution button doubles as the run's pause/play control:
             // while the run is open it shows the pause glyph, a paused run shows
             // the play glyph and continues in its own conversation.
@@ -637,6 +637,20 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
             >
               <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>{' '}
               {paused ? t('detail.continue') : t('detail.pause')}
+            </button>
+          )}
+          {!archived && snapshot.host?.runningSessions?.[current.id] === true && (
+            // The conversation runs right now. This control stops it directly —
+            // available even when the card is paused and the ordinary pause
+            // button therefore shows "continue" instead.
+            <button
+              type="button"
+              className={css.ghostButton}
+              data-dsh-part="detail-stop-session"
+              disabled={pending}
+              onClick={() => { controller.stopSession(current.id) }}
+            >
+              {t('detail.stopSession')}
             </button>
           )}
           {!archived && snapshot.host?.pendingWork?.[current.id] !== undefined && (

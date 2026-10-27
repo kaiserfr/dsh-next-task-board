@@ -218,16 +218,19 @@ describe('HttpTaskBoardHostTransport SSE subscription', () => {
   const frame: TaskBoardEventFrame = { type: 'delta', payload }
   const fullFrame: TaskBoardEventFrame = { type: 'snapshot', snapshot }
 
+  let fakeDocument: { hidden: boolean; addEventListener: (name: string, handler: () => void) => void; removeEventListener: () => void }
+
   beforeEach(() => {
     FakeEventSource.instances = []
     vi.stubGlobal('EventSource', FakeEventSource)
-    vi.stubGlobal('document', {
-      visibilityState: 'visible',
+    fakeDocument = {
+      hidden: false,
       addEventListener: (name: string, handler: () => void) => {
         if (name === 'visibilitychange') visibilityListener = handler
       },
       removeEventListener: () => undefined,
-    })
+    }
+    vi.stubGlobal('document', fakeDocument)
   })
 
   let visibilityListener: (() => void) | undefined
@@ -263,11 +266,38 @@ describe('HttpTaskBoardHostTransport SSE subscription', () => {
     expect(calls).toEqual([undefined])
   })
 
-  it('calls the listener on visibilitychange while the tab is visible', () => {
+  it('drops the stream while the tab is hidden and reopens it when visible again', () => {
     const transport = new HttpTaskBoardHostTransport(new MemoryStorage())
-    const calls: Array<TaskBoardEventFrame | undefined> = []
-    transport.subscribe(event => { calls.push(event) })
+    transport.subscribe(() => undefined)
+    const first = FakeEventSource.instances.at(-1)
+    if (first === undefined) throw new Error('EventSource was not constructed')
+    // A background tab must not hold one of the few per-origin connections.
+    fakeDocument.hidden = true
     visibilityListener?.()
-    expect(calls).toEqual([undefined])
+    expect(first.closed).toBe(true)
+    expect(FakeEventSource.instances).toHaveLength(1)
+    // Coming back opens a fresh stream, whose first frame is the snapshot.
+    fakeDocument.hidden = false
+    visibilityListener?.()
+    expect(FakeEventSource.instances).toHaveLength(2)
+    expect(FakeEventSource.instances[1]!.closed).toBe(false)
+  })
+})
+
+describe('HttpTaskBoardHostTransport stalled action requests', () => {
+  it('turns an unanswered action POST into a retryable timeout instead of hanging forever', async () => {
+    vi.useFakeTimers()
+    try {
+      // A request the browser queues (no connection available) never answers.
+      vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => { reject(new DOMException('aborted', 'AbortError')) }, { once: true })
+      })))
+      const pending = new HttpTaskBoardHostTransport(new MemoryStorage()).action({ kind: 'delete', taskId: 'x' })
+      const failure = pending.catch((error: unknown) => error)
+      await vi.advanceTimersByTimeAsync(20_100)
+      await expect(failure).resolves.toMatchObject({ failure: 'timeout' })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

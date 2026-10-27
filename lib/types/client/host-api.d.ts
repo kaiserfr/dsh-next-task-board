@@ -1,6 +1,13 @@
 import type { TaskRecord } from '../core/tasks.ts';
 import { type TaskBoardAction, type TaskBoardEventFrame, type TaskBoardParseDraft, type TaskBoardParseRequest, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from '../protocol.ts';
 /**
+ * How long one action POST may stay unanswered before the outbox treats it as a
+ * stalled request (a queued browser connection, a frozen Host) and retries it
+ * with the same requestId. Not a user-visible deadline: the action stays in the
+ * outbox, the banner explains it, and the first successful answer wins.
+ */
+export declare const ACTION_REQUEST_TIMEOUT_MS = 20000;
+/**
  * Failure classes of the Host API, in the language the panel renders
  * (issue #1528). The Host is the only part that knows whether a task-board
  * route exists at all, so a raw fetch/parse error must never reach the user:
@@ -62,4 +69,6 @@ export declare class HttpTaskBoardHostTransport implements TaskBoardHostTranspor
      */
     reviewOp(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>;
     subscribe(listener: (frame?: TaskBoardEventFrame) => void): () => void;
+    /** One event stream; separated so a hidden tab can drop and reopen it. */
+    private openStream;
 }

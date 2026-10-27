@@ -155,6 +155,8 @@ export class TaskBoardHostService {
   private readonly orphanScans = new Map<string, number>()
   /** Sessions the watchdog already explained, so one orphan is not toasted every 5 s. */
   private readonly orphanNoticed = new Set<string>()
+  /** Card id → its conversation is running right now (roster, derived). */
+  private runningSessions: Record<string, true> = {}
   /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
   private reviewPlans: Record<string, TaskBoardReviewPlan> = {}
   private readonly now: () => number
@@ -455,6 +457,7 @@ export class TaskBoardHostService {
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
       pendingWork: this.pendingWork(),
+      ...(Object.keys(this.runningSessions).length === 0 ? {} : { runningSessions: { ...this.runningSessions } }),
     }
   }
 
@@ -498,6 +501,7 @@ export class TaskBoardHostService {
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
       pendingWork: this.pendingWork(),
+      ...(Object.keys(this.runningSessions).length === 0 ? {} : { runningSessions: { ...this.runningSessions } }),
       ...(changed.length === 0 ? {} : { tasks: changed }),
       ...(removedTaskIds.length === 0 ? {} : { removedTaskIds }),
       ...(actionResults.length === 0 ? {} : { actionResults }),
@@ -544,6 +548,10 @@ export class TaskBoardHostService {
     }
     if (action.kind === 'hard-stop') {
       this.hardStop(action.taskId)
+      return this.snapshot()
+    }
+    if (action.kind === 'stop-session') {
+      this.stopRunningSession(action.taskId)
       return this.snapshot()
     }
     const result = this.ledger.applyRequest(requestId, action, initiator)
@@ -1149,6 +1157,7 @@ export class TaskBoardHostService {
     // No unconditional emit here: real changes already emit through the
     // ledger subscription (settles) and the gated power listener above.
     await this.reconcileExecutions(running.items, runtime.openExecutions)
+    this.refreshRunningSessions(running.items)
     // Safety net for conversations that outlived their run: a settlement that
     // happened before the job gate existed, a paused run that a late notice woke
     // again, or a card that left the board while its session kept working.
@@ -1304,6 +1313,51 @@ export class TaskBoardHostService {
   }
 
   /**
+   * Publish which conversations are running right now, so a card can offer its
+   * immediate stop even when its ordinary pause control is unavailable (a paused
+   * card whose session was woken again). Derived from the roster, never ledger
+   * state, and only emitted when the set really changed.
+   * @param sessions - the roster the poll already fetched.
+   */
+  private refreshRunningSessions(sessions: readonly SessionSummary[]): void {
+    const running = new Map(sessions.map(item => [item.sessionId as string, item.running === true]))
+    const next: Record<string, true> = {}
+    for (const row of this.ledger.sessionWatch()) {
+      if (running.get(row.sessionId) === true) next[row.taskId] = true
+    }
+    if (JSON.stringify(next) === JSON.stringify(this.runningSessions)) return
+    this.runningSessions = next
+    this.emit()
+  }
+
+  /**
+   * Stop the card's conversation right now, without touching its column or its
+   * execution record: the immediate stop behind the card's control. Jobs die, so
+   * their completion notices cannot wake it again; human messages are kept for a
+   * later resume.
+   */
+  private stopRunningSession(taskId: string): void {
+    const task = this.ledger.task(taskId)
+    if (task === undefined) return
+    const sessionId = latestSessionId(task)
+    if (sessionId === undefined) return
+    void this.runner.stopSession(sessionId, { preserveUserMessages: true }).then(report => {
+      if (report.preserved.length > 0) this.preservedMessages.set(taskId, report.preserved)
+      if (!report.attached) {
+        this.ledger.note(taskId, 'Zu dieser Karte läuft gerade keine Session mehr.')
+        return
+      }
+      if (!report.stopped) {
+        this.ledger.note(taskId, 'Die Session ließ sich nicht anhalten; das Board versucht es beim nächsten Durchlauf erneut.')
+        return
+      }
+      this.ledger.note(taskId, report.phaseReset
+        ? 'Die Session wurde mit einem erzwungenen Phasen-Reset angehalten.'
+        : 'Die Session wurde angehalten.')
+    }).catch(error => { safeConsoleError(`[dsh-task-board] stopping the session of task ${taskId} failed`, error) })
+  }
+
+  /**
    * Stop conversations that run without a run of their own.
    *
    * A settled run's session is the card's conversation and must stay usable for
@@ -1330,6 +1384,18 @@ export class TaskBoardHostService {
       if (summary === undefined || summary.running !== true) continue
       let stop = false
       if (row.paused) {
+        // A human writing into the paused conversation is a resume, not work to
+        // kill: clear the pause and let the board monitor the run again. Only a
+        // session the board itself stopped and something *else* woke again (a
+        // background job) is an orphan.
+        const human = await this.runner.newestHumanTurn(row.sessionId, row.pausedAt ?? 0)
+        if (human.known && human.at !== undefined) {
+          this.ledger.clearPause(row.taskId)
+          this.ledger.note(row.taskId, 'Neue Nachricht im Chat einer pausierten Karte: die Pause wurde aufgehoben.')
+          continue
+        }
+        // Unknown history does not save the session: a paused card is an
+        // explicit human instruction, and the stop is retried next poll anyway.
         stop = true
       } else if (row.open) {
         continue

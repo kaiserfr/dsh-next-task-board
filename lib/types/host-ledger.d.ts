@@ -180,6 +180,7 @@ export declare class HostTaskLedger {
         sessionId: string;
         open: boolean;
         paused: boolean;
+        pausedAt?: number;
         settledAt?: number;
         status: TaskRecord['status'];
         archived: boolean;

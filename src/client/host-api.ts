@@ -14,6 +14,13 @@ import {
   type TaskBoardSnapshot,
 } from '../protocol.ts'
 
+/**
+ * How long one action POST may stay unanswered before the outbox treats it as a
+ * stalled request (a queued browser connection, a frozen Host) and retries it
+ * with the same requestId. Not a user-visible deadline: the action stays in the
+ * outbox, the banner explains it, and the first successful answer wins.
+ */
+export const ACTION_REQUEST_TIMEOUT_MS = 20_000
 const IMPORT_MARKER = 'dsh.taskBoard.v2.hostImported'
 const SOURCE_KEY = 'dsh.taskBoard.v2.sourceId'
 const IMPORT_REQUEST_KEY = 'dsh.taskBoard.v2.importRequestId'
@@ -149,7 +156,7 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(envelope),
-    })
+    }, ACTION_REQUEST_TIMEOUT_MS)
   }
 
   /**
@@ -157,14 +164,23 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
    * user-visible failure. The action outbox in the controller retries a broken
    * connection with the same requestId, and the board stays usable throughout.
    */
-  private async request<T>(url: string, init: RequestInit): Promise<T> {
+  private async request<T>(url: string, init: RequestInit, timeoutMs?: number): Promise<T> {
+    const stall = timeoutMs === undefined ? undefined : new AbortController()
+    const timer = stall === undefined ? undefined : setTimeout(() => { stall.abort() }, timeoutMs)
     try {
-      return await readJson<T>(await fetch(url, init))
+      return await readJson<T>(await fetch(url, stall === undefined ? init : { ...init, signal: stall.signal }))
     } catch (error) {
       if (error instanceof HostApiError) throw error
+      // A request the browser never got an answer for (a queued connection, a
+      // frozen Host) is a retryable stall, not an unreachable server.
+      if (stall?.signal.aborted === true && timeoutMs !== undefined) {
+        throw new HostApiError('timeout', t('board.hostError.timeout', { seconds: String(Math.round(timeoutMs / 1_000)) }))
+      }
       // fetch itself failed (server stopped, connection reset, DNS): the panel
       // says so in its own words instead of leaking "Failed to fetch".
       throw new HostApiError('unreachable', t('board.hostError.unreachable'))
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
     }
   }
 
@@ -256,8 +272,47 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
   }
 
   subscribe(listener: (frame?: TaskBoardEventFrame) => void): () => void {
-    const events = new EventSource(`${TASK_BOARD_API_PREFIX}/events`)
+    let events: EventSource | undefined
+    let disposed = false
     let lastStreamErrorNotify = 0
+    const open = (): void => {
+      if (disposed || events !== undefined) return
+      events = this.openStream(listener, () => lastStreamErrorNotify, (value) => { lastStreamErrorNotify = value })
+    }
+    const close = (): void => {
+      events?.close()
+      events = undefined
+    }
+    // A browser tab that is not visible has no reason to hold an event stream:
+    // closing it frees one of the few per-origin connections, which is what a
+    // background board used to cost (and what could leave a foreground request
+    // queued behind them). Reopening delivers a fresh snapshot, so nothing is
+    // missed.
+    const onVisibility = (): void => {
+      if (disposed) return
+      if (typeof document !== 'undefined' && (document as { hidden?: boolean }).hidden === true) close()
+      else open()
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibility)
+      if ((document as { hidden?: boolean }).hidden !== true) open()
+    } else {
+      open()
+    }
+    return () => {
+      disposed = true
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+      close()
+    }
+  }
+
+  /** One event stream; separated so a hidden tab can drop and reopen it. */
+  private openStream(
+    listener: (frame?: TaskBoardEventFrame) => void,
+    lastNotify: () => number,
+    setLastNotify: (value: number) => void,
+  ): EventSource {
+    const events = new EventSource(`${TASK_BOARD_API_PREFIX}/events`)
     events.onmessage = (message: MessageEvent<string>): void => {
       try {
         const parsed = JSON.parse(message.data) as TaskBoardEventFrame
@@ -281,15 +336,10 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     // panel into one state read so the failure becomes visible (#1528).
     events.onerror = (): void => {
       const now = Date.now()
-      if (now - lastStreamErrorNotify < STREAM_ERROR_NOTIFY_MS) return
-      lastStreamErrorNotify = now
+      if (now - lastNotify() < STREAM_ERROR_NOTIFY_MS) return
+      setLastNotify(now)
       listener()
     }
-    const onVisible = (): void => { if (document.visibilityState === 'visible') listener() }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      document.removeEventListener('visibilitychange', onVisible)
-      events.close()
-    }
+    return events
   }
 }

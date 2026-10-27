@@ -36,7 +36,7 @@ export declare function isCardDraggable(task: TaskRecord): boolean;
  * remain out of the bulk actions even though they can be dragged.
  */
 export declare function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean;
-declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, sessionRunning }: {
     task: TaskRecord;
     pending: boolean;
     /** A merge release of this card runs in the Host's background. */
@@ -68,6 +68,10 @@ declare function TaskCardInner({ task, pending, releasePending, pendingTransitio
     onDragEnd: (event: DragEvent<HTMLButtonElement>) => void;
     onOpenSession: (sessionId: string) => void;
     onTogglePause: (task: TaskRecord) => void;
+    /** Stop the conversation right now (the Host says it is running). */
+    onStopSession: (task: TaskRecord) => void;
+    /** Whether the card's conversation is running right now (derived by the Host). */
+    sessionRunning: boolean;
 }): import("react").JSX.Element;
 /** Memoized card: re-renders only when the card's own task record changes. */
 export declare const TaskCard: import("react").MemoExoticComponent<typeof TaskCardInner>;

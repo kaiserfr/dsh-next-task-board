@@ -164,7 +164,7 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** The Host is merging this card in the background. */
@@ -187,6 +187,9 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   onDragEnd: () => void
   onOpenSession: (sessionId: string) => void
   onTogglePause: (task: TaskRecord) => void
+  onStopSession: (task: TaskRecord) => void
+  /** The Host says this card's conversation is running right now. */
+  sessionRunning: boolean
 }) {
   const onClick = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => { onSelect(task.id, event) }, [task.id, onSelect])
   const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => { onKeySelect(task.id, event) }, [task.id, onKeySelect])
@@ -212,6 +215,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       onDragEnd={onDragEnd}
       onOpenSession={onOpenSession}
       onTogglePause={onTogglePause}
+      onStopSession={onStopSession}
+      sessionRunning={sessionRunning}
     />
   )
 })
@@ -438,6 +443,11 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // while a run is open, so the state of the record picks the direction.
   const togglePause = useCallback((task: TaskRecord): void => {
     void (task.pausedAt !== undefined ? controller.resumeTasks([task.id]) : controller.pauseTasks([task.id]))
+  }, [controller])
+  // The immediate stop: independent of the pause, so it also reaches a paused
+  // card whose conversation was woken again.
+  const stopSession = useCallback((task: TaskRecord): void => {
+    controller.stopSession(task.id)
   }, [controller])
   // The bulk pause is deliberately global (not filter-scoped, unlike the
   // selection actions): "pause all running work" must not silently skip cards
@@ -822,7 +832,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             </header>
             <div className={css.cards}>
               {visible.map(task => (
-                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
+                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} onStopSession={stopSession} sessionRunning={snapshot.host?.runningSessions?.[task.id] === true} />
               ))}
               {visible.length === 0 && (
                 <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('archive.empty')}</div>
@@ -853,7 +863,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                 </header>
                 <div className={css.cards}>
                   {tasks.map(task => (
-                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} />
+                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} onStopSession={stopSession} sessionRunning={snapshot.host?.runningSessions?.[task.id] === true} />
                   ))}
                   {tasks.length === 0 && (
                     <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('board.empty')}</div>

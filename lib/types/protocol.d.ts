@@ -117,6 +117,12 @@ export interface TaskBoardSnapshot {
     notices?: TaskBoardNotice[];
     /** Work in flight per card (release, review, command); see {@link TaskBoardPendingWork}. */
     pendingWork?: Record<string, TaskBoardPendingWork>;
+    /**
+     * Cards whose conversation is running right now, derived from the roster on
+     * every poll. The card offers its immediate stop from this, even when the card
+     * is paused and the ordinary pause control is not available.
+     */
+    runningSessions?: Record<string, true>;
 }
 /** SSE event frame: revision/scheduler/power only, never the task list. */
 export interface TaskBoardEventPayload {
@@ -154,6 +160,8 @@ export interface TaskBoardEventPayload {
     actionResults?: TaskBoardActionResult[];
     /** Work in flight per card; derived, never ledger state. */
     pendingWork?: Record<string, TaskBoardPendingWork>;
+    /** Cards whose conversation is running right now; derived, never ledger state. */
+    runningSessions?: Record<string, true>;
 }
 /**
  * One frame on `GET {TASK_BOARD_API_PREFIX}/events`: a full snapshot when the
@@ -266,6 +274,17 @@ export type TaskBoardAction = {
  */
  | {
     kind: 'hard-stop';
+    taskId: string;
+}
+/**
+ * Stop the card's running conversation right now, without touching the card's
+ * column or its execution record: cancel the turn, kill the session's jobs,
+ * keep human messages for a later resume. The immediate stop the user needs
+ * when the ordinary pause is not available (a paused card whose session was
+ * woken again, or a stalled UI).
+ */
+ | {
+    kind: 'stop-session';
     taskId: string;
 };
 /**

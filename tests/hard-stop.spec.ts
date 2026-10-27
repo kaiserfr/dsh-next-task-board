@@ -191,6 +191,64 @@ describe('board side of the hard stop', () => {
   })
 })
 
+describe('immediate session stop and the paused card', () => {
+  it('stops the running conversation on demand without moving the card', async () => {
+    const { ledger } = openLedgerForTest()
+    const agent = liveAgent()
+    const { service } = serviceWith(ledger, { agent: () => agent })
+    await service.apply('stop-now', { kind: 'stop-session', taskId: 'card' })
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    expect(agent.cancel).toHaveBeenCalledOnce()
+    // The card keeps its column and its open execution: this is a stop, not a
+    // settlement.
+    expect(ledger.state().tasks[0]!.status).toBe('clarification')
+    expect(ledger.state().tasks[0]!.executions[0]!.endedAt).toBeUndefined()
+    service.dispose()
+  })
+
+  it('publishes which conversations run, so the card can always offer its stop', async () => {
+    const { ledger } = openLedgerForTest()
+    const { service } = serviceWith(ledger, { agent: () => liveAgent() })
+    vi.useFakeTimers()
+    try {
+      await service.start()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(service.snapshot().runningSessions).toEqual({ card: true })
+    } finally {
+      vi.useRealTimers()
+      service.dispose()
+    }
+  })
+
+  it('treats a human message in a paused conversation as a resume, not as work to kill', async () => {
+    const { ledger } = openLedgerForTest()
+    const agent = liveAgent({ stubborn: true })
+    const { service } = serviceWith(ledger, { agent: () => agent })
+    vi.spyOn(service.runner, 'newestHumanTurn').mockResolvedValue({ known: true, at: 7 })
+    vi.useFakeTimers()
+    try {
+      await service.apply('pause', { kind: 'pause', taskIds: ['card'] })
+      expect(ledger.state().tasks[0]!.pausedAt).toBe(0)
+      await service.start()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(ledger.state().tasks[0]!.pausedAt).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+      service.dispose()
+    }
+  })
+})
+
+/** A card in clarification with one open run on `session-a`. */
+function openLedgerForTest(): { ledger: HostTaskLedger } {
+  const ledger = new HostTaskLedger(root(), () => 0)
+  ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+  const moved = ledger.applyRequest('move', { kind: 'move', taskId: 'card', status: 'clarification' })
+  const execution = moved.clarification!.execution
+  ledger.attachSession('card', execution.id, 'session-a')
+  return { ledger }
+}
+
 describe('TaskBoardHostService.acceptAction', () => {
   it('applies asynchronously, reports the result as an event and sends only the changed card afterwards', async () => {
     const ledger = new HostTaskLedger(root(), () => 0)

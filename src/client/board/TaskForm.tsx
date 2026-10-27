@@ -231,6 +231,15 @@ export function useAiParse(
     setElapsed(0)
     setError(undefined)
     setConflict(undefined)
+    // Safety net for a request the browser never gets an answer for (a queued
+    // connection, a Host that stopped mid-request): the form must not sit at
+    // "0s" forever. The Host's own budget is 120 s; this only catches a request
+    // that never even reached it.
+    let stalled = false
+    const deadline = setTimeout(() => {
+      stalled = true
+      request.abort()
+    }, 150_000)
     try {
       const draft = await controller.parseTaskDraft({ text: value }, request.signal)
       const after = currentRef.current?.()
@@ -241,8 +250,10 @@ export function useAiParse(
       }
     } catch (failure) {
       // A cancelled parse reports nothing: the user asked for it to stop.
-      if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
+      if (stalled) setError(t('new.aiParseStalled', { seconds: '150' }))
+      else if (!request.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure))
     } finally {
+      clearTimeout(deadline)
       abort.current = undefined
       setPending(false)
       setStartedAt(undefined)

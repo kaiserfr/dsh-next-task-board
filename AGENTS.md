@@ -40,7 +40,11 @@ dsh Web GUI 的 Host 权威多列任务看板。任务通过真实 DSH 会话执
 - **`cancel-work` / `hard-stop` 动作**：前者用命令运行器按卡片 scope 杀掉正在跑的 Git/Docker/Review 子进程并中止 review 链（卡片出现 `pendingWork` 时详情页显示「取消正在进行的操作」）；后者是人类确认后的破坏性级别：cancel + 杀 Job + 丢弃队列（不保留人类消息）+ 强制 reset，并把打开的运行结算为 `cancelled`，卡片离开运行列（详情页按钮带 `confirm`）。
 - **命令 Worker**：`src/command-runner.ts` 提供 `CommandRunner`（`run`/`cancelScope`/`busyScopes`/`dispose`）。Host 入口传入 worker 线程实现（`src/command-worker.ts`，`tsdown` 的独立入口）；Git 的 `runAsync`、Compose 的 `exec`、Review 的 shell/固定参数命令都走它。子进程输出、超时和 kill 因此不在 Host 的事件循环里，`/state`、`/parse`、SSE 在构建镜像或跑长测试时仍然可服务；worker 起不来或崩溃时退回进程内实现，绝不会因为线程问题让卡片失败。scope 就是卡片 id，`pendingWork` 从 `busyScopes()` 派生（`release`/`review`/`command`）。
 - **Parse and fill 与服务解耦**：路由用固定的 `parseModel`（设置项，默认 `deepseek-official/deepseek-flash`）和 `parseTimeoutMs`（默认 120000），不再跟随表单里的模型选择，也不再可能与占用本地单槽模型的运行抢资源；表单只显示已用秒数并提供取消，`parse` 仍是独立 HTTP 路由，不经过动作队列。解析结果仍只填「请求开始后未改过」的字段。
-- 测试：`tests/hard-stop.spec.ts`、`tests/command-runner.spec.ts`，以及按新协议更新的 `tests/pause-runner.spec.ts`、`tests/host-routes.spec.ts`、`tests/host-controller.spec.ts`、`tests/controller.spec.ts`、`tests/host-api.spec.ts`、`tests/host-ai.spec.ts`。
+- **传输停滞必须可见且可重试（2026-10-27 晚，首次实测后补）**：动作 `POST` 最多等 20 秒（`ACTION_REQUEST_TIMEOUT_MS`），超时按**可重试的 timeout** 处理（banner + 同 requestId 重发），不再无限等待；`/state` 与 bootstrap 仍无超时。`parse` 在客户端另有 150 秒硬上限：请求根本得不到响应时给出明确提示（并建议关掉多余的看板标签页），表单不会永远停在「0s」。
+- **隐藏标签页不再占用事件连接**：`visibilitychange` 为 hidden 时关闭 SSE，恢复可见时重开（重开的第一帧是完整快照）。浏览器对同一 origin 的 HTTP/1.1 连接数有限（约 6），多个后台看板标签页 + GUI 自身的 WebSocket 会把新请求（parse、动作、甚至 `/state`）排在队尾——这正是「点了没反应、计数器停在 0」的一类来源。`/events` 仍保持推送；`pointer` 语义不变。
+- **随时可停（`runningSessions` + `stop-session`）**：`pollSessions` 从名册派生 `taskId → true` 并随快照/帧下发（派生、不写账本）。卡片与详情页在会话真的在跑时显示「立即停止会话」（`stop-session` 动作：cancel + 杀 Job + 保留人类消息，**不改列、不结算**）；暂停卡片若会话又被唤醒，卡片上的播放键换成停止键（此时播放没有意义）。
+- **暂停卡片的人类消息 = 恢复**：看门狗发现暂停卡片的会话在跑时，先读 `newestHumanTurn(since=pausedAt)`；有新的用户消息就**清掉暂停**（让人继续），只有「没有人写话」的唤醒（Job 通知）才停。历史读不到时按「停」处理（暂停是人的明确指令）。此前暂停后人类在聊天里打字，会在 5 秒内被看门狗杀掉。
+- 测试：`tests/hard-stop.spec.ts`、`tests/command-runner.spec.ts`，以及按新协议更新的 `tests/pause-runner.spec.ts`、`tests/host-routes.spec.ts`、`tests/host-controller.spec.ts`、`tests/controller.spec.ts`、`tests/host-api.spec.ts`、`tests/host-ai.spec.ts`、`tests/ai-parse.spec.tsx`（停滞计数、停滞上限、可见性重连、动作停滞超时、`stop-session`、`runningSessions`、暂停自动恢复）。
 
 ## 状态机（State Engine）
 
