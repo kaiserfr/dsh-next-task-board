@@ -639,6 +639,36 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
               {paused ? t('detail.continue') : t('detail.pause')}
             </button>
           )}
+          {!archived && snapshot.host?.pendingWork?.[current.id] !== undefined && (
+            // The card knows what the Host is doing for it (a release, a review
+            // command, a commit in its scope) and offers the one control that
+            // reaches the child process.
+            <button
+              type="button"
+              className={css.ghostButton}
+              data-dsh-part="detail-cancel-work"
+              disabled={pending}
+              onClick={() => { controller.cancelWork(current.id) }}
+            >
+              {t('detail.cancelWork')}
+            </button>
+          )}
+          {!archived && (openRun || paused) && (
+            // The destructive level of the stop: it drops the queue and settles
+            // the run, so it asks first. Pausing stays the normal control.
+            <button
+              type="button"
+              className={css.ghostButton}
+              data-dsh-part="detail-hard-stop"
+              disabled={pending}
+              onClick={() => {
+                if (typeof globalThis.confirm === 'function' && !globalThis.confirm(t('detail.hardStopConfirm'))) return
+                controller.hardStop(current.id)
+              }}
+            >
+              {t('detail.hardStop')}
+            </button>
+          )}
           {archived ? (
             <button
               type="button"

@@ -128,6 +128,14 @@ export interface Config {
     repoSubpath?: Volatile<string>;
     /** Editor binary the worktree link launches (default `code`, opened with `-n`). */
     editorCommand?: Volatile<string>;
+    /**
+     * Model route the board's "Parse and fill" uses, as `provider/model`. Fixed on
+     * purpose: a parse must never wait for the single slot of a local model that a
+     * running card occupies. Default `deepseek-official/deepseek-flash`.
+     */
+    parseModel?: Volatile<string>;
+    /** Budget of one parse in milliseconds (default two minutes; the form can cancel). */
+    parseTimeoutMs?: Volatile<number>;
     /** Canonical reverse-proxy Host authorities admitted with a server-side token. */
     trustedProxyHosts?: string[];
     /** Environment variable whose value the authenticated proxy injects upstream. */
@@ -151,6 +159,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     reviewEnvironments: z<string, string, "volatile-defined">;
     repoSubpath: z<string, string, "volatile-defined">;
     editorCommand: z<string, string, "volatile-defined">;
+    parseModel: z<string, string, "volatile-defined">;
+    parseTimeoutMs: z<number, number, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;
     sessionDefaultPermission: z<"read-only" | "workspace-write" | "danger-full-access", "read-only" | "workspace-write" | "danger-full-access", "defined">;
@@ -166,6 +176,8 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     reviewEnvironments: z<string, string, "volatile-defined">;
     repoSubpath: z<string, string, "volatile-defined">;
     editorCommand: z<string, string, "volatile-defined">;
+    parseModel: z<string, string, "volatile-defined">;
+    parseTimeoutMs: z<number, number, "volatile-defined">;
     trustedProxyHosts: z<string[], string[], "defined">;
     proxyTokenEnv: z<string, string, "defined">;
     sessionDefaultPermission: z<"read-only" | "workspace-write" | "danger-full-access", "read-only" | "workspace-write" | "danger-full-access", "defined">;

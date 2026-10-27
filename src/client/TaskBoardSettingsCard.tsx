@@ -68,6 +68,14 @@ export interface TaskBoardSettings {
   repoSubpath?: string
   /** Editor binary the worktree link launches (default `code`). */
   editorCommand?: string
+  /**
+   * Model route "Parse and fill" uses, as `provider/model` (default
+   * `deepseek-official/deepseek-flash`). Fixed so a parse never competes with a
+   * running card for a local single-slot model.
+   */
+  parseModel?: string
+  /** Budget of one parse in milliseconds (default 120000). */
+  parseTimeoutMs?: number
   /** The board's state machine: columns, allowed transitions, transition actions. */
   stateMachine?: StateMachineConfig
 }
@@ -96,6 +104,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
   repoSubpath: CardFieldState
   /** Editor binary draft for the worktree link. */
   editorCommand: CardFieldState
+  /** Parse model route draft. */
+  parseModel: CardFieldState
+  /** Parse budget draft. */
+  parseTimeoutMs: CardFieldState
 }
 
 /** The registration-side face the card's slot entry injects. */
@@ -125,6 +137,8 @@ export class TaskBoardSettingsCardController {
       jsonField('reviewEnvironments', value => parseReviewEnvironments(value).errors),
       jsonField('repoSubpath', value => parseRepoSubpaths(value).errors),
       textField('editorCommand'),
+      textField('parseModel'),
+      numberField('parseTimeoutMs', { integer: true, min: 10_000 }),
     ])
     this.store = this.form.bind(() => this.projection())
   }
@@ -143,6 +157,8 @@ export class TaskBoardSettingsCardController {
       reviewEnvironments: this.form.field('reviewEnvironments'),
       repoSubpath: this.form.field('repoSubpath'),
       editorCommand: this.form.field('editorCommand'),
+      parseModel: this.form.field('parseModel'),
+      parseTimeoutMs: this.form.field('parseTimeoutMs'),
     }
   }
 
@@ -320,6 +336,25 @@ export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
         {...state.editorCommand}
         onEdit={(text) => { props.edit('editorCommand', text) }}
         onReset={() => { props.resetField('editorCommand') }}
+      />
+      <ValueField
+        id="settings-task-board-parse-model"
+        label={t('settings.parseModel')}
+        hint={t('settings.parseModelHint')}
+        {...fieldProps}
+        {...state.parseModel}
+        onEdit={(text) => { props.edit('parseModel', text) }}
+        onReset={() => { props.resetField('parseModel') }}
+      />
+      <ValueField
+        id="settings-task-board-parse-timeout"
+        label={t('settings.parseTimeoutMs')}
+        hint={t('settings.parseTimeoutMsHint')}
+        numeric
+        {...fieldProps}
+        {...state.parseTimeoutMs}
+        onEdit={(text) => { props.edit('parseTimeoutMs', text) }}
+        onReset={() => { props.resetField('parseTimeoutMs') }}
       />
       <p>
         {t('settings.powerStatus', {

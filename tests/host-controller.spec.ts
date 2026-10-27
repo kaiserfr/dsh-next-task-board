@@ -186,22 +186,30 @@ describe('Host-backed BoardController', () => {
     controller.dispose()
   })
 
-  it('still refetches the full state when the SSE revision differs', async () => {
+  it('applies a delta frame with a newer revision without refetching the full state', async () => {
     const confirmed = createTask({ title: 'A', description: '', prompt: '' }, 1, 'task-a')
-    const state = vi.fn(async () => snapshot(3, [confirmed]))
+    const changed = { ...confirmed, status: 'clarification' as const, updatedAt: 2 }
+    const state = vi.fn(async () => snapshot(3, [changed]))
     let onEvent: ((event?: TaskBoardEventPayload) => void) | undefined
     const transport: TaskBoardTransport = {
       bootstrap: async () => snapshot(2, [confirmed]),
       state,
-      action: async () => snapshot(2, [confirmed]),
+      action: async () => ({ requestId: 'request-1' }),
       subscribe: listener => { onEvent = listener; return () => undefined },
     }
     const controller = new BoardController({ store: new InMemoryTaskStore(), sessions: sessions(), transport })
     controller.start()
     await controller.retryHostSync()
-    onEvent?.({ revision: 3, scheduler: { timeZone: 'UTC', ledgerId: 'ledger-a' }, power: snapshot(2).power })
-    await vi.waitFor(() => { expect(state).toHaveBeenCalledOnce() })
-    expect(controller.getSnapshot().host?.revision).toBe(3)
+    onEvent?.({
+      revision: 3,
+      scheduler: { timeZone: 'UTC', ledgerId: 'ledger-a' },
+      power: snapshot(2).power,
+      tasks: [changed],
+    })
+    await vi.waitFor(() => { expect(controller.getSnapshot().host?.revision).toBe(3) })
+    // The delta carried the card: no full read was needed.
+    expect(state).not.toHaveBeenCalled()
+    expect(controller.getSnapshot().tasks[0]!.status).toBe('clarification')
     controller.dispose()
   })
 

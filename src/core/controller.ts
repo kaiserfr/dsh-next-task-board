@@ -27,6 +27,7 @@ import { applyScheduleNextRun as applyScheduleRollForward, applySetSchedule } fr
 import { applyUpdateTask, type TaskUpdatePatch } from './use-cases/task-update.ts'
 import type {
   TaskBoardAction,
+  TaskBoardEventFrame,
   TaskBoardEventPayload,
   TaskBoardNotice,
   TaskBoardParseDraft,
@@ -34,7 +35,12 @@ import type {
   TaskBoardReviewRequest,
   TaskBoardReviewResponse,
   TaskBoardSnapshot,
+  TaskBoardActionResult,
+  TaskBoardPendingWork,
 } from '../protocol.ts'
+
+/** What one action request answers: accepted (202) or already applied (compat). */
+export type TaskBoardActionReply = { requestId: string } | TaskBoardSnapshot
 
 export interface TaskBoardTransport {
   bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>
@@ -47,8 +53,18 @@ export interface TaskBoardTransport {
    * persisted request cache then returns the already-applied result instead of
    * applying it twice.
    */
-  action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot>
-  subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void
+  /**
+   * Submit one action. The Host answers `202 accepted`; the outcome arrives as
+   * an `action-result` event, which is what resolves the outbox entry. A
+   * transport that answers with the applied state instead (an embedded Host, a
+   * test harness) is treated as already confirmed.
+   */
+  action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardActionReply>
+  /**
+   * The event stream: a full snapshot when it opens, deltas afterwards. A bare
+   * payload (a Host that predates the frame envelope) is read as a delta.
+   */
+  subscribe(listener: (event?: TaskBoardEventFrame | TaskBoardEventPayload) => void): () => void
   /**
    * One-shot model parse of pasted text (issue #1540). Optional: a deployment
    * that cannot parse simply omits it, and the form hides the section.
@@ -201,7 +217,7 @@ export interface ControllerSnapshot {
    * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
    */
   sessionOpenError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases'>
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -249,7 +265,9 @@ interface OutboxEntry {
   taskId?: string
   initiator?: string
   attempts: number
-  state: 'queued' | 'sending' | 'waiting'
+  state: 'queued' | 'sending' | 'accepted' | 'waiting'
+  /** When the Host acknowledged the action (its result event is outstanding). */
+  acceptedAt?: number
   error?: string
   createdAt: number
   /** Identity for duplicate suppression (double click, repeated drop). */
@@ -316,7 +334,9 @@ export class BoardController {
   private readonly formDrafts = new Map<string, unknown>()
   private transportError: string | undefined
   private sessionOpenError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases'> | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork'> | undefined
+  /** Liveness net for accepted actions whose result event was lost (reconnect). */
+  private outboxSweep: ReturnType<typeof setInterval> | undefined
   private remoteSubscribed = false
   private remoteInitialization: Promise<boolean> | undefined
 
@@ -344,12 +364,19 @@ export class BoardController {
     this.disposers.push(this.deps.sessions.list.subscribe(() => {
       this.onSessionsChanged()
     }))
+    // An accepted action whose result never arrived (the event stream dropped)
+    // is re-sent with the same requestId: the ledger replays it and emits the
+    // outcome again. Not a user-visible timeout — the banner and the card stay
+    // usable throughout, and nothing is applied twice.
+    this.outboxSweep = setInterval(() => { this.sweepAccepted() }, 10_000)
     this.notify()
   }
 
   /** Stop all subscriptions and drop retained state (idempotent). */
   dispose(): void {
     for (const dispose of this.disposers.splice(0)) dispose()
+    if (this.outboxSweep !== undefined) clearInterval(this.outboxSweep)
+    this.outboxSweep = undefined
     for (const timer of this.outboxTimers.values()) clearTimeout(timer)
     this.outboxTimers.clear()
     this.outboxDrains.clear()
@@ -961,6 +988,16 @@ export class BoardController {
    * suspends the whole column in a single ledger write.
    * @returns whether the action was accepted locally.
    */
+  /** Abort the card's running work (merge, review command, commit, compose). */
+  cancelWork(id: string): void {
+    this.enqueue({ kind: 'cancel-work', taskId: id }, id)
+  }
+
+  /** Stop the card's conversation for good; the open run is cancelled. */
+  hardStop(id: string): void {
+    this.enqueue({ kind: 'hard-stop', taskId: id }, id)
+  }
+
   async pauseTasks(ids: readonly string[]): Promise<boolean> {
     const unique = [...new Set(ids)]
     if (unique.length === 0 || this.deps.transport === undefined) return false
@@ -1247,7 +1284,7 @@ export class BoardController {
       // Head-of-line: the first entry of this card decides. A waiting head stops
       // the loop, so later actions of the same card can never overtake it.
       const entry = this.outbox.find(candidate => (candidate.taskId ?? '*') === key)
-      if (entry === undefined || entry.state === 'waiting') return
+      if (entry === undefined || entry.state === 'waiting' || entry.state === 'accepted') return
       const outcome = await this.send(entry)
       if (outcome === 'waiting') return
     }
@@ -1260,16 +1297,30 @@ export class BoardController {
     entry.state = 'sending'
     this.notify()
     try {
-      const snapshot = await transport.action(entry.action, entry.initiator, entry.requestId)
-      const accepted = this.acceptRemote(snapshot)
-      this.removeEntry(entry)
+      // Accepted, not applied: the Host queues the action and answers at once.
+      // The outcome (and any refusal) arrives as an action-result event, which
+      // removes the entry and lets the card's next action start.
+      const reply = await transport.action(entry.action, entry.initiator, entry.requestId)
+      if (!this.outbox.includes(entry)) return 'done'
+      // Compatibility: a transport that already applied the action answers with
+      // the new state instead of `202`; treat it as confirmed right away.
+      if ('revision' in reply && 'tasks' in reply) {
+        const accepted = this.acceptRemote(reply)
+        this.removeEntry(entry)
+        this.outboxError = undefined
+        this.transportError = undefined
+        entry.onAccepted?.()
+        this.notify()
+        if (!accepted) await this.refreshRemote()
+        return 'done'
+      }
+      entry.state = 'accepted'
+      entry.acceptedAt = this.now()
+      entry.attempts = 0
       this.outboxError = undefined
       this.transportError = undefined
       entry.onAccepted?.()
       this.notify()
-      // A stale response (an older revision than the board already applies) is
-      // not an error: read the authoritative state instead of applying it.
-      if (!accepted) await this.refreshRemote()
       return 'done'
     } catch (error) {
       const failure = typeof (error as { failure?: unknown }).failure === 'string'
@@ -1402,6 +1453,8 @@ export class BoardController {
       case 'review-start': return 'start review environment'
       case 'review-stop': return 'stop review environment'
       case 'review-restart': return 'restart review environment'
+      case 'cancel-work': return 'cancel running work'
+      case 'hard-stop': return 'stop the session'
       case 'set-schedule': return 'save schedule'
       case 'confirm-permission': return 'confirm permission'
       case 'import': return 'import tasks'
@@ -1460,33 +1513,115 @@ export class BoardController {
    * the full /state fetch; otherwise the 5 s heartbeat would re-clone and
    * re-serialize the whole ledger per tab even while nothing changes.
    */
-  private onRemoteEvent(event: TaskBoardEventPayload | undefined): void {
-    if (event !== undefined && this.hostState !== undefined && event.revision === this.hostState.revision
-      && typeof event.scheduler === 'object' && event.scheduler !== null
-      && typeof event.power === 'object' && event.power !== null) {
-      // The event frame carries revision/scheduler/power plus the enforced
-      // limits and the waiting questions; the machine (configuration, not state)
-      // is kept from the last full snapshot. Limits and questions travel on the
-      // frame because neither bumps the ledger revision.
-      this.hostState = {
-        ...this.hostState,
-        revision: event.revision,
-        scheduler: event.scheduler,
-        power: event.power,
-        ...(event.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: event.maxConcurrentRuns }),
-        ...(event.maxDoneTasks === undefined ? {} : { maxDoneTasks: event.maxDoneTasks }),
-        ...(event.awaitingAnswer === undefined ? {} : { awaitingAnswer: event.awaitingAnswer }),
-        ...(event.reviewPlans === undefined ? {} : { reviewPlans: event.reviewPlans }),
-        ...(event.pendingReleases === undefined ? {} : { pendingReleases: event.pendingReleases }),
-      }
-      this.ingestHostNotices(event.notices)
-      this.notify()
-      // A ready transition intent can enter the outbox now; the outbox itself
-      // keeps the retry backoff for a temporarily unreachable Host.
+  private onRemoteEvent(event: TaskBoardEventFrame | TaskBoardEventPayload | undefined): void {
+    if (event === undefined) {
+      void this.refreshRemote()
+      return
+    }
+    // Compatibility: a bare payload (no `type`) is the delta half of a frame.
+    const frame: TaskBoardEventFrame = 'type' in event ? event : { type: 'delta', payload: event }
+    if (frame.type === 'snapshot') {
+      // A connection (or reconnection) always starts from the authoritative
+      // state; then any action the Host accepted but whose result event we
+      // missed is re-sent with its requestId (idempotent replay).
+      this.acceptRemote(frame.snapshot)
+      this.resendAccepted()
       this.scheduleTransitionPump()
       return
     }
+    const payload = frame.payload
+    if (this.hostState === undefined || payload.revision >= this.hostState.revision) {
+      this.applyHostFields(payload)
+      this.applyTaskDelta(payload.tasks, payload.removedTaskIds)
+      this.ingestHostNotices(payload.notices)
+      if (payload.actionResults !== undefined) this.resolveActionResults(payload.actionResults)
+      this.transportError = undefined
+      this.notify()
+      this.scheduleTransitionPump()
+      return
+    }
+    // A frame older than the state already applied is not an error: read the
+    // authoritative state instead of applying it out of order.
     void this.refreshRemote()
+  }
+
+  /** Apply the derived host fields a frame or a snapshot carries. */
+  private applyHostFields(payload: TaskBoardEventPayload): void {
+    this.hostState = {
+      ...this.hostState,
+      revision: payload.revision,
+      scheduler: payload.scheduler,
+      power: payload.power,
+      ...(payload.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: payload.maxConcurrentRuns }),
+      ...(payload.maxDoneTasks === undefined ? {} : { maxDoneTasks: payload.maxDoneTasks }),
+      ...(payload.awaitingAnswer === undefined ? {} : { awaitingAnswer: payload.awaitingAnswer }),
+      ...(payload.reviewPlans === undefined ? {} : { reviewPlans: payload.reviewPlans }),
+      ...(payload.pendingReleases === undefined ? {} : { pendingReleases: payload.pendingReleases }),
+      ...(payload.pendingWork === undefined ? {} : { pendingWork: payload.pendingWork }),
+    }
+  }
+
+  /**
+   * Merge a task delta into the board: changed cards replace their entries in
+   * place (the column order is the ledger's, and a Done column's FIFO depends on
+   * it), removed ids leave, new cards append.
+   */
+  private applyTaskDelta(changed: readonly TaskRecord[] | undefined, removedIds: readonly string[] | undefined): void {
+    if ((changed === undefined || changed.length === 0) && (removedIds === undefined || removedIds.length === 0)) return
+    const byId = new Map((changed ?? []).map(task => [task.id, task]))
+    const removed = new Set(removedIds ?? [])
+    const next: TaskRecord[] = []
+    for (const task of this.tasks) {
+      if (removed.has(task.id)) continue
+      next.push(byId.get(task.id) ?? task)
+      byId.delete(task.id)
+    }
+    for (const task of byId.values()) next.push(task)
+    this.tasks = next
+  }
+
+  /**
+   * Resolve the outbox from the Host's action results. Success removes the entry
+   * and lets the card's next action start (the order the human acted in);
+   * a refusal removes it too, but says why on the card.
+   */
+  private resolveActionResults(results: readonly TaskBoardActionResult[]): void {
+    for (const result of results) {
+      const entry = this.outbox.find(candidate => candidate.requestId === result.requestId)
+      if (entry === undefined) continue
+      if (result.ok) {
+        this.removeEntry(entry)
+        this.outboxError = undefined
+        this.kick(entry.taskId ?? '*')
+        continue
+      }
+      const message = result.error ?? 'the Host refused the action'
+      this.removeEntry(entry)
+      this.pushNotice('failed', `${this.actionLabel(entry)}: ${message}`, entry.taskId)
+      entry.onRejected?.(message)
+      this.kick(entry.taskId ?? '*')
+    }
+  }
+
+  /** Re-send every accepted action whose result never arrived (same requestId). */
+  private resendAccepted(): void {
+    for (const entry of [...this.outbox]) {
+      if (entry.state !== 'accepted') continue
+      entry.state = 'queued'
+      this.kick(entry.taskId ?? '*')
+    }
+  }
+
+  /** Liveness sweep: an accepted action without a result after a while is re-sent. */
+  private sweepAccepted(): void {
+    const now = this.now()
+    for (const entry of [...this.outbox]) {
+      if (entry.state !== 'accepted') continue
+      const since = entry.acceptedAt ?? now
+      if (now - since < 8_000) continue
+      entry.state = 'queued'
+      this.kick(entry.taskId ?? '*')
+    }
   }
 
   private async refreshRemote(preserveError?: string): Promise<boolean> {
@@ -1532,6 +1667,7 @@ export class BoardController {
       // older Host sends none, and the board then simply offers no review block.
       ...(snapshot.reviewPlans === undefined ? {} : { reviewPlans: snapshot.reviewPlans }),
       ...(snapshot.pendingReleases === undefined ? {} : { pendingReleases: snapshot.pendingReleases }),
+      ...(snapshot.pendingWork === undefined ? {} : { pendingWork: snapshot.pendingWork }),
     }
     this.ingestHostNotices(snapshot.notices)
     this.transportError = undefined

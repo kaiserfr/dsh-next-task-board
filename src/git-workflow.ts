@@ -44,6 +44,7 @@
  * flow.
  */
 import { spawn, spawnSync } from 'node:child_process'
+import type { CommandRunner } from './command-runner.ts'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
@@ -106,10 +107,18 @@ export interface GitWorkflowOptions {
    * nothing appears next to the user's repository.
    */
   worktreesRoot?: string
+  /**
+   * Runner for the heavy git commands. The Host injects the worker-backed
+   * runner, so worktree creation, commits, rebases and merges run off its
+   * event loop and can be cancelled per card. Absent: the in-process spawn
+   * this class always used (tests, source checkouts).
+   */
+  runner?: CommandRunner
 }
 
 export class GitWorkflow {
   private readonly worktreesRoot: string
+  private readonly runner?: CommandRunner
   /** `repoSubpath` entries in force (see {@link configure}). */
   private repoSubpaths: RepoSubpathConfig[] = []
   /** Parse reasons of the last {@link configure}, for the settings card. */
@@ -117,6 +126,7 @@ export class GitWorkflow {
 
   constructor(private readonly registry?: TaskBoardWorkspaceRegistry, options: GitWorkflowOptions = {}) {
     this.worktreesRoot = options.worktreesRoot ?? join(dshHome(), 'task-board', 'worktrees')
+    this.runner = options.runner
   }
 
   /**
@@ -155,7 +165,8 @@ export class GitWorkflow {
    * replayed and merged. The promise settles on the child's exit; the bounded
    * timeout only protects against a wedged child.
    */
-  private runAsync(cwd: string, args: readonly string[]): Promise<string> {
+  private runAsync(cwd: string, args: readonly string[], scope?: string): Promise<string> {
+    if (this.runner !== undefined) return this.runViaRunner(this.runner, cwd, args, scope)
     return new Promise<string>((resolve, reject) => {
       let settled = false
       const child = spawn('git', [...args], { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -188,6 +199,29 @@ export class GitWorkflow {
         finish(new Error(`git ${args.join(' ')} failed in ${cwd}${detail === '' ? '' : `: ${detail}`}`), '')
       })
     })
+  }
+
+  /**
+   * One heavy git command through the injected runner: the worker thread owns
+   * the child, the deadline and the card-scoped cancellation. A cancelled
+   * command is an ordinary failure for the caller (the ledger records it on the
+   * card), so the error text names the cancellation instead of a git exit code.
+   */
+  private async runViaRunner(runner: CommandRunner, cwd: string, args: readonly string[], scope?: string): Promise<string> {
+    const result = await runner.run({
+      command: 'git',
+      args,
+      cwd,
+      timeoutMs: HEAVY_GIT_TIMEOUT_MS,
+      ...(scope === undefined ? {} : { scope }),
+    })
+    if (result.aborted) throw new Error(`git ${args.join(' ')} was cancelled in ${cwd}`)
+    if (result.timedOut) throw new Error(`git ${args.join(' ')} timed out after ${Math.round(HEAVY_GIT_TIMEOUT_MS / 1000)}s in ${cwd}`)
+    if (result.code !== 0) {
+      const detail = `${result.stderr}${result.stdout}`.trim()
+      throw new Error(`git ${args.join(' ')} failed in ${cwd}${detail === '' ? '' : `: ${detail}`}`)
+    }
+    return result.stdout
   }
 
   /** Whether `dir` is inside a git work tree. */
@@ -240,9 +274,9 @@ export class GitWorkflow {
     const base = this.baseBranch(repoPath)
     const worktreePath = this.worktreePath(task)
     // Attached: the card works in its own directory from here on.
-    if (await this.attachWorktree(repoPath, worktreePath, branch, base)) return { branch, base, repoPath, worktreePath }
-    if (this.branchExists(repoPath, branch)) await this.runAsync(repoPath, ['checkout', branch])
-    else await this.runAsync(repoPath, ['checkout', '-b', branch])
+    if (await this.attachWorktree(repoPath, worktreePath, branch, base, task.id)) return { branch, base, repoPath, worktreePath }
+    if (this.branchExists(repoPath, branch)) await this.runAsync(repoPath, ['checkout', branch], task.id)
+    else await this.runAsync(repoPath, ['checkout', '-b', branch], task.id)
     return { branch, base, repoPath }
   }
 
@@ -252,7 +286,7 @@ export class GitWorkflow {
    * one (a re-entered step, or a restart). Returns false when git refuses, so
    * the caller can fall back to the shared checkout.
    */
-  private async attachWorktree(repoPath: string, worktreePath: string, branch: string, base: string): Promise<boolean> {
+  private async attachWorktree(repoPath: string, worktreePath: string, branch: string, base: string, scope?: string): Promise<boolean> {
     if (existsSync(worktreePath)) {
       // The directory exists: it is either this card's live worktree or a
       // leftover. Only a worktree git knows about counts.
@@ -260,8 +294,8 @@ export class GitWorkflow {
     }
     try {
       mkdirSync(this.worktreesRoot, { recursive: true })
-      if (this.branchExists(repoPath, branch)) await this.runAsync(repoPath, ['worktree', 'add', worktreePath, branch])
-      else await this.runAsync(repoPath, ['worktree', 'add', '-b', branch, worktreePath, base])
+      if (this.branchExists(repoPath, branch)) await this.runAsync(repoPath, ['worktree', 'add', worktreePath, branch], scope)
+      else await this.runAsync(repoPath, ['worktree', 'add', '-b', branch, worktreePath, base], scope)
       return true
     } catch (error) {
       console.warn(`task board: no worktree for ${branch} (${error instanceof Error ? error.message : String(error)}); working in ${repoPath} instead`)
@@ -323,15 +357,15 @@ export class GitWorkflow {
     // The commit belongs on the card's branch, whatever HEAD happens to be: a
     // run that skipped the pull may still sit on the base branch. A worktree
     // already stands on that branch.
-    if (checkout) await this.runAsync(dir, ['checkout', git.branch])
+    if (checkout) await this.runAsync(dir, ['checkout', git.branch], task.id)
     // An unfinished conflict resolution is never committed: `git add -A` would
     // stage the conflict markers as if they were the resolution, and a commit
     // inside a running rebase would derail it. The card keeps its previous
     // review stamp, and the release fails visibly instead.
     if (this.unmergedFiles(dir).length > 0 || this.rebaseInProgress(dir)) return git
     if (!this.isDirty(dir)) return { ...git, reviewedCommit: this.head(dir) }
-    await this.runAsync(dir, ['add', '-A'])
-    await this.runAsync(dir, ['commit', '-m', `task: ${task.title}`])
+    await this.runAsync(dir, ['add', '-A'], task.id)
+    await this.runAsync(dir, ['commit', '-m', `task: ${task.title}`], task.id)
     return { ...git, committedAt: now, reviewedCommit: this.head(dir) }
   }
 
@@ -345,7 +379,7 @@ export class GitWorkflow {
     if (git === undefined) return
     const { checkout } = this.workDir(git)
     if (!checkout) return
-    await this.runAsync(git.repoPath, ['checkout', git.branch])
+    await this.runAsync(git.repoPath, ['checkout', git.branch], task.id)
   }
 
   /**
@@ -395,20 +429,20 @@ export class GitWorkflow {
     if (this.isDirty(dir)) {
       throw new Error(`merge refused: ${dir} still holds uncommitted work, so the reviewed commit ${short(git.reviewedCommit)} is not what the worktree shows; park the card in "Ready for test" again`)
     }
-    if (checkout) await this.runAsync(dir, ['checkout', git.branch])
+    if (checkout) await this.runAsync(dir, ['checkout', git.branch], task.id)
     const head = this.head(dir)
     if (head !== git.reviewedCommit) {
       throw new Error(`merge refused: ${git.branch} moved from the reviewed commit ${short(git.reviewedCommit)} to ${short(head)}; review the new state (park the card again) before merging`)
     }
-    await this.rebaseOnto(dir, git)
+    await this.rebaseOnto(dir, git, task.id)
     // The merge itself happens in the main checkout, on the base branch: a
     // worktree never has the base checked out. The branch now lies on top of
     // that base, so this merge cannot conflict — whatever fails here is a
     // refusal (a base that moved in between, a checkout the human is using),
     // and it aborts rather than leaving the human's checkout half-merged.
-    await this.runAsync(git.repoPath, ['checkout', git.base])
+    await this.runAsync(git.repoPath, ['checkout', git.base], task.id)
     try {
-      await this.runAsync(git.repoPath, ['merge', '--no-ff', '-m', `merge ${git.branch} (task board)`, git.branch])
+      await this.runAsync(git.repoPath, ['merge', '--no-ff', '-m', `merge ${git.branch} (task board)`, git.branch], task.id)
     } catch (error) {
       if (this.unmergedFiles(git.repoPath).length > 0) this.abortMerge(git.repoPath)
       throw error
@@ -431,9 +465,9 @@ export class GitWorkflow {
    * @param dir - the card's own directory (its worktree, or the main checkout).
    * @param git - the card's git state, for the base branch to replay onto.
    */
-  private async rebaseOnto(dir: string, git: TaskGit): Promise<void> {
+  private async rebaseOnto(dir: string, git: TaskGit, scope?: string): Promise<void> {
     try {
-      await this.runAsync(dir, ['rebase', git.base])
+      await this.runAsync(dir, ['rebase', git.base], scope)
     } catch (error) {
       const files = this.unmergedFiles(dir)
       if (files.length > 0) {
@@ -532,7 +566,7 @@ export class GitWorkflow {
     const git = task.git
     if (git === undefined || git.worktreePath === undefined || !existsSync(git.worktreePath)) return undefined
     try {
-      await this.runAsync(git.repoPath, ['worktree', 'remove', '--force', git.worktreePath])
+      await this.runAsync(git.repoPath, ['worktree', 'remove', '--force', git.worktreePath], task.id)
     } catch (error) {
       return error instanceof Error ? error.message : String(error)
     }

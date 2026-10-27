@@ -1,3 +1,4 @@
+import type { CommandRunner } from './command-runner.ts';
 import type { TaskGit, TaskRecord } from './core/tasks.ts';
 import type { TaskBoardWorkspaceRegistry } from './host-runner.ts';
 /** Namespace of the feature branches the board opens. */
@@ -25,10 +26,18 @@ export interface GitWorkflowOptions {
      * nothing appears next to the user's repository.
      */
     worktreesRoot?: string;
+    /**
+     * Runner for the heavy git commands. The Host injects the worker-backed
+     * runner, so worktree creation, commits, rebases and merges run off its
+     * event loop and can be cancelled per card. Absent: the in-process spawn
+     * this class always used (tests, source checkouts).
+     */
+    runner?: CommandRunner;
 }
 export declare class GitWorkflow {
     private readonly registry?;
     private readonly worktreesRoot;
+    private readonly runner?;
     /** `repoSubpath` entries in force (see {@link configure}). */
     private repoSubpaths;
     /** Parse reasons of the last {@link configure}, for the settings card. */
@@ -53,6 +62,13 @@ export declare class GitWorkflow {
      * timeout only protects against a wedged child.
      */
     private runAsync;
+    /**
+     * One heavy git command through the injected runner: the worker thread owns
+     * the child, the deadline and the card-scoped cancellation. A cancelled
+     * command is an ordinary failure for the caller (the ledger records it on the
+     * card), so the error text names the cancellation instead of a git exit code.
+     */
+    private runViaRunner;
     /** Whether `dir` is inside a git work tree. */
     private isRepository;
     /**

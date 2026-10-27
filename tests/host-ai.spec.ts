@@ -6,6 +6,8 @@ import {
   parseTaskDraft,
   splitModelRoute,
   TaskParseError,
+  TASK_PARSE_DEFAULT_MODEL,
+  TASK_PARSE_TIMEOUT_MS,
 } from '../src/host-ai.ts'
 
 /** An llm service that yields the supplied text and records the request. */
@@ -91,8 +93,11 @@ describe('task parse through the llm service', () => {
     expect(calls[0]!.messages[0]!.content).toEqual([{ type: 'text', text: 'ship the release' }])
   })
 
-  it('fails with no-model when no route was selected', async () => {
-    await expect(parseTaskDraft(fakeLlm([]), { text: 'hello' })).rejects.toMatchObject({ code: 'no-model' })
+  it('falls back to the configured fast route when the caller names none', async () => {
+    const calls: GenerateOptions[] = []
+    await parseTaskDraft(fakeLlm(['{"title":"t","description":"d","prompt":"p"}'], calls), { text: 'hello' })
+    expect(calls[0]!.provider).toBe('deepseek-official')
+    expect(calls[0]!.model).toBe(TASK_PARSE_DEFAULT_MODEL.split('/').slice(1).join('/'))
   })
 
   it('reports an adapter failure as a model error', async () => {
@@ -106,10 +111,11 @@ describe('task parse through the llm service', () => {
   it('gives up on a model that never answers', async () => {
     vi.useFakeTimers()
     try {
-      const pending = parseTaskDraft(stallingLlm(), { text: 'hello', model: 'p/m' })
+      const pending = parseTaskDraft(stallingLlm(), { text: 'hello', model: 'p/m' }, undefined, 5_000)
       const rejected = expect(pending).rejects.toMatchObject({ code: 'timeout' })
-      await vi.advanceTimersByTimeAsync(45_000)
+      await vi.advanceTimersByTimeAsync(5_000)
       await rejected
+      expect(TASK_PARSE_TIMEOUT_MS).toBe(120_000)
     } finally {
       vi.useRealTimers()
     }

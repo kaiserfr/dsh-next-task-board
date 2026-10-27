@@ -2,7 +2,8 @@ import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway';
 import { HostTaskLedger } from './host-ledger.ts';
 import { type TaskComposeController } from './compose-workflow.ts';
 import { ReviewWorkflow } from './review-workflow.ts';
-import { HostExecutionRunner, type GatewayPeer, type SessionCommandDispatcher, type TaskBoardWorkspaceRegistry } from './host-runner.ts';
+import { HostExecutionRunner, type GatewayPeer, type SessionCommandDispatcher, type SessionControl, type TaskBoardWorkspaceRegistry } from './host-runner.ts';
+import type { CommandRunner } from './command-runner.ts';
 import { GitWorkflow } from './git-workflow.ts';
 import { PowerInhibitor } from './power-inhibitor.ts';
 import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts';
@@ -96,6 +97,37 @@ export declare class TaskBoardHostService {
     private readonly worktreeWarnings;
     /** Per-card review action chain: a second review click waits for the first. */
     private readonly reviewWork;
+    /** Card id → controller aborting its running review/release command. */
+    private readonly workControllers;
+    /**
+     * Serialized action lane: the `202` route accepts an action and this chain
+     * applies it in arrival order. Every apply is ledger-synchronous and fast —
+     * the long work it opens is queued behind it — so the ordering guarantee costs
+     * no waiting.
+     */
+    private actionChain;
+    /** Outcomes waiting for the next SSE frame (bounded; the browser resolves its outbox from them). */
+    private readonly actionResults;
+    /**
+     * Last task objects a delta was built from, keyed by id. The ledger replaces a
+     * changed card with a new object, so an identity comparison is the cheapest
+     * correct "what changed since the last frame".
+     */
+    private lastSentTasks;
+    /**
+     * The frame of the last emit. Computed once per change, not per connected
+     * tab: the delta advances the sent-task baseline and drains the action
+     * results, so a second tab reading it separately would see neither.
+     */
+    private pendingFrame;
+    /** Human messages a hard stop removed from a card's inbox, re-sent on resume. */
+    private readonly preservedMessages;
+    /** Command runner the Host entry injected (worker-backed); absent in tests. */
+    private readonly commandRunner?;
+    /** Last `updatedAt` the orphan watchdog read a conversation at (per session). */
+    private readonly orphanScans;
+    /** Sessions the watchdog already explained, so one orphan is not toasted every 5 s. */
+    private readonly orphanNoticed;
     /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
     private reviewPlans;
     private readonly now;
@@ -117,6 +149,15 @@ export declare class TaskBoardHostService {
         stateMachine?: unknown;
         /** Operator Peer the gateway calls speak for; dsh 0.2.1 requires one. */
         peer?: GatewayPeer;
+        /**
+         * Runner for the heavy commands (git, docker, review). The Host entry passes
+         * the worker-backed runner so card work never shares its event loop and
+         * "Abbrechen" can kill a running command. Absent: each workflow's own
+         * in-process runner (tests).
+         */
+        commandRunner?: CommandRunner;
+        /** Live agent/job handles for the escalating stop (Host entry only). */
+        sessionControl?: SessionControl;
     });
     start(): void;
     setConfiguration(active: boolean, preventIdleSleep: boolean): void;
@@ -201,10 +242,48 @@ export declare class TaskBoardHostService {
      * has one (the action path) never pays for a second whole-ledger clone.
      */
     private snapshotWith;
-    /** SSE frame payload; deliberately skips the tasks deep-clone of {@link snapshot}. */
+    /**
+     * SSE frame payload: every derived host field, plus only the cards that
+     * changed since the previous frame. The first frame after a connection is a
+     * full snapshot (the route sends it), so a board with hundreds of cards never
+     * resends the ledger on a heartbeat.
+     */
     eventPayload(): TaskBoardEventPayload;
+    private computeFrame;
+    /**
+     * Work in flight per card, for the card's "Abbrechen" control. Derived from
+     * the service's own queues and the command runner's live scopes; never ledger
+     * state.
+     */
+    private pendingWork;
     subscribe(listener: () => void): () => void;
     apply(requestId: string, action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot>;
+    /**
+     * Accept one action for the `202` route: enqueue it on the action lane and
+     * answer at once. The outcome travels as an `action-result` event (the browser
+     * resolves its outbox from it), and a replayed `requestId` is re-answered from
+     * the ledger's request cache — the browser's retry after a reconnect gets the
+     * same result again instead of applying the action twice.
+     * @returns false when the board is disabled (the route answers 409).
+     */
+    acceptAction(requestId: string, action: TaskBoardAction, initiator?: string): boolean;
+    private pushActionResult;
+    /**
+     * Abort the card's running work. The command runner kills every child in the
+     * card's scope (commit, worktree, merge, review command, compose), the review
+     * intent's controller aborts a wait that is not inside a command, and the card
+     * keeps the visible reason. Idempotent: cancelling nothing is not an error.
+     */
+    cancelWork(taskId: string): void;
+    /**
+     * Stop the card's conversation for good, with the human's confirmation behind
+     * the button: cancel the turn, kill the jobs, drop the queued input (this is
+     * the destructive level — the pause preserves human messages, the hard stop
+     * does not), force the agent to rest if the runtime disagrees, and settle the
+     * open run as cancelled so the card leaves the run column instead of waiting
+     * for a session that no longer works.
+     */
+    hardStop(taskId: string): void;
     /**
      * Queue one review action on the card's review chain: a second click on the
      * same card waits for the first action instead of being refused. The card's
@@ -244,6 +323,14 @@ export declare class TaskBoardHostService {
      * and the normal monitor settles the run on its own.
      */
     private stopPausedRun;
+    /**
+     * Stop the conversation of a card that has no open run any more. Such a session
+     * is invisible to the ledger's pause (there is no execution to suspend), yet it
+     * is exactly what a late job wake-up leaves behind. The human's pause must
+     * reach it; the card is not marked paused (it has no run to resume), the
+     * session is simply stopped.
+     */
+    private stopOrphanSession;
     /**
      * Continue a resumed run: write the "continue" turn into the run's own
      * conversation. A run that never got a session (it was still queued for a WIP
@@ -333,6 +420,26 @@ export declare class TaskBoardHostService {
      * running or still carries an open execution.
      */
     private reconcileExecutions;
+    /**
+     * Stop conversations that run without a run of their own.
+     *
+     * A settled run's session is the card's conversation and must stay usable for
+     * the human (rework happens by writing into it), so this is deliberately
+     * conservative:
+     *
+     * - a **paused** card's session must never run: the pause is the human's
+     *   "stop", and a late job notice that woke the agent again is exactly what
+     *   must not survive it;
+     * - a **done/archived** card has no work left to do;
+     * - any other settled card is stopped only if the human has **not** written in
+     *   its chat since the run settled — a conversation the human just used is
+     *   theirs, a conversation a background job woke is an orphan.
+     *
+     * Fail-safe: an unreadable history is no evidence and leaves the session
+     * alone; the next poll retries.
+     * @param sessions - the roster the poll already fetched.
+     */
+    private stopOrphanedSessions;
     private tickSchedule;
     private armedSchedules;
     private scheduleLaunch;

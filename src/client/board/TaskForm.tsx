@@ -192,9 +192,9 @@ export function useAiParse(
   current?: () => { title: string; description: string; prompt: string },
 ) {
   const [text, setText] = useState(initialText)
-  const [models, setModels] = useState(controller.getSnapshot().executionOptions.models ?? [])
-  const [model, setModel] = useState('')
   const [pending, setPending] = useState(false)
+  const [startedAt, setStartedAt] = useState<number | undefined>(undefined)
+  const [elapsed, setElapsed] = useState(0)
   const [error, setError] = useState<string | undefined>(undefined)
   const [conflict, setConflict] = useState<TaskBoardParseDraft | undefined>(undefined)
   const abort = useRef<AbortController | undefined>(undefined)
@@ -203,21 +203,19 @@ export function useAiParse(
   const currentRef = useRef(current)
   currentRef.current = current
 
-  // The model roster arrives from the runtime after mount; follow it so the
-  // picker never freezes on an empty snapshot.
-  useEffect(
-    () => controller.subscribe(() => setModels(controller.getSnapshot().executionOptions.models ?? [])),
-    [controller],
-  )
-
-  // Default to the roster's first entry, which the user can change before parsing.
-  useEffect(() => {
-    if (model === '' && models.length > 0) setModel(models[0]!.id)
-  }, [model, models])
-
   // A closing popup stops a parse that is still running: its result would land
   // in a form nobody is looking at. The pasted text itself stays in the draft.
   useEffect(() => () => { abort.current?.abort() }, [])
+
+  // The parse route is fixed by the Host's setting (a running card must never
+  // starve the form for a local single-slot model), so the form only shows how
+  // long the request has been running; the user can cancel at any moment.
+  useEffect(() => {
+    if (!pending || startedAt === undefined) return
+    setElapsed(Math.max(0, Math.round((Date.now() - startedAt) / 1000)))
+    const timer = setInterval(() => { setElapsed(Math.max(0, Math.round((Date.now() - startedAt) / 1000))) }, 1_000)
+    return () => { clearInterval(timer) }
+  }, [pending, startedAt])
 
   const run = async (): Promise<void> => {
     const value = text.trim()
@@ -229,10 +227,12 @@ export function useAiParse(
     abort.current = request
     const baseline = currentRef.current?.()
     setPending(true)
+    setStartedAt(Date.now())
+    setElapsed(0)
     setError(undefined)
     setConflict(undefined)
     try {
-      const draft = await controller.parseTaskDraft({ text: value, ...(model === '' ? {} : { model }) }, request.signal)
+      const draft = await controller.parseTaskDraft({ text: value }, request.signal)
       const after = currentRef.current?.()
       if (baseline === undefined || after === undefined || JSON.stringify(baseline) === JSON.stringify(after)) {
         onDraft(draft)
@@ -245,6 +245,7 @@ export function useAiParse(
     } finally {
       abort.current = undefined
       setPending(false)
+      setStartedAt(undefined)
     }
   }
 
@@ -257,9 +258,8 @@ export function useAiParse(
   return {
     text,
     setText,
-    models,
-    model,
-    setModel,
+    startedAt,
+    elapsed,
     pending,
     error,
     setError,
@@ -271,9 +271,11 @@ export function useAiParse(
 }
 
 /**
- * The "Parse with AI" box: a source textarea, the route picker, and the
- * run/cancel button. `hintKey` lets the edit form explain that the text is the
- * card's stored source rather than a fresh paste.
+ * The "Parse with AI" box: a source textarea and the run/cancel button. The
+ * model route is fixed by the Host's setting — a picker here was the way a parse
+ * ended up competing with a running card for a local single-slot model, so the
+ * form no longer offers one. `hintKey` lets the edit form explain that the text
+ * is the card's stored source rather than a fresh paste.
  */
 export function AiParseSection({
   parse,
@@ -295,21 +297,16 @@ export function AiParseSection({
         onChange={event => { parse.setText(event.target.value); parse.setError(undefined) }}
       />
       <div className={css.aiParseRow}>
-        <select
-          className={css.select}
-          value={parse.model}
-          aria-label={t('new.aiParseModel')}
-          onChange={event => { parse.setModel(event.target.value) }}
-        >
-          {parse.models.map(option => (
-            <option key={option.id} value={option.id}>{option.name ?? option.id}</option>
-          ))}
-        </select>
         {parse.pending
           ? (
-            <button type="button" className={css.ghostButton} onClick={() => { parse.cancel() }}>
-              {t('new.aiParseCancel')}
-            </button>
+            <>
+              <span className={css.fieldHint} data-dsh-part="ai-parse-elapsed" role="status">
+                {t('new.aiParseElapsed', { seconds: String(parse.elapsed) })}
+              </span>
+              <button type="button" className={css.ghostButton} onClick={() => { parse.cancel() }}>
+                {t('new.aiParseCancel')}
+              </button>
+            </>
             )
           : (
             <button

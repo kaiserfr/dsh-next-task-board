@@ -112,7 +112,7 @@ describe('edit-task parse box', () => {
     await act(async () => { parseButton(container).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
 
     expect(parseTaskDraft).toHaveBeenCalledOnce()
-    expect(parseTaskDraft.mock.calls[0]![0]).toEqual({ text: 'stored source text', model: 'deepseek/deepseek-chat' })
+    expect(parseTaskDraft.mock.calls[0]![0]).toEqual({ text: 'stored source text' })
     const textareas = container.querySelectorAll('textarea')
     // The parse box comes first, then description and prompt.
     expect((textareas[1] as HTMLTextAreaElement).value).toBe(draft.description)

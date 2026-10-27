@@ -19,7 +19,9 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { TaskBoardHostService } from './host-service.ts'
 import { CLARIFICATION_ADDENDUM, COMPLETION_INSTRUCTION, COMPLETION_MARKER, type GatewayPeer } from './host-runner.ts'
-import { parseTaskDraft, TaskParseError } from './host-ai.ts'
+import { parseTaskDraft, TaskParseError, TASK_PARSE_DEFAULT_MODEL, TASK_PARSE_TIMEOUT_MS } from './host-ai.ts'
+import { createHostCommandRunner } from './command-runner.ts'
+import type { LiveSessionAgent, SessionJobControl } from './host-runner.ts'
 import { TASK_PERMISSIONS, DEFAULT_MAX_DONE_TASKS, type TaskPermission } from './core/tasks.ts'
 import { DEFAULT_COMPOSE_FILE } from './compose-workflow.ts'
 import { DEFAULT_EDITOR_COMMAND } from './review-workflow.ts'
@@ -152,6 +154,14 @@ export interface Config {
   repoSubpath?: Volatile<string>
   /** Editor binary the worktree link launches (default `code`, opened with `-n`). */
   editorCommand?: Volatile<string>
+  /**
+   * Model route the board's "Parse and fill" uses, as `provider/model`. Fixed on
+   * purpose: a parse must never wait for the single slot of a local model that a
+   * running card occupies. Default `deepseek-official/deepseek-flash`.
+   */
+  parseModel?: Volatile<string>
+  /** Budget of one parse in milliseconds (default two minutes; the form can cancel). */
+  parseTimeoutMs?: Volatile<number>
   /** Canonical reverse-proxy Host authorities admitted with a server-side token. */
   trustedProxyHosts?: string[]
   /** Environment variable whose value the authenticated proxy injects upstream. */
@@ -182,6 +192,8 @@ export const Config = z.object({
   // text and `parseRepoSubpaths` validates entry by entry (with reasons).
   repoSubpath: z.string().default('').volatile(),
   editorCommand: z.string().default(DEFAULT_EDITOR_COMMAND).volatile(),
+  parseModel: z.string().min(3).default(TASK_PARSE_DEFAULT_MODEL).volatile(),
+  parseTimeoutMs: z.number().min(10_000).max(600_000).step(1_000).default(TASK_PARSE_TIMEOUT_MS).volatile(),
   trustedProxyHosts: z.array(z.string()).default([]),
   proxyTokenEnv: z.string().min(1).default(DEFAULT_PROXY_TOKEN_ENV),
   sessionDefaultPermission: z.union(TASK_PERMISSIONS).default(DEFAULT_SESSION_PERMISSION),
@@ -218,6 +230,26 @@ export function readConfigField<T>(field: Volatile<T> | T | undefined, fallback:
     return (field as Volatile<T>).get() as T
   }
   return field as T
+}
+
+/**
+ * Background-job handle for the hard stop, resolved structurally: the jobs
+ * service lives in the same dsh process but its package is not a dependency of
+ * this plugin. Absent (`undefined`) simply means the stop can only cancel the
+ * turn — the runner then degrades instead of failing.
+ * @param ctx - the plugin context.
+ */
+function jobControl(ctx: Context): SessionJobControl | undefined {
+  const jobs = (ctx as unknown as { get(name: string): unknown }).get('jobs') as
+    | { list?: (sessionId: string) => readonly { id: string; status?: string }[]; kill?: (jobId: string, sessionId: string, reason: string) => unknown }
+    | undefined
+  if (jobs === undefined || typeof jobs.list !== 'function' || typeof jobs.kill !== 'function') return undefined
+  return {
+    // The branded SessionId is reasserted at this boundary: the caller only ever
+    // passes ids it read from the roster or the ledger.
+    list: sessionId => (jobs.list?.(sessionId as never) ?? []).map(job => ({ id: job.id, status: String(job.status ?? '') })),
+    kill: (jobId, sessionId, reason) => { jobs.kill?.(jobId, sessionId as never, reason) },
+  }
 }
 
 /** Resolve proxy access without ever placing the token value in plugin config. */
@@ -311,6 +343,16 @@ function applyImpl(ctx: Context, config?: Config): void {
         return (await ctx.commands.execute(agent, line, [], signal))?.result
       },
     },
+    // One command surface for every card child process: the worker thread keeps
+    // git/docker/review work off this event loop and makes "Abbrechen" reach a
+    // running child instead of waiting for its timeout.
+    commandRunner: createHostCommandRunner(),
+    // The escalating hard stop needs the live agent (cancel + verify + phase
+    // reset) and the jobs it owns (a settled job notice must not wake it again).
+    sessionControl: {
+      agent: sessionId => ctx.agents.get(sessionId as never) as unknown as LiveSessionAgent | undefined,
+      jobs: jobControl(ctx),
+    },
   })
   host.setConfiguration(readConfigField(config?.enabled, true), readConfigField(config?.preventIdleSleep, false))
   host.start()
@@ -321,7 +363,12 @@ function applyImpl(ctx: Context, config?: Config): void {
         parseTask: async (request, signal) => {
           const llm = resolveLlmRuntime(ctx)
           if (llm === undefined) throw new TaskParseError('no-model', 'this deployment serves no llm service')
-          return await parseTaskDraft(llm, request, signal)
+          // The route's model is fixed by the setting (the form no longer offers
+          // a picker): a parse must not compete with a running card for a local
+          // single-slot model.
+          const model = request.model ?? readConfigField(config?.parseModel, TASK_PARSE_DEFAULT_MODEL)
+          const timeoutMs = readConfigField(config?.parseTimeoutMs, TASK_PARSE_TIMEOUT_MS)
+          return await parseTaskDraft(llm, { ...request, model }, signal, timeoutMs)
         },
       })
       for (const route of routes) disposers.push(ctx.webServer.register(route))

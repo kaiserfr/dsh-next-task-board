@@ -90,9 +90,8 @@ export declare function useAiParse(controller: BoardController, initialText: str
 }): {
     text: string;
     setText: import("react").Dispatch<import("react").SetStateAction<string>>;
-    models: readonly import("../../core/controller.ts").ExecutionModelOption[];
-    model: string;
-    setModel: import("react").Dispatch<import("react").SetStateAction<string>>;
+    startedAt: number | undefined;
+    elapsed: number;
     pending: boolean;
     error: string | undefined;
     setError: import("react").Dispatch<import("react").SetStateAction<string | undefined>>;
@@ -102,9 +101,11 @@ export declare function useAiParse(controller: BoardController, initialText: str
     cancel: () => void;
 };
 /**
- * The "Parse with AI" box: a source textarea, the route picker, and the
- * run/cancel button. `hintKey` lets the edit form explain that the text is the
- * card's stored source rather than a fresh paste.
+ * The "Parse with AI" box: a source textarea and the run/cancel button. The
+ * model route is fixed by the Host's setting — a picker here was the way a parse
+ * ended up competing with a running card for a local single-slot model, so the
+ * form no longer offers one. `hintKey` lets the edit form explain that the text
+ * is the card's stored source rather than a fresh paste.
  */
 export declare function AiParseSection({ parse, hintKey, }: {
     parse: ReturnType<typeof useAiParse>;

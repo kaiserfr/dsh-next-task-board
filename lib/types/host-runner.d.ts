@@ -67,6 +67,75 @@ export type ExecutionInspection = {
     outcome: 'cancelled';
     error: string;
 };
+/** One message waiting in a live agent's inbox (structural slice of the loop's inbox). */
+export interface PendingSessionMessage {
+    id?: string;
+    role?: string;
+    source?: {
+        kind?: string;
+    };
+    content?: unknown;
+}
+/**
+ * Live agent surface the hard stop needs. Structurally typed on purpose: the
+ * board must not import the dsh core's loop internals, and a runtime that lacks
+ * one member simply takes the next escalation step instead.
+ */
+export interface LiveSessionAgent {
+    status: string;
+    cancel(cause: {
+        kind: 'user';
+    }, options?: {
+        keepInbox?: boolean;
+    }): void;
+    inbox?: {
+        nextTurn?: readonly PendingSessionMessage[];
+        nextStep?: readonly PendingSessionMessage[];
+    };
+    phase?: {
+        kind?: string;
+        lastTurn?: number;
+    };
+    setPhase?(next: {
+        kind: 'idle';
+        lastTurn: number;
+    }): void;
+}
+/** Background jobs a session owns; the hard stop kills them so they cannot wake it again. */
+export interface SessionJobControl {
+    list(sessionId: string): readonly {
+        id: string;
+        status: string;
+    }[];
+    kill(jobId: string, sessionId: string, reason: string): void;
+}
+/**
+ * Direct handles for a session's live agent and its background jobs. Supplied by
+ * the Host plugin entry (`ctx.agents`, `ctx.jobs`); absent on a runtime or a test
+ * harness that only wires the gateway, in which case the stop degrades to the
+ * plain `session/cancel` RPC.
+ */
+export interface SessionControl {
+    agent?: (sessionId: string) => LiveSessionAgent | undefined;
+    jobs?: SessionJobControl;
+}
+/** What one hard stop did; the card's execution record keeps the preserved messages. */
+export interface SessionStopReport {
+    /** The session has a live agent on this Host. */
+    attached: boolean;
+    /** The agent came to rest (verified) or the cancel RPC was acknowledged. */
+    stopped: boolean;
+    /** Background jobs killed on the way, so no completion notice can wake the agent. */
+    jobsKilled: number;
+    /**
+     * Human messages the stop removed from the agent's inbox, as plain text in
+     * their original order. The resume turn re-sends them, so pausing never eats
+     * something the human typed.
+     */
+    preserved: string[];
+    /** The agent still reported "running" after the cancel and had to be reset. */
+    phaseReset: boolean;
+}
 /** A post-create launch failure that still identifies the session to the ledger. */
 export declare class SessionLaunchError extends Error {
     readonly sessionId: string;
@@ -103,6 +172,11 @@ export interface PromptTextOptions {
      * card's instruction and everything it did so far in context).
      */
     resume?: boolean;
+    /**
+     * Human messages the hard stop removed from the inbox before they could start
+     * a turn. The resume turn re-sends them, so a pause never loses input.
+     */
+    resumeMessages?: readonly string[];
     /**
      * This run continues the card's clarification conversation: the human pulled
      * the card on to the run column, so the agent — which already holds the card's
@@ -176,6 +250,8 @@ export declare class HostExecutionRunner {
     private readonly commands?;
     private readonly workspaceRegistry?;
     private readonly peer?;
+    /** Live agent/job handles for the escalating hard stop (Host only). */
+    private readonly control?;
     /** Newest scanned event sequence per session with no matching execution end. */
     private readonly scanMemos;
     private readonly unavailableAttempts;
@@ -186,7 +262,9 @@ export declare class HostExecutionRunner {
     constructor(gateway: SessionGateway | TypertGateway, commands?: SessionCommandDispatcher | undefined, workspaceRegistry?: TaskBoardWorkspaceRegistry | undefined, unavailableRetry?: {
         attempts?: number;
         backoffMs?: number;
-    }, peer?: GatewayPeer | undefined);
+    }, peer?: GatewayPeer | undefined, 
+    /** Live agent/job handles for the escalating hard stop (Host only). */
+    control?: SessionControl | undefined);
     private invoke;
     private stream;
     /**
@@ -214,6 +292,7 @@ export declare class HostExecutionRunner {
         implement?: boolean;
         merge?: boolean;
         resume?: boolean;
+        resumeMessages?: readonly string[];
     }): Promise<string>;
     /**
      * Re-assert the pinned execution contract on a session and queue the run's
@@ -230,6 +309,41 @@ export declare class HostExecutionRunner {
      * @param sessionId - the execution session to stop.
      */
     cancel(sessionId: string): Promise<void>;
+    /**
+     * Whether the session still owns background jobs that are running or stopping.
+     *
+     * A settled turn is not a session at rest: a background job outlives the turn
+     * that started it, and its completion notice wakes the agent into a *new*
+     * turn. Settlement therefore refuses to park or fail a card while one is
+     * live, and the hard stop kills them so the wake-up cannot happen.
+     * @param sessionId - the execution session.
+     * @returns false when this Host cannot see jobs (older runtime/test harness).
+     */
+    hasLiveJobs(sessionId: string): Promise<boolean>;
+    /**
+     * Stop one session for good: cancel the turn, kill the jobs that would wake it
+     * again, drop what is queued, and verify that the agent really came to rest.
+     *
+     * The order is deliberate: jobs first (their completion notices must not be
+     * produced while the cancel is in flight), then the cancel with
+     * `keepInbox: false` (a retained queued prompt would start the next turn
+     * immediately), then the verification. Only if the runtime still reports the
+     * agent as running does the last resort force the phase to idle — that is a
+     * statement about the loop's bookkeeping, not a kill, so it is used only after
+     * the honest paths had their chance.
+     *
+     * Human messages that were waiting in the inbox are *collected* before the
+     * cancel and returned as text, so the card can re-send them on resume instead
+     * of silently losing them. Job notifications are not collected: they are the
+     * wake-up this method exists to stop.
+     * @param sessionId - the execution session.
+     * @param options - cancel budget and whether to collect human messages.
+     * @returns what happened, including the preserved human messages.
+     */
+    stopSession(sessionId: string, options?: {
+        timeoutMs?: number;
+        preserveUserMessages?: boolean;
+    }): Promise<SessionStopReport>;
     listRunning(): Promise<{
         known: true;
         count: number;

@@ -1,5 +1,5 @@
 import type { TaskRecord } from '../core/tasks.ts';
-import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardParseDraft, type TaskBoardParseRequest, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from '../protocol.ts';
+import { type TaskBoardAction, type TaskBoardEventFrame, type TaskBoardParseDraft, type TaskBoardParseRequest, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from '../protocol.ts';
 /**
  * Failure classes of the Host API, in the language the panel renders
  * (issue #1528). The Host is the only part that knows whether a task-board
@@ -17,8 +17,16 @@ export declare class HostApiError extends Error {
 export interface TaskBoardHostTransport {
     bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>;
     state(): Promise<TaskBoardSnapshot>;
-    action(action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot>;
-    subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void;
+    /**
+     * Submit one action. The Host answers `202 accepted` immediately; the outcome
+     * arrives as an `action-result` event (the controller resolves its outbox from
+     * it). The requestId is the idempotency key: a resend after a connection loss
+     * gets the same outcome instead of applying the action twice.
+     */
+    action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<{
+        requestId: string;
+    }>;
+    subscribe(listener: (frame?: TaskBoardEventFrame) => void): () => void;
     /** One-shot model parse of pasted text (issue #1540). */
     parseDraft(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>;
     /** One review read: open the worktree, snapshot logs, diff the reviewed commit. */
@@ -29,7 +37,9 @@ export declare class HttpTaskBoardHostTransport implements TaskBoardHostTranspor
     constructor(storage?: Pick<Storage, 'getItem' | 'setItem'> | undefined);
     bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>;
     state(): Promise<TaskBoardSnapshot>;
-    action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot>;
+    action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<{
+        requestId: string;
+    }>;
     private post;
     /**
      * One Host read. There is deliberately **no timeout**: a slow Host is not a
@@ -51,5 +61,5 @@ export declare class HttpTaskBoardHostTransport implements TaskBoardHostTranspor
      * those are not about the card.
      */
     reviewOp(request: TaskBoardReviewRequest): Promise<TaskBoardReviewResponse>;
-    subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void;
+    subscribe(listener: (frame?: TaskBoardEventFrame) => void): () => void;
 }

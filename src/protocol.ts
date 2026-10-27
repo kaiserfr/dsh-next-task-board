@@ -54,6 +54,30 @@ export interface TaskBoardNotice {
  */
 export type TaskBoardPendingReleases = Record<string, { startedAt: number }>
 
+/**
+ * Outcome of one accepted action, delivered over the event stream (the action
+ * route itself answers `202` and never waits for the ledger). The outbox
+ * resolves its entry by `requestId`; a refusal carries the human-readable
+ * reason the card shows.
+ */
+export interface TaskBoardActionResult {
+  requestId: string
+  ok: boolean
+  error?: string
+  at: number
+}
+
+/**
+ * Work the Host is carrying out for one card right now: a merge release, a
+ * review environment command, or any command in the card's scope (commit,
+ * worktree, merge). The card renders its "Abbrechen" control from this; it is
+ * derived, in memory, and never ledger state.
+ */
+export interface TaskBoardPendingWork {
+  kind: 'release' | 'review' | 'command'
+  startedAt: number
+}
+
 export interface TaskBoardSnapshot {
   schemaVersion: typeof TASK_BOARD_SCHEMA_VERSION
   revision: number
@@ -104,6 +128,8 @@ export interface TaskBoardSnapshot {
    * the browser; absent on an older Host.
    */
   notices?: TaskBoardNotice[]
+  /** Work in flight per card (release, review, command); see {@link TaskBoardPendingWork}. */
+  pendingWork?: Record<string, TaskBoardPendingWork>
 }
 
 /** SSE event frame: revision/scheduler/power only, never the task list. */
@@ -130,7 +156,27 @@ export interface TaskBoardEventPayload {
   pendingReleases?: TaskBoardPendingReleases
   /** Recent derived messages; see {@link TaskBoardNotice}. */
   notices?: TaskBoardNotice[]
+  /**
+   * Tasks that changed since the previous frame, and the ids that left the
+   * board. The first frame after a connection is a full snapshot instead (see
+   * {@link TaskBoardEventFrame}); everything after it is a delta, so a board with
+   * hundreds of cards never resends the whole ledger on a heartbeat.
+   */
+  tasks?: TaskRecord[]
+  removedTaskIds?: string[]
+  /** Outcomes of actions accepted by the `202` action route, since the last frame. */
+  actionResults?: TaskBoardActionResult[]
+  /** Work in flight per card; derived, never ledger state. */
+  pendingWork?: Record<string, TaskBoardPendingWork>
 }
+
+/**
+ * One frame on `GET {TASK_BOARD_API_PREFIX}/events`: a full snapshot when the
+ * stream opens (the browser has no state yet, or reconnected), then deltas.
+ */
+export type TaskBoardEventFrame =
+  | { type: 'snapshot'; snapshot: TaskBoardSnapshot }
+  | { type: 'delta'; payload: TaskBoardEventPayload }
 
 /**
  * Request body of `POST {TASK_BOARD_API_PREFIX}/parse` (issue #1540): the text
@@ -185,6 +231,19 @@ export type TaskBoardAction =
   | { kind: 'review-start'; taskId: string }
   | { kind: 'review-stop'; taskId: string }
   | { kind: 'review-restart'; taskId: string }
+  /**
+   * Abort the card's running work: the merge release, the review command, and
+   * every command the Host runs in the card's scope (commit, worktree, merge).
+   * Cancellation is a Host capability, not a state transition.
+   */
+  | { kind: 'cancel-work'; taskId: string }
+  /**
+   * Stop the card's conversation for good: cancel, kill its jobs, drop the
+   * queue, and force the agent to rest even if the runtime still reports it as
+   * running. The open run is settled as cancelled, so the card leaves the run
+   * column (unlike `cancel-work`, which may restart a failing action).
+   */
+  | { kind: 'hard-stop'; taskId: string }
 
 /**
  * What the review step offers one card, derived by the Host from the filesystem
@@ -524,6 +583,8 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
     case 'review-start':
     case 'review-stop':
     case 'review-restart':
+    case 'cancel-work':
+    case 'hard-stop':
     case 'delete':
     case 'archive':
     case 'restore':

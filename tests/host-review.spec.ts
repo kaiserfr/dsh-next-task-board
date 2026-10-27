@@ -282,7 +282,9 @@ describe('review environments on the Host', () => {
 
     await service.apply('stop', { kind: 'review-stop', taskId: 'card' })
     await flush()
-    expect(down).toHaveBeenCalledWith('dsh-tb-card', expect.any(String), {})
+    // The stop is cancellable like every review command, so it carries the
+    // card's abort signal.
+    expect(down).toHaveBeenCalledWith('dsh-tb-card', expect.any(String), expect.objectContaining({ signal: expect.anything() }))
     service.dispose()
   })
 })

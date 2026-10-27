@@ -38,6 +38,14 @@ export interface TaskBoardSettings {
     repoSubpath?: string;
     /** Editor binary the worktree link launches (default `code`). */
     editorCommand?: string;
+    /**
+     * Model route "Parse and fill" uses, as `provider/model` (default
+     * `deepseek-official/deepseek-flash`). Fixed so a parse never competes with a
+     * running card for a local single-slot model.
+     */
+    parseModel?: string;
+    /** Budget of one parse in milliseconds (default 120000). */
+    parseTimeoutMs?: number;
     /** The board's state machine: columns, allowed transitions, transition actions. */
     stateMachine?: StateMachineConfig;
 }
@@ -65,6 +73,10 @@ export interface TaskBoardSettingsCardState extends CardShell {
     repoSubpath: CardFieldState;
     /** Editor binary draft for the worktree link. */
     editorCommand: CardFieldState;
+    /** Parse model route draft. */
+    parseModel: CardFieldState;
+    /** Parse budget draft. */
+    parseTimeoutMs: CardFieldState;
 }
 /** The registration-side face the card's slot entry injects. */
 export interface TaskBoardSettingsCardFace extends CardActions {

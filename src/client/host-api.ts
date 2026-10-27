@@ -5,6 +5,7 @@ import {
   TASK_BOARD_API_PREFIX,
   type TaskBoardAction,
   type TaskBoardActionEnvelope,
+  type TaskBoardEventFrame,
   type TaskBoardEventPayload,
   type TaskBoardParseDraft,
   type TaskBoardParseRequest,
@@ -19,7 +20,7 @@ const IMPORT_REQUEST_KEY = 'dsh.taskBoard.v2.importRequestId'
 /** Re-notify the panel at most this often while the event stream stays broken. */
 const STREAM_ERROR_NOTIFY_MS = 15_000
 /** Mirrors the Host's own parse budget; only used to phrase the timeout. */
-const TASK_PARSE_TIMEOUT_SECONDS = 45
+const TASK_PARSE_TIMEOUT_SECONDS = 120
 
 /**
  * Failure classes of the Host API, in the language the panel renders
@@ -84,8 +85,14 @@ async function readJson<T>(response: Response): Promise<T> {
 export interface TaskBoardHostTransport {
   bootstrap(legacy: readonly TaskRecord[]): Promise<TaskBoardSnapshot>
   state(): Promise<TaskBoardSnapshot>
-  action(action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot>
-  subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void
+  /**
+   * Submit one action. The Host answers `202 accepted` immediately; the outcome
+   * arrives as an `action-result` event (the controller resolves its outbox from
+   * it). The requestId is the idempotency key: a resend after a connection loss
+   * gets the same outcome instead of applying the action twice.
+   */
+  action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<{ requestId: string }>
+  subscribe(listener: (frame?: TaskBoardEventFrame) => void): () => void
   /** One-shot model parse of pasted text (issue #1540). */
   parseDraft(request: TaskBoardParseRequest, signal?: AbortSignal): Promise<TaskBoardParseDraft>
   /** One review read: open the worktree, snapshot logs, diff the reviewed commit. */
@@ -109,24 +116,36 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
         requestId = uuid()
         this.storage?.setItem(IMPORT_REQUEST_KEY, requestId)
       }
-      const snapshot = await this.post(requestId, { kind: 'import', sourceId, tasks: [...legacy] })
-      this.storage?.setItem(IMPORT_MARKER, snapshot.scheduler.ledgerId ?? ledgerId)
+      await this.post(requestId, { kind: 'import', sourceId, tasks: [...legacy] })
+      // Accepted is not applied: the import runs on the Host's action lane, so
+      // the marker may only be written once the cards are really in the ledger.
+      // The requestId is persisted, which makes the retry idempotent.
+      const ids = new Set(legacy.map(task => task.id))
+      const deadline = Date.now() + 3_000
+      let snapshot = await this.state()
+      while (Date.now() < deadline && !snapshot.tasks.some(task => ids.has(task.id))) {
+        await new Promise(resolve => setTimeout(resolve, 100))
+        snapshot = await this.state()
+      }
+      if (snapshot.tasks.some(task => ids.has(task.id))) {
+        this.storage?.setItem(IMPORT_MARKER, snapshot.scheduler.ledgerId ?? ledgerId)
+      }
       return snapshot
     }
     return initial
   }
 
   async state(): Promise<TaskBoardSnapshot> {
-    return await this.request(`${TASK_BOARD_API_PREFIX}/state`, { cache: 'no-store' })
+    return await this.request<TaskBoardSnapshot>(`${TASK_BOARD_API_PREFIX}/state`, { cache: 'no-store' })
   }
 
-  async action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<TaskBoardSnapshot> {
+  async action(action: TaskBoardAction, initiator?: string, requestId?: string): Promise<{ requestId: string }> {
     return await this.post(requestId ?? uuid(), action, initiator)
   }
 
-  private async post(requestId: string, action: TaskBoardAction, initiator?: string): Promise<TaskBoardSnapshot> {
+  private async post(requestId: string, action: TaskBoardAction, initiator?: string): Promise<{ requestId: string }> {
     const envelope: TaskBoardActionEnvelope = { requestId, action, ...(initiator === undefined || initiator === '' ? {} : { initiator }) }
-    return await this.request(`${TASK_BOARD_API_PREFIX}/action`, {
+    return await this.request<{ requestId: string }>(`${TASK_BOARD_API_PREFIX}/action`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(envelope),
@@ -138,9 +157,9 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
    * user-visible failure. The action outbox in the controller retries a broken
    * connection with the same requestId, and the board stays usable throughout.
    */
-  private async request(url: string, init: RequestInit): Promise<TaskBoardSnapshot> {
+  private async request<T>(url: string, init: RequestInit): Promise<T> {
     try {
-      return await readJson<TaskBoardSnapshot>(await fetch(url, init))
+      return await readJson<T>(await fetch(url, init))
     } catch (error) {
       if (error instanceof HostApiError) throw error
       // fetch itself failed (server stopped, connection reset, DNS): the panel
@@ -236,13 +255,22 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     throw new HostApiError('rejected', typeof record?.error === 'string' && record.error !== '' ? record.error : String(response.status), response.status)
   }
 
-  subscribe(listener: (event?: TaskBoardEventPayload) => void): () => void {
+  subscribe(listener: (frame?: TaskBoardEventFrame) => void): () => void {
     const events = new EventSource(`${TASK_BOARD_API_PREFIX}/events`)
     let lastStreamErrorNotify = 0
     events.onmessage = (message: MessageEvent<string>): void => {
       try {
-        const parsed = JSON.parse(message.data) as TaskBoardEventPayload
-        if (parsed === null || typeof parsed !== 'object' || typeof parsed.revision !== 'number') throw new Error('invalid event frame')
+        const parsed = JSON.parse(message.data) as TaskBoardEventFrame
+        if (parsed === null || typeof parsed !== 'object') throw new Error('invalid event frame')
+        // The stream opens with a full snapshot, then carries deltas.
+        if (parsed.type === 'snapshot') {
+          if (parsed.snapshot === null || typeof parsed.snapshot !== 'object') throw new Error('invalid snapshot frame')
+          listener(parsed)
+          return
+        }
+        if (parsed.type !== 'delta' || parsed.payload === null || typeof parsed.payload !== 'object' || typeof parsed.payload.revision !== 'number') {
+          throw new Error('invalid delta frame')
+        }
         listener(parsed)
       } catch {
         listener()
