@@ -27,7 +27,7 @@ const IMPORT_REQUEST_KEY = 'dsh.taskBoard.v2.importRequestId'
 /** Re-notify the panel at most this often while the event stream stays broken. */
 const STREAM_ERROR_NOTIFY_MS = 15_000
 /** Mirrors the Host's own parse budget; only used to phrase the timeout. */
-const TASK_PARSE_TIMEOUT_SECONDS = 120
+const TASK_PARSE_TIMEOUT_SECONDS = 45
 
 /**
  * Failure classes of the Host API, in the language the panel renders
@@ -36,7 +36,7 @@ const TASK_PARSE_TIMEOUT_SECONDS = 120
  * "Unexpected token 'o', \"not found\" is not valid JSON" is what a missing
  * Host half looks like today.
  */
-export type HostApiFailure = 'not-mounted' | 'unauthorized' | 'locked' | 'rejected' | 'timeout' | 'unreachable' | 'unexpected'
+export type HostApiFailure = 'not-mounted' | 'unauthorized' | 'locked' | 'rejected' | 'busy' | 'timeout' | 'unreachable' | 'unexpected'
 
 /** Transport failure carrying a stable class next to its user-facing message. */
 export class HostApiError extends Error {
@@ -225,6 +225,15 @@ export class HttpTaskBoardHostTransport implements TaskBoardHostTransport {
     if (response.status === 401 || response.status === 403) throw new HostApiError('unauthorized', t('board.hostError.unauthorized'), response.status)
     const code = typeof record?.code === 'string' ? record.code : undefined
     if (code === 'no-model') throw new HostApiError('rejected', t('new.aiParseNoModel'), response.status)
+    // Overload is a fast, retryable refusal: the Host does not hold the request
+    // open on a saturated machine. The form keeps its text, so the same button
+    // is the retry.
+    if (code === 'overloaded') {
+      const retryAfterMs = typeof (record as { retryAfterMs?: unknown }).retryAfterMs === 'number'
+        ? Math.max(1, Math.round((record as { retryAfterMs: number }).retryAfterMs / 1_000))
+        : 5
+      throw new HostApiError('busy', t('new.aiParseOverloaded', { seconds: String(retryAfterMs) }), response.status)
+    }
     if (code === 'timeout') throw new HostApiError('timeout', t('new.aiParseTimeout', { seconds: String(TASK_PARSE_TIMEOUT_SECONDS) }), response.status)
     const detail = typeof record?.error === 'string' && record.error !== '' ? record.error : String(response.status)
     throw new HostApiError('rejected', t('new.aiParseFailed', { error: detail }), response.status)

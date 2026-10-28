@@ -115,7 +115,7 @@ describe('task parse through the llm service', () => {
       const rejected = expect(pending).rejects.toMatchObject({ code: 'timeout' })
       await vi.advanceTimersByTimeAsync(5_000)
       await rejected
-      expect(TASK_PARSE_TIMEOUT_MS).toBe(120_000)
+      expect(TASK_PARSE_TIMEOUT_MS).toBe(45_000)
     } finally {
       vi.useRealTimers()
     }

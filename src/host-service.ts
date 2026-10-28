@@ -1,4 +1,7 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { cpus, loadavg } from 'node:os'
+import { monitorEventLoopDelay } from 'node:perf_hooks'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { nextRunAtMs } from './core/schedule.ts'
 import { reusableSessionId } from './core/session-reuse.ts'
@@ -11,12 +14,17 @@ import { HostExecutionRunner, SessionLaunchError, type GatewayPeer, type Session
 import type { CommandRunner } from './command-runner.ts'
 import { GitWorkflow } from './git-workflow.ts'
 import { PowerInhibitor } from './power-inhibitor.ts'
+import { PRESSURE_MAX_HOLD_MS, PRESSURE_SAMPLE_MS, PressureMonitor } from './core/pressure.ts'
+import { dshHome } from './dsh-home.ts'
 import {
   TASK_BOARD_SCHEMA_VERSION,
   type TaskBoardAction,
   type TaskBoardActionResult,
   type TaskBoardEventPayload,
+  type TaskBoardHealth,
   type TaskBoardPendingWork,
+  type TaskBoardPressure,
+  type TaskBoardQueueEntry,
   type TaskBoardReviewPlan,
   type TaskBoardReviewRequest,
   type TaskBoardReviewResponse,
@@ -27,12 +35,77 @@ import type { TaskPermission } from './core/handover.ts'
 const SESSION_POLL_MS = 5_000
 const SCHEDULE_TICK_MS = 30_000
 const RESUME_GAP_MS = SCHEDULE_TICK_MS + 15_000
+/**
+ * How long one action may stay inside its lane before the Host reports a
+ * timeout and frees the lane. Deliberately longer than the browser's 20 s
+ * action timeout: the browser retries idempotently while the Host keeps its
+ * answer, and a stuck pause must not block the next action of the same card
+ * (or the global lanes) forever.
+ */
+const ACTION_APPLY_TIMEOUT_MS = 25_000
+/** How long one pause's session stop may take before the Host says it failed. */
+const PAUSE_STOP_TIMEOUT_MS = 12_000
+
+/** Action lanes: card actions stay ordered per card, bulk/import lanes are global. */
+function actionLaneKey(action: TaskBoardAction): string {
+  switch (action.kind) {
+    case 'import':
+    case 'create':
+    case 'move-many':
+    case 'pause':
+    case 'resume':
+    case 'pause-all':
+    case 'resume-all':
+      return '*'
+    default:
+      return 'taskId' in action ? action.taskId : '*'
+  }
+}
+
+/**
+ * Bound one Host-side action. The underlying work is not cancelled (a ledger
+ * write cannot be half-undone); the promise the lane waits on is, so one stuck
+ * call cannot hold its lane — and, since lanes are per card or global, never
+ * the whole board.
+ */
+function withTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label}: no completion within ${Math.round(timeoutMs / 1_000)} s`))
+    }, timeoutMs)
+    work.then(
+      value => { clearTimeout(timer); resolve(value) },
+      error => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
 
 /** Whether two task→session maps name the same cards and conversations. */
 function sameAnswerMap(current: Readonly<Record<string, string>>, next: Readonly<Record<string, string>>): boolean {
   const keys = Object.keys(next)
   if (keys.length !== Object.keys(current).length) return false
   return keys.every(key => current[key] === next[key])
+}
+
+/**
+ * Read and consume the external watchdog's "I restarted the Host" notice. The
+ * watchdog writes it right before `dsh-stop --restart`; the fresh Host turns it
+ * into a board notice and deletes the file, so a human sees *why* the GUI came
+ * back instead of guessing.
+ * @param path - notice file (tests), default `$DSH_HOME/task-board/watchdog-notice.json`.
+ */
+function readWatchdogNotice(path?: string): { at: number; reason?: string } | undefined {
+  const file = path ?? join(dshHome(), 'task-board', 'watchdog-notice.json')
+  if (!existsSync(file)) return undefined
+  try {
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as { at?: unknown; reason?: unknown }
+    if (typeof raw.at !== 'number' || !Number.isFinite(raw.at)) return undefined
+    return { at: raw.at, ...(typeof raw.reason === 'string' && raw.reason !== '' ? { reason: raw.reason } : {}) }
+  } catch {
+    return undefined
+  } finally {
+    try { rmSync(file, { force: true }) } catch { /* a stale notice file is harmless */ }
+  }
 }
 
 export class TaskBoardHostService {
@@ -127,12 +200,31 @@ export class TaskBoardHostService {
   /** Card id → controller aborting its running review/release command. */
   private readonly workControllers = new Map<string, AbortController>()
   /**
-   * Serialized action lane: the `202` route accepts an action and this chain
-   * applies it in arrival order. Every apply is ledger-synchronous and fast —
-   * the long work it opens is queued behind it — so the ordering guarantee costs
-   * no waiting.
+   * Action lanes: card actions stay ordered per card, while bulk actions,
+   * imports and moves run on lanes of their own. One stuck action can therefore
+   * never hold the whole board's actions — the incident this replaces was a
+   * single global chain in which a slow session stop delayed every later
+   * action, including "Pause all".
    */
-  private actionChain: Promise<void> = Promise.resolve()
+  private readonly actionLanes = new Map<string, Promise<void>>()
+  /** When the Host last finished an action (accepted or refused), for the health route. */
+  private lastActionResultAt: number | undefined
+  /**
+   * Machine pressure (load per core and event-loop delay), sampled every
+   * {@link PRESSURE_SAMPLE_MS}. It gates new launches and explains them on the
+   * card; the OS timer is what samples it, so an inactive board still measures.
+   */
+  private readonly pressureMonitor: PressureMonitor
+  private readonly loopDelay = monitorEventLoopDelay({ resolution: 20 })
+  /** Cards whose launch was already explained as "starting anyway under load". */
+  private readonly pressureBypassed = new Set<string>()
+  /** Parse lane statistics for the health route and the overload gate. */
+  private parseInFlight = 0
+  private lastParseMs: number | undefined
+  private lastParseAt: number | undefined
+  /** Set right after the external watchdog restarted the Host (read from its notice file). */
+  private readonly watchdogNotice: { at: number; reason?: string } | undefined
+  private readonly bootAt: number
   /** Outcomes waiting for the next SSE frame (bounded; the browser resolves its outbox from them). */
   private readonly actionResults: TaskBoardActionResult[] = []
   /**
@@ -160,6 +252,8 @@ export class TaskBoardHostService {
   /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
   private reviewPlans: Record<string, TaskBoardReviewPlan> = {}
   private readonly now: () => number
+  /** Event-loop p95 reader (the real histogram in production, a constant in tests). */
+  private readonly eventLoopP95Ms: () => number
 
   constructor(gateway: TypertGateway, options: {
     ledger?: HostTaskLedger
@@ -188,6 +282,19 @@ export class TaskBoardHostService {
     commandRunner?: CommandRunner
     /** Live agent/job handles for the escalating stop (Host entry only). */
     sessionControl?: SessionControl
+    /**
+     * The machine-pressure reader. Tests inject a monitor with a fixed clock and
+     * load so the launch gate is deterministic; the Host entry uses the real one.
+     */
+    pressure?: PressureMonitor
+    /** Event-loop p95 for the next pressure sample; tests pass a constant. */
+    eventLoopP95?: () => number
+    /**
+     * Where the external watchdog leaves its "I restarted the Host" notice. The
+     * Host reads it once at boot and turns it into a board notice; tests point it
+     * at a temp file.
+     */
+    watchdogNoticePath?: string
   } = {}) {
     const commandRunner = options.commandRunner
     this.commandRunner = commandRunner
@@ -245,6 +352,22 @@ export class TaskBoardHostService {
     this.runner = new HostExecutionRunner(gateway, options.commandDispatcher, options.workspaceRegistry, undefined, options.peer, options.sessionControl)
     this.power = options.power ?? new PowerInhibitor()
     this.now = options.now ?? Date.now
+    this.bootAt = this.now()
+    this.pressureMonitor = options.pressure ?? new PressureMonitor({
+      now: this.now,
+      load1: () => loadavg()[0] ?? 0,
+      cores: () => Math.max(1, cpus().length),
+    })
+    this.eventLoopP95Ms = options.eventLoopP95 ?? (() => {
+      const p95 = this.loopDelay.percentile(95) / 1e6
+      this.loopDelay.reset()
+      return Number.isFinite(p95) ? p95 : 0
+    })
+    this.pressureMonitor.sample(this.eventLoopP95Ms())
+    this.watchdogNotice = readWatchdogNotice(options.watchdogNoticePath)
+    if (this.watchdogNotice !== undefined) {
+      this.ledger.note(undefined, `Der Watchdog hat den Host automatisch neu gestartet${this.watchdogNotice.reason === undefined ? '' : ` (${this.watchdogNotice.reason})`}.`)
+    }
     // Environments survive a Host restart (the review keeps its stack); the
     // ledger is the record of what is running, so seed the project map from it.
     this.seedComposeProjects()
@@ -280,8 +403,89 @@ export class TaskBoardHostService {
     this.syncPowerReasons()
     this.timers.push(setInterval(() => { this.schedulePoll() }, SESSION_POLL_MS))
     this.timers.push(setInterval(() => { this.scheduleTick(false) }, SCHEDULE_TICK_MS))
+    // Pressure is sampled on its own timer, not only on the 5 s poll: the board
+    // must know how loaded the machine is even while no tab is open (the health
+    // route and the launch gate both read it).
+    this.timers.push(setInterval(() => { this.samplePressure() }, PRESSURE_SAMPLE_MS))
+    this.samplePressure()
     this.schedulePoll()
     this.scheduleTick(true)
+  }
+
+  /**
+   * One pressure sample plus the two reactions that matter: publish a changed
+   * level (the cards explain held runs from it) and re-pump the launch queue
+   * when the machine is no longer overloaded.
+   */
+  samplePressure(): TaskBoardPressure {
+    const previous = this.pressureMonitor.snapshot().level
+    const next = this.pressureMonitor.sample(this.eventLoopP95Ms())
+    if (next.level !== previous) {
+      if (next.level === 'overloaded') {
+        this.ledger.note(undefined, `System ausgelastet (Last ${next.load1.toFixed(1)} auf ${next.cores} Kernen${next.loopP95Ms >= 100 ? `, Event-Loop p95 ${next.loopP95Ms} ms` : ''}) — neue Läufe warten.`)
+      } else if (previous === 'overloaded') {
+        this.ledger.note(undefined, 'Die Last ist wieder gesunken — wartende Läufe starten.')
+      }
+      this.emit()
+      if (previous === 'overloaded') this.pumpLaunchQueue()
+    }
+    return next
+  }
+
+  /** The current machine pressure (no new sample). */
+  pressure(): TaskBoardPressure {
+    return this.pressureMonitor.snapshot()
+  }
+
+  /**
+   * The board's health face, read by the external watchdog and by a human
+   * debugging a slow GUI. Aggregates only — no card titles, no conversations.
+   */
+  health(): TaskBoardHealth {
+    const pressure = this.pressureMonitor.snapshot()
+    const runtime = this.ledger.runtimeView()
+    const paused = this.ledger.tasksReference().filter(task => task.archivedAt === undefined && task.pausedAt !== undefined).length
+    return {
+      ok: true,
+      at: this.now(),
+      uptimeMs: Math.max(0, this.now() - this.bootAt),
+      active: this.active,
+      pressure,
+      runs: {
+        open: runtime.openExecutions.length,
+        sessions: Object.keys(this.runningSessions).length,
+        queued: this.launchQueue.length,
+        paused,
+      },
+      actions: {
+        lanes: this.actionLanes.size,
+        ...(this.lastActionResultAt === undefined ? {} : { lastResultAt: this.lastActionResultAt }),
+      },
+      parse: {
+        inFlight: this.parseInFlight,
+        ...(this.lastParseMs === undefined ? {} : { lastMs: this.lastParseMs }),
+        ...(this.lastParseAt === undefined ? {} : { lastAt: this.lastParseAt }),
+      },
+      ...(this.watchdogNotice === undefined ? {} : { watchdog: { ...this.watchdogNotice } }),
+    }
+  }
+
+  /**
+   * Claim the parse lane for one request. Returns the release callback: the
+   * form's model call is the one Host operation a human waits on, so the health
+   * route and the overload gate both see how many are in flight.
+   */
+  beginParse(): () => void {
+    this.parseInFlight += 1
+    const startedAt = this.now()
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.parseInFlight = Math.max(0, this.parseInFlight - 1)
+      this.lastParseMs = Math.max(0, this.now() - startedAt)
+      this.lastParseAt = this.now()
+    }
   }
 
   setConfiguration(active: boolean, preventIdleSleep: boolean): void {
@@ -457,6 +661,8 @@ export class TaskBoardHostService {
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
       pendingWork: this.pendingWork(),
+      pressure: this.pressureMonitor.snapshot(),
+      queued: this.queuedRuns(),
       ...(Object.keys(this.runningSessions).length === 0 ? {} : { runningSessions: { ...this.runningSessions } }),
     }
   }
@@ -501,11 +707,25 @@ export class TaskBoardHostService {
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
       pendingWork: this.pendingWork(),
+      pressure: this.pressureMonitor.snapshot(),
+      queued: this.queuedRuns(),
       ...(Object.keys(this.runningSessions).length === 0 ? {} : { runningSessions: { ...this.runningSessions } }),
       ...(changed.length === 0 ? {} : { tasks: changed }),
       ...(removedTaskIds.length === 0 ? {} : { removedTaskIds }),
       ...(actionResults.length === 0 ? {} : { actionResults }),
     }
+  }
+
+  private queuedRuns(): Record<string, TaskBoardQueueEntry> {
+    if (this.launchQueue.length === 0) return {}
+    const pressure = this.pressureMonitor.snapshot().level === 'overloaded'
+    const queued: Record<string, TaskBoardQueueEntry> = {}
+    for (const opened of this.launchQueue) {
+      // The reason is the honest one: either the lane's slot is taken, or the
+      // machine is overloaded and the Host deliberately holds every launch.
+      queued[opened.task.id] = { reason: pressure ? 'pressure' : 'wip', since: opened.execution.startedAt }
+    }
+    return queued
   }
 
   /**
@@ -572,6 +792,23 @@ export class TaskBoardHostService {
     // reach that session, otherwise the button does nothing at all — the exact
     // shape of the incident this change is for.
     if (action.kind === 'pause') for (const taskId of action.taskIds) this.stopOrphanSession(taskId)
+    // The bulk pause also reaches the board's conversations that no execution
+    // backs any more (a late job wake-up): stopping only the runs would leave
+    // exactly the work the human wanted to stop. The bulk resume has nothing
+    // extra to do; the ledger already handed the runs to `resumePausedRun`.
+    if (action.kind === 'pause-all') {
+      for (const taskId of Object.keys(this.runningSessions)) this.stopOrphanSession(taskId)
+      const stopped = result.paused ?? []
+      this.ledger.note(undefined, stopped.length === 0
+        ? 'Pause all: kein laufender Board-Lauf.'
+        : `Pause all: ${stopped.length} laufende${stopped.length === 1 ? 'r Lauf' : ' Läufe'} pausiert.`)
+    }
+    if (action.kind === 'resume-all') {
+      const released = result.resumed ?? []
+      this.ledger.note(undefined, released.length === 0
+        ? 'Fortsetzen: keine pausierte Karte.'
+        : `Fortsetzen: ${released.length} Karte${released.length === 1 ? '' : 'n'} laufen weiter.`)
+    }
     for (const resumed of result.resumed ?? []) this.resumePausedRun(resumed)
     // Review environments take minutes to come up (compose builds images, a
     // start script boots the app), so they are carried out off this call: the
@@ -594,15 +831,23 @@ export class TaskBoardHostService {
    */
   acceptAction(requestId: string, action: TaskBoardAction, initiator?: string): boolean {
     if (!this.active) return false
-    this.actionChain = this.actionChain.then(async () => {
+    const key = actionLaneKey(action)
+    const previous = this.actionLanes.get(key) ?? Promise.resolve()
+    let tracked: Promise<void>
+    const run = previous.then(async () => {
       try {
-        await this.apply(requestId, action, initiator)
+        await withTimeout(this.apply(requestId, action, initiator), ACTION_APPLY_TIMEOUT_MS, 'action-timeout')
         this.pushActionResult({ requestId, ok: true, at: this.now() })
       } catch (error) {
         this.pushActionResult({ requestId, ok: false, error: error instanceof Error ? error.message : String(error), at: this.now() })
       }
+      this.lastActionResultAt = this.now()
       this.emit()
     })
+    tracked = run.finally(() => {
+      if (this.actionLanes.get(key) === tracked) this.actionLanes.delete(key)
+    })
+    this.actionLanes.set(key, tracked)
     return true
   }
 
@@ -778,6 +1023,7 @@ export class TaskBoardHostService {
     this.answerWatches.clear()
     this.reviewWork.clear()
     for (const timer of this.timers.splice(0)) clearInterval(timer)
+    this.loopDelay.disable()
     this.power.dispose()
     this.ledger.dispose()
     this.listeners.clear()
@@ -919,7 +1165,22 @@ export class TaskBoardHostService {
     const sessionId = paused.sessionId
     if (sessionId === undefined) return
     void (async () => {
-      const report = await this.runner.stopSession(sessionId, { preserveUserMessages: true })
+      let report: Awaited<ReturnType<HostExecutionRunner['stopSession']>>
+      try {
+        // The stop is bounded: with the machine overloaded, a cancel that
+        // never comes to rest must not leave the card silently "paused" while
+        // its turn keeps working. On timeout the card keeps the pause (so no
+        // new turn starts from the board) and the reason is visible; the
+        // orphan watchdog retries on its next poll.
+        report = await withTimeout(
+          this.runner.stopSession(sessionId, { preserveUserMessages: true }),
+          PAUSE_STOP_TIMEOUT_MS,
+          'pause-stop-timeout',
+        )
+      } catch (error) {
+        this.ledger.note(paused.taskId, `Die Session ließ sich nicht rechtzeitig anhalten (${error instanceof Error ? error.message : String(error)}); das Board versucht es erneut.`)
+        return
+      }
       if (report.preserved.length > 0) this.preservedMessages.set(paused.taskId, report.preserved)
       if (!report.attached && !report.stopped) {
         // The run already ended (or the Host restarted): there is nothing to
@@ -955,7 +1216,7 @@ export class TaskBoardHostService {
     if (task.executions.some(execution => execution.endedAt === undefined)) return
     const sessionId = latestSessionId(task)
     if (sessionId === undefined) return
-    void this.runner.stopSession(sessionId, { preserveUserMessages: true }).then(report => {
+    void withTimeout(this.runner.stopSession(sessionId, { preserveUserMessages: true }), PAUSE_STOP_TIMEOUT_MS, 'orphan-stop-timeout').then(report => {
       if (report.preserved.length > 0) this.preservedMessages.set(taskId, report.preserved)
       if (report.attached && !report.stopped) {
         this.ledger.note(taskId, 'Die Session ließ sich nicht anhalten; das Board versucht es beim nächsten Durchlauf erneut.')
@@ -1474,6 +1735,26 @@ export class TaskBoardHostService {
         execution => execution.taskId === opened.task.id && execution.executionId === opened.execution.id,
       ))
     }
+    // The launch gate: an overloaded machine (load per core, event-loop delay)
+    // must not receive yet another agent turn — that is what turned three
+    // sessions into a frozen GUI. The run stays queued and the card says why.
+    // `PRESSURE_MAX_HOLD_MS` keeps a permanently busy machine from turning the
+    // queue into a dead end: after the hold the run starts anyway, with a note.
+    const pressure = this.pressureMonitor.snapshot()
+    if (pressure.level === 'overloaded' && this.launchQueue.length > 0) {
+      const now = this.now()
+      const oldest = this.launchQueue.reduce((min, opened) => Math.min(min, opened.execution.startedAt), now)
+      if (now - oldest < PRESSURE_MAX_HOLD_MS) return
+      for (const opened of this.launchQueue) {
+        if (this.pressureBypassed.has(opened.task.id)) continue
+        this.pressureBypassed.add(opened.task.id)
+        this.ledger.note(opened.task.id, `Das System ist weiterhin ausgelastet (Last ${pressure.load1.toFixed(1)} auf ${pressure.cores} Kernen) — der Lauf startet trotzdem.`)
+      }
+    }
+    // Forget the "started anyway" marks of runs that left the queue.
+    for (const id of [...this.pressureBypassed]) {
+      if (!this.launchQueue.some(opened => opened.task.id === id)) this.pressureBypassed.delete(id)
+    }
     for (;;) {
       // Sessions per lane from the ledger snapshot plus the launches that lane
       // started but whose session the snapshot cannot show yet.
@@ -1611,8 +1892,11 @@ function actionTaskIds(action: TaskBoardAction): string[] {
     case 'pause':
     case 'resume':
       return [...new Set(action.taskIds)]
+    case 'pause-all':
+    case 'resume-all':
+      return []
     default:
-      return [action.taskId]
+      return 'taskId' in action ? [action.taskId] : []
   }
 }
 

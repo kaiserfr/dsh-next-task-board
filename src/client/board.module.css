@@ -1777,3 +1777,31 @@ textarea.input::-webkit-resizer {
   line-height: 1;
   padding: 0 2px;
 }
+
+/* Parse liveness: the dot is animated on the compositor (transform/opacity),
+   so it keeps moving while the page's main thread waits for CPU. The seconds
+   text is JavaScript-driven and catches up whenever the page runs again. */
+.parseLive {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.parsePulse {
+  width: 0.55rem;
+  height: 0.55rem;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.4;
+  animation: parsePulse 1.2s ease-in-out infinite;
+}
+
+@keyframes parsePulse {
+  0%, 100% { transform: scale(0.65); opacity: 0.3; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .parsePulse { animation-duration: 3.2s; }
+}

@@ -11,7 +11,9 @@
  */
 import { clientBundle } from './build/tsdown.client.ts'
 
-export default clientBundle('dsh-next-task-board', ['src/index.ts', 'src/invariant.ts', 'src/command-worker.ts'], {
+// `src/watchdog.ts` builds to lib/watchdog.js: the systemd user timer runs it
+// as its own process, outside dsh (see scripts/install-task-board-watchdog.sh).
+export default clientBundle('dsh-next-task-board', ['src/index.ts', 'src/invariant.ts', 'src/command-worker.ts', 'src/watchdog.ts'], {
   libExternal: [
     '@deepseek-ai/dsh-agent-presets',
     '@deepseek-ai/dsh-api-gateway',

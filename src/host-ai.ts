@@ -13,11 +13,15 @@ import { createUserMessage, type GenerateOptions, type LlmRuntime } from '@deeps
 import type { TaskBoardParseDraft, TaskBoardParseRequest } from './protocol.ts'
 
 /**
- * How long one parse may take before the Host gives up on the model. Two
- * minutes, because the reply is short but the provider is shared: a running
- * session must not starve the form, and the user can still cancel at any time.
+ * How long one parse may take before the Host gives up on the model.
+ *
+ * 45 s, not minutes: the reply is short, and a form that hangs is worse than a
+ * clear timeout. The previous 120 s budget meant a parse under load could keep
+ * the user staring at a stalled counter for two minutes; the Host now also
+ * refuses a parse outright while the machine is overloaded (see the route).
+ * The form can cancel at any time and retry.
  */
-export const TASK_PARSE_TIMEOUT_MS = 120_000
+export const TASK_PARSE_TIMEOUT_MS = 45_000
 /** Route a parse uses when the caller names none: a fast, always-available model. */
 export const TASK_PARSE_DEFAULT_MODEL = 'deepseek-official/deepseek-flash'
 /** Largest pasted text one parse accepts (bytes). */

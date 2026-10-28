@@ -217,7 +217,7 @@ export interface ControllerSnapshot {
    * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
    */
   sessionOpenError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions'>
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -334,7 +334,7 @@ export class BoardController {
   private readonly formDrafts = new Map<string, unknown>()
   private transportError: string | undefined
   private sessionOpenError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions'> | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'> | undefined
   /** Liveness net for accepted actions whose result event was lost (reconnect). */
   private outboxSweep: ReturnType<typeof setInterval> | undefined
   private remoteSubscribed = false
@@ -1027,6 +1027,30 @@ export class BoardController {
     return true
   }
 
+  /**
+   * Pause every open board run. The browser sends no card list: the Host
+   * derives it from its own ledger, so a board whose event stream stalled
+   * cannot submit an empty or stale selection and make the bulk control a
+   * silent no-op (the reported failure).
+   * @returns whether the action was accepted locally.
+   */
+  async pauseAllTasks(): Promise<boolean> {
+    if (this.deps.transport === undefined) return false
+    this.enqueue({ kind: 'pause-all' })
+    return true
+  }
+
+  /**
+   * Resume every paused card. Same contract as {@link BoardController.pauseAllTasks}:
+   * the Host owns the list.
+   * @returns whether the action was accepted locally.
+   */
+  async resumeAllTasks(): Promise<boolean> {
+    if (this.deps.transport === undefined) return false
+    this.enqueue({ kind: 'resume-all' })
+    return true
+  }
+
   // --- internals ---------------------------------------------------------------
 
   /**
@@ -1458,6 +1482,8 @@ export class BoardController {
       case 'rerun': return 'start task'
       case 'pause': return 'pause run'
       case 'resume': return 'resume run'
+      case 'pause-all': return 'pause all runs'
+      case 'resume-all': return 'resume all runs'
       case 'approve-merge': return 'release merge'
       case 'review-start': return 'start review environment'
       case 'review-stop': return 'stop review environment'
@@ -1568,6 +1594,10 @@ export class BoardController {
       ...(payload.reviewPlans === undefined ? {} : { reviewPlans: payload.reviewPlans }),
       ...(payload.pendingReleases === undefined ? {} : { pendingReleases: payload.pendingReleases }),
       ...(payload.pendingWork === undefined ? {} : { pendingWork: payload.pendingWork }),
+      ...(payload.pressure === undefined ? {} : { pressure: payload.pressure }),
+      // The queue is derived and always sent: an empty frame field means the
+      // launch queue is empty, not that the Host is old.
+      queued: payload.queued ?? {},
       runningSessions: payload.runningSessions ?? {},
     }
   }
@@ -1679,6 +1709,8 @@ export class BoardController {
       ...(snapshot.reviewPlans === undefined ? {} : { reviewPlans: snapshot.reviewPlans }),
       ...(snapshot.pendingReleases === undefined ? {} : { pendingReleases: snapshot.pendingReleases }),
       ...(snapshot.pendingWork === undefined ? {} : { pendingWork: snapshot.pendingWork }),
+      ...(snapshot.pressure === undefined ? {} : { pressure: snapshot.pressure }),
+      ...(snapshot.queued === undefined ? {} : { queued: snapshot.queued }),
       runningSessions: snapshot.runningSessions ?? {},
     }
     this.ingestHostNotices(snapshot.notices)

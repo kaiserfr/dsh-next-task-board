@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
@@ -71,6 +71,25 @@ function root(): string {
 
 afterEach(() => {
   for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true })
+})
+
+describe('TaskBoardHostService watchdog notice', () => {
+  it('turns the external restart notice into a board notice and consumes it', () => {
+    const dir = root()
+    const noticeFile = join(dir, 'watchdog-notice.json')
+    writeFileSync(noticeFile, JSON.stringify({ at: 1, reason: 'host has not answered for 4 consecutive probes' }))
+    const { gateway } = makeGateway(() => ({ items: [] }))
+    const service = new TaskBoardHostService(gateway, {
+      ledger: new HostTaskLedger(dir),
+      power: new PowerInhibitor({ platform: 'linux' }),
+      watchdogNoticePath: noticeFile,
+    })
+    const notices = service.snapshot().notices ?? []
+    expect(notices.some(notice => notice.message.includes('Watchdog') && notice.message.includes('4 consecutive probes'))).toBe(true)
+    // Consumed once: the next Host boot must not repeat a stale message.
+    expect(existsSync(noticeFile)).toBe(false)
+    service.dispose()
+  })
 })
 
 describe('TaskBoardHostService scheduling without a browser', () => {
@@ -231,7 +250,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.dispose()
   })
 
-  it('starts its two Host timers only once', async () => {
+  it('starts its three Host timers only once', async () => {
     const interval = vi.spyOn(globalThis, 'setInterval')
     const { gateway } = makeGateway(() => ({ items: [] }))
     const service = new TaskBoardHostService(gateway, {
@@ -240,7 +259,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     })
     service.start()
     service.start()
-    expect(interval).toHaveBeenCalledTimes(2)
+    expect(interval).toHaveBeenCalledTimes(3)
     service.dispose()
     interval.mockRestore()
   })

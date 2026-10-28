@@ -66,6 +66,8 @@ function fakeController(snapshot?: Partial<ControllerSnapshot>, overrides?: Part
     rerunTask: async () => {},
     pauseTasks: async () => true,
     resumeTasks: async () => true,
+    pauseAllTasks: async () => true,
+    resumeAllTasks: async () => true,
     ...overrides,
   } as unknown as BoardController
 }
@@ -85,8 +87,8 @@ function click(button: Element | null): void {
 }
 
 describe('board-wide pause/resume', () => {
-  it('pauses every in-progress card in one click', () => {
-    const pauseTasks = vi.fn(async () => true)
+  it('pauses every in-progress card in one click (the Host owns the list)', () => {
+    const pauseAllTasks = vi.fn(async () => true)
     const controller = fakeController({
       tasks: [
         task({ id: 'a' }),
@@ -95,7 +97,7 @@ describe('board-wide pause/resume', () => {
         task({ id: 'c', executions: [{ id: 'e2', sessionId: undefined, startedAt: 0, endedAt: undefined, result: undefined, error: undefined }] }),
         task({ id: 'd', status: 'clarification', executions: [] }),
       ],
-    }, { pauseTasks })
+    }, { pauseAllTasks })
     const container = render(<TaskBoard controller={controller} />)
 
     const button = container.querySelector('[data-dsh-part="pause-all"]') as HTMLButtonElement
@@ -103,20 +105,22 @@ describe('board-wide pause/resume', () => {
     expect(button.textContent).toContain('⏸')
     expect(button.disabled).toBe(false)
     click(button)
-    expect(pauseTasks).toHaveBeenCalledWith(['a', 'b', 'c'])
+    // The browser sends no card ids: a stalled snapshot must be unable to turn
+    // the bulk control into a silent no-op.
+    expect(pauseAllTasks).toHaveBeenCalledWith()
   })
 
   it('turns into the play button and resumes all paused cards', () => {
-    const resumeTasks = vi.fn(async () => true)
+    const resumeAllTasks = vi.fn(async () => true)
     const controller = fakeController({
       tasks: [task({ id: 'a', pausedAt: 5 }), task({ id: 'b', pausedAt: 5 })],
-    }, { resumeTasks })
+    }, { resumeAllTasks })
     const container = render(<TaskBoard controller={controller} />)
 
     const button = container.querySelector('[data-dsh-part="pause-all"]') as HTMLButtonElement
     expect(button.textContent).toContain('▶')
     click(button)
-    expect(resumeTasks).toHaveBeenCalledWith(['a', 'b'])
+    expect(resumeAllTasks).toHaveBeenCalledWith()
   })
 
   it('is disabled while nothing is in progress', () => {

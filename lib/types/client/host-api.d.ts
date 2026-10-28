@@ -14,7 +14,7 @@ export declare const ACTION_REQUEST_TIMEOUT_MS = 20000;
  * "Unexpected token 'o', \"not found\" is not valid JSON" is what a missing
  * Host half looks like today.
  */
-export type HostApiFailure = 'not-mounted' | 'unauthorized' | 'locked' | 'rejected' | 'timeout' | 'unreachable' | 'unexpected';
+export type HostApiFailure = 'not-mounted' | 'unauthorized' | 'locked' | 'rejected' | 'busy' | 'timeout' | 'unreachable' | 'unexpected';
 /** Transport failure carrying a stable class next to its user-facing message. */
 export declare class HostApiError extends Error {
     readonly failure: HostApiFailure;
