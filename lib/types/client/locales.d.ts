@@ -70,6 +70,8 @@ export declare const zh: {
     'new.aiParseUnavailable': string;
     'new.aiParseTimeout': string;
     'new.aiParseStalled': string;
+    'new.aiParseOverloaded': string;
+    'new.aiParseLiveHint': string;
     'new.aiParseFailed': string;
     'board.retryHost': string;
     'board.hostMeta': string;
@@ -98,6 +100,7 @@ export declare const zh: {
     'card.waiting': string;
     'card.waitingOn': string;
     'card.waitingNoWorkspace': string;
+    'card.waitingPressure': string;
     'board.queuedNotice': string;
     'card.paused': string;
     'card.pause': string;

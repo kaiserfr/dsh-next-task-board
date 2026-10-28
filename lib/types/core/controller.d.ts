@@ -185,7 +185,7 @@ export interface ControllerSnapshot {
      * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
      */
     sessionOpenError?: string;
-    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions'>;
+    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'>;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
@@ -506,6 +506,20 @@ export declare class BoardController {
      * @returns whether the action was accepted locally.
      */
     resumeTasks(ids: readonly string[]): Promise<boolean>;
+    /**
+     * Pause every open board run. The browser sends no card list: the Host
+     * derives it from its own ledger, so a board whose event stream stalled
+     * cannot submit an empty or stale selection and make the bulk control a
+     * silent no-op (the reported failure).
+     * @returns whether the action was accepted locally.
+     */
+    pauseAllTasks(): Promise<boolean>;
+    /**
+     * Resume every paused card. Same contract as {@link BoardController.pauseAllTasks}:
+     * the Host owns the list.
+     * @returns whether the action was accepted locally.
+     */
+    resumeAllTasks(): Promise<boolean>;
     /**
      * Session-list notifications fire for all kinds of incidental churn
      * (background navigation, the Host runner creating and selecting a fresh

@@ -6,7 +6,8 @@ import { HostExecutionRunner, type GatewayPeer, type SessionCommandDispatcher, t
 import type { CommandRunner } from './command-runner.ts';
 import { GitWorkflow } from './git-workflow.ts';
 import { PowerInhibitor } from './power-inhibitor.ts';
-import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts';
+import { PressureMonitor } from './core/pressure.ts';
+import { type TaskBoardAction, type TaskBoardEventPayload, type TaskBoardHealth, type TaskBoardPressure, type TaskBoardReviewRequest, type TaskBoardReviewResponse, type TaskBoardSnapshot } from './protocol.ts';
 import type { TaskPermission } from './core/handover.ts';
 export declare class TaskBoardHostService {
     readonly ledger: HostTaskLedger;
@@ -100,12 +101,31 @@ export declare class TaskBoardHostService {
     /** Card id → controller aborting its running review/release command. */
     private readonly workControllers;
     /**
-     * Serialized action lane: the `202` route accepts an action and this chain
-     * applies it in arrival order. Every apply is ledger-synchronous and fast —
-     * the long work it opens is queued behind it — so the ordering guarantee costs
-     * no waiting.
+     * Action lanes: card actions stay ordered per card, while bulk actions,
+     * imports and moves run on lanes of their own. One stuck action can therefore
+     * never hold the whole board's actions — the incident this replaces was a
+     * single global chain in which a slow session stop delayed every later
+     * action, including "Pause all".
      */
-    private actionChain;
+    private readonly actionLanes;
+    /** When the Host last finished an action (accepted or refused), for the health route. */
+    private lastActionResultAt;
+    /**
+     * Machine pressure (load per core and event-loop delay), sampled every
+     * {@link PRESSURE_SAMPLE_MS}. It gates new launches and explains them on the
+     * card; the OS timer is what samples it, so an inactive board still measures.
+     */
+    private readonly pressureMonitor;
+    private readonly loopDelay;
+    /** Cards whose launch was already explained as "starting anyway under load". */
+    private readonly pressureBypassed;
+    /** Parse lane statistics for the health route and the overload gate. */
+    private parseInFlight;
+    private lastParseMs;
+    private lastParseAt;
+    /** Set right after the external watchdog restarted the Host (read from its notice file). */
+    private readonly watchdogNotice;
+    private readonly bootAt;
     /** Outcomes waiting for the next SSE frame (bounded; the browser resolves its outbox from them). */
     private readonly actionResults;
     /**
@@ -133,6 +153,8 @@ export declare class TaskBoardHostService {
     /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
     private reviewPlans;
     private readonly now;
+    /** Event-loop p95 reader (the real histogram in production, a constant in tests). */
+    private readonly eventLoopP95Ms;
     constructor(gateway: TypertGateway, options?: {
         ledger?: HostTaskLedger;
         power?: PowerInhibitor;
@@ -160,8 +182,40 @@ export declare class TaskBoardHostService {
         commandRunner?: CommandRunner;
         /** Live agent/job handles for the escalating stop (Host entry only). */
         sessionControl?: SessionControl;
+        /**
+         * The machine-pressure reader. Tests inject a monitor with a fixed clock and
+         * load so the launch gate is deterministic; the Host entry uses the real one.
+         */
+        pressure?: PressureMonitor;
+        /** Event-loop p95 for the next pressure sample; tests pass a constant. */
+        eventLoopP95?: () => number;
+        /**
+         * Where the external watchdog leaves its "I restarted the Host" notice. The
+         * Host reads it once at boot and turns it into a board notice; tests point it
+         * at a temp file.
+         */
+        watchdogNoticePath?: string;
     });
     start(): void;
+    /**
+     * One pressure sample plus the two reactions that matter: publish a changed
+     * level (the cards explain held runs from it) and re-pump the launch queue
+     * when the machine is no longer overloaded.
+     */
+    samplePressure(): TaskBoardPressure;
+    /** The current machine pressure (no new sample). */
+    pressure(): TaskBoardPressure;
+    /**
+     * The board's health face, read by the external watchdog and by a human
+     * debugging a slow GUI. Aggregates only — no card titles, no conversations.
+     */
+    health(): TaskBoardHealth;
+    /**
+     * Claim the parse lane for one request. Returns the release callback: the
+     * form's model call is the one Host operation a human waits on, so the health
+     * route and the overload gate both see how many are in flight.
+     */
+    beginParse(): () => void;
     setConfiguration(active: boolean, preventIdleSleep: boolean): void;
     /**
      * Apply the board's WIP limit (settings namespace `task-board`,
@@ -252,6 +306,7 @@ export declare class TaskBoardHostService {
      */
     eventPayload(): TaskBoardEventPayload;
     private computeFrame;
+    private queuedRuns;
     /**
      * Work in flight per card, for the card's "Abbrechen" control. Derived from
      * the service's own queues and the command runner's live scopes; never ledger

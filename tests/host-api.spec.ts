@@ -187,6 +187,17 @@ describe('HttpTaskBoardHostTransport task parsing (#1540)', () => {
     expect((failure as HostApiError).message).not.toContain('503')
   })
 
+  it('turns an overloaded Host into a retryable busy refusal', async () => {
+    const transport = transportFor(() => new Response(
+      JSON.stringify({ ok: false, code: 'overloaded', error: 'the Host is overloaded (load 13.2 on 4 cores)', retryAfterMs: 5_000 }),
+      { status: 503 },
+    ))
+    const failure = await transport.parseDraft({ text: 'note' }).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(HostApiError)
+    expect((failure as HostApiError).failure).toBe('busy')
+    expect((failure as HostApiError).message).toContain('5')
+  })
+
   it('phrases the Host timeout and the unmounted route differently', async () => {
     const timedOut = transportFor(() => new Response(JSON.stringify({ ok: false, code: 'timeout' }), { status: 504 }))
     await expect(timedOut.parseDraft({ text: 'note', model: 'p/m' })).rejects.toMatchObject({ failure: 'timeout' })

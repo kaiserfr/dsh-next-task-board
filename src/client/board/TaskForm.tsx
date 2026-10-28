@@ -311,7 +311,13 @@ export function AiParseSection({
         {parse.pending
           ? (
             <>
-              <span className={css.fieldHint} data-dsh-part="ai-parse-elapsed" role="status">
+              {/* The pulse is a compositor animation (transform/opacity), so it
+                  keeps moving even while the page's main thread is starved by a
+                  busy machine — the reported "counter stuck at 0s" was exactly
+                  that: no JavaScript ran, so nothing on screen moved. The
+                  seconds text updates whenever the page gets scheduled. */}
+              <span className={css.parseLive} data-dsh-part="ai-parse-elapsed" data-dsh-live="true" role="status" title={t('new.aiParseLiveHint')}>
+                <span className={css.parsePulse} aria-hidden="true" />
                 {t('new.aiParseElapsed', { seconds: String(parse.elapsed) })}
               </span>
               <button type="button" className={css.ghostButton} onClick={() => { parse.cancel() }}>

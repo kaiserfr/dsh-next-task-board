@@ -1797,6 +1797,37 @@ export class HostTaskLedger {
         if (released.length > 0) resumed = released
         break
       }
+      case 'pause-all': {
+        // The bulk control derives its list HERE, from the ledger, and not from
+        // the browser's snapshot: a board whose event stream stalled used to
+        // submit a stale (often empty) list, so "Pause all" returned success and
+        // did nothing. Every open run is suspended, including the clarification
+        // run; paused cards are left alone, so a second click is a no-op.
+        const suspended: PausedRun[] = []
+        this.document.tasks = this.document.tasks.map(task => {
+          if (task.archivedAt !== undefined || task.pausedAt !== undefined) return task
+          const execution = openExecution(task)
+          if (execution === undefined) return task
+          suspended.push({ taskId: task.id, sessionId: execution.sessionId })
+          return withPause(task, true, now)
+        })
+        if (suspended.length > 0) paused = suspended
+        break
+      }
+      case 'resume-all': {
+        // The other direction of the same control: clear every pause and hand
+        // the runs back to the service, which continues their conversations.
+        const released: ResumedRun[] = []
+        this.document.tasks = this.document.tasks.map(task => {
+          if (task.archivedAt !== undefined || task.pausedAt === undefined) return task
+          const resumedTask = withPause(task, false, now)
+          const execution = openExecution(task)
+          if (execution !== undefined) released.push({ task: resumedTask, execution })
+          return resumedTask
+        })
+        if (released.length > 0) resumed = released
+        break
+      }
       case 'rerun':
       case 'run': {
         const task = this.document.tasks.find(item => item.id === action.taskId)

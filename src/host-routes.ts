@@ -177,6 +177,25 @@ export function makeTaskBoardRoutes(
       writeJson(res, 200, service.snapshot(), { 'cache-control': 'no-store' })
     },
   }
+  /**
+   * The Host's own health face, for the external watchdog and local debugging.
+   *
+   * It is the one route a machine process (not a browser) calls, so it carries
+   * its own fence: loopback only, GET only, aggregate counters only — no card
+   * titles, no conversation ids. The socket check is the authority (a LAN or
+   * proxy request never reaches it); the browser marker the other routes need
+   * does not apply to a watchdog, and requiring it would make health
+   * unobservable exactly when it matters.
+   */
+  const health: WebRoute = {
+    kind: 'exact',
+    path: `${TASK_BOARD_API_PREFIX}/health`,
+    handler: (req, res): void => {
+      if (req.method !== 'GET') return writeJson(res, 405, { ok: false, error: 'method-not-allowed' }, { 'cache-control': 'no-store' })
+      if (!isLoopbackRequest(req)) return writeJson(res, 403, { ok: false, error: 'loopback-only' }, { 'cache-control': 'no-store' })
+      writeJson(res, 200, service.health(), { 'cache-control': 'no-store' })
+    },
+  }
   const action: WebRoute = {
     kind: 'exact',
     path: `${TASK_BOARD_API_PREFIX}/action`,
@@ -263,11 +282,25 @@ export function makeTaskBoardRoutes(
       if (parseTask === undefined) {
         return writeJson(res, 503, { ok: false, code: 'no-model', error: 'task-board parsing is unavailable' }, { 'cache-control': 'no-store' })
       }
+      // Overload gate: a parse is the one request a human is actively waiting
+      // on, and it must never queue behind a saturated machine for minutes.
+      // Under sustained overload the Host answers at once with a typed,
+      // retryable refusal instead of letting the form sit at 0 s.
+      const pressure = service.pressure()
+      if (pressure.level === 'overloaded') {
+        return writeJson(res, 503, {
+          ok: false,
+          code: 'overloaded',
+          error: `the Host is overloaded (load ${pressure.load1.toFixed(1)} on ${pressure.cores} cores)`,
+          retryAfterMs: 5_000,
+        }, { 'cache-control': 'no-store', 'retry-after': '5' })
+      }
       // The model call outlives a closed tab: stop it when the response goes
       // away instead of holding the provider request open for the full timeout.
       const controller = new AbortController()
       const onClose = (): void => { controller.abort() }
       res.once('close', onClose)
+      const releaseParse = service.beginParse()
       try {
         const draft = await parseTask(request, controller.signal)
         writeJson(res, 200, { ok: true, draft }, { 'cache-control': 'no-store' })
@@ -278,6 +311,7 @@ export function makeTaskBoardRoutes(
         const status = failure.code === 'no-model' ? 503 : failure.code === 'timeout' ? 504 : 502
         writeJson(res, status, { ok: false, code: failure.code, error: failure.message }, { 'cache-control': 'no-store' })
       } finally {
+        releaseParse()
         res.off('close', onClose)
       }
     },
@@ -320,5 +354,5 @@ export function makeTaskBoardRoutes(
       writeJson(res, 200, await service.reviewOperation(request), { 'cache-control': 'no-store' })
     },
   }
-  return [state, action, events, parse, review]
+  return [state, health, action, events, parse, review]
 }

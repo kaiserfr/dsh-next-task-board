@@ -232,11 +232,32 @@ describe('task-board parse route (#1540)', () => {
   let parseTask: ReturnType<typeof vi.fn>
   let closeServer: () => Promise<void>
 
-  async function start(options: { parseTask?: unknown; omit?: boolean } = {}): Promise<void> {
+  let releaseParse = 0
+  let beginParse = 0
+
+  async function start(options: { parseTask?: unknown; omit?: boolean; overloaded?: boolean } = {}): Promise<void> {
+    const pressure = options.overloaded === true
+      ? { level: 'overloaded', load1: 13.2, cores: 4, loadRatio: 3.3, loopP95Ms: 620 }
+      : { level: 'ok', load1: 0.4, cores: 4, loadRatio: 0.1, loopP95Ms: 4 }
     const service = {
       snapshot: () => snapshot,
       apply: () => snapshot,
       subscribe: () => () => undefined,
+      pressure: () => pressure,
+      beginParse: () => {
+        beginParse += 1
+        return () => { releaseParse += 1 }
+      },
+      health: () => ({
+        ok: true,
+        at: 1,
+        uptimeMs: 1,
+        active: true,
+        pressure,
+        runs: { open: 0, sessions: 0, queued: 0, paused: 0 },
+        actions: { lanes: 0 },
+        parse: { inFlight: 0 },
+      }),
     } as unknown as TaskBoardHostService
     const routeOptions = options.omit === true ? {} : { parseTask: (options.parseTask ?? parseTask) as never }
     const routes = makeTaskBoardRoutes(service, {}, routeOptions)
@@ -305,6 +326,31 @@ describe('task-board parse route (#1540)', () => {
       expect(response.status, code).toBe(status)
       expect(await response.json()).toMatchObject({ ok: false, code })
     }
+  })
+
+  it('refuses fast while the machine is overloaded and keeps the form retryable', async () => {
+    beginParse = 0
+    releaseParse = 0
+    await start({ overloaded: true })
+    const response = await post({ text: 'pasted note' })
+    expect(response.status).toBe(503)
+    expect(response.headers.get('retry-after')).toBe('5')
+    expect(await response.json()).toMatchObject({ ok: false, code: 'overloaded', retryAfterMs: 5000 })
+    // The model is never called: an overloaded Host must not add a fourth
+    // model stream to an already saturated machine.
+    expect(parseTask).not.toHaveBeenCalled()
+    expect(beginParse).toBe(0)
+  })
+
+  it('counts a parse in flight and releases it when the answer is out', async () => {
+    beginParse = 0
+    releaseParse = 0
+    const releasesBefore = releaseParse
+    await start()
+    const response = await post({ text: 'pasted note' })
+    expect(response.status).toBe(200)
+    expect(beginParse).toBeGreaterThan(0)
+    expect(releaseParse - releasesBefore).toBe(beginParse)
   })
 
   it('answers a typed no-model failure when the deployment has no parse face', async () => {
@@ -457,5 +503,50 @@ describe('task-board route fence on a LAN-facing bind', () => {
     const credential = vi.fn(() => false)
     expect(isTrustedTaskBoardRequest(loopback, access(credential))).toBe(true)
     expect(credential).not.toHaveBeenCalled()
+  })
+})
+
+describe('task-board health route', () => {
+  it('answers aggregate health to a loopback probe, GET only', async () => {
+    const pressure = { level: 'busy' as const, load1: 5.2, cores: 4, loadRatio: 1.3, loopP95Ms: 180 }
+    const health = {
+      ok: true as const,
+      at: 5,
+      uptimeMs: 10,
+      active: true,
+      pressure,
+      runs: { open: 2, sessions: 3, queued: 1, paused: 0 },
+      actions: { lanes: 1, lastResultAt: 4 },
+      parse: { inFlight: 0, lastMs: 1750, lastAt: 4 },
+    }
+    const service = {
+      snapshot: () => snapshot,
+      apply: () => snapshot,
+      subscribe: () => () => undefined,
+      health: () => health,
+      pressure: () => pressure,
+      beginParse: () => () => undefined,
+    } as unknown as TaskBoardHostService
+    const routes = makeTaskBoardRoutes(service, {})
+    const server = createServer((req, res) => {
+      const route = routes.find(candidate => candidate.path === new URL(req.url ?? '/', 'http://local').pathname)
+      if (route === undefined) { res.writeHead(404); res.end(); return }
+      void route.handler(req, res)
+    })
+    await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve) })
+    const address = server.address()
+    if (address === null || typeof address === 'string') throw new Error('test server did not bind')
+    const base = `http://127.0.0.1:${address.port}`
+    try {
+      const response = await fetch(`${base}/api/task-board/health`)
+      expect(response.status).toBe(200)
+      expect(await response.json()).toEqual(health)
+      expect((await fetch(`${base}/api/task-board/health`, { method: 'POST' })).status).toBe(405)
+      // The health route is fenced by the socket, not by a browser marker: a
+      // watchdog process sends none.
+      expect(response.headers.get('cache-control')).toBe('no-store')
+    } finally {
+      await new Promise<void>((resolve) => { server.close(() => { resolve() }) })
+    }
   })
 })

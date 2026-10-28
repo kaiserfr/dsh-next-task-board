@@ -110,7 +110,13 @@ describe('new-task AI parse section (#1540)', () => {
       typeInto(field(container, t('new.aiParsePlaceholder')), 'some note')
       await act(async () => { parseButton(container).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
       expect(parseTaskDraft).toHaveBeenCalledOnce()
-      expect(container.querySelector('[data-dsh-part="ai-parse-elapsed"]')?.textContent).toContain('0')
+      const indicator = container.querySelector('[data-dsh-part="ai-parse-elapsed"]')
+      expect(indicator?.textContent).toContain('0')
+      // The pulse is the compositor-driven "it is alive" signal: it keeps
+      // moving even when a starved page cannot update the seconds text (the
+      // reported frozen "0s").
+      expect(indicator?.getAttribute('data-dsh-live')).toBe('true')
+      expect(indicator?.querySelector('[aria-hidden="true"]')).not.toBeNull()
       await act(async () => { await vi.advanceTimersByTimeAsync(3_200) })
       expect(container.querySelector('[data-dsh-part="ai-parse-elapsed"]')?.textContent).toContain('3')
     } finally {
@@ -132,6 +138,16 @@ describe('new-task AI parse section (#1540)', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('shows an overload refusal and keeps the button as the retry', async () => {
+    const { container } = renderModal({ parseTaskDraft: vi.fn(async () => { throw new Error(t('new.aiParseOverloaded', { seconds: '5' })) }) })
+    typeInto(field(container, t('new.aiParsePlaceholder')), 'some note')
+    await act(async () => { parseButton(container).dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(container.textContent).toContain(t('new.aiParseOverloaded', { seconds: '5' }))
+    // Nothing was lost: the text stays and the same button retries.
+    expect(parseButton(container).disabled).toBe(false)
+    expect(field(container, t('new.aiParsePlaceholder'))).toHaveProperty('value', 'some note')
   })
 
   it('shows the reason a parse failed', async () => {

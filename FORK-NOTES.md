@@ -1122,6 +1122,21 @@ dsh plugin --profile web remove @linxin666/dsh-client-ui-task-board
   markiert ein Tippen nur eine Karte, ein Gruppen-Drag ist dort also nicht
   möglich.
 
+## Überlast (2026-10-28)
+
+- Der laufende Host misst jetzt Last (load1/cores) und Event-Loop-p95 und hält
+  neue Läufe bei anhaltender Überlast zurück; die Karte sagt „System
+  ausgelastet“ statt stumm zu warten. `GET /api/task-board/health` ist die
+  loopback-only Sonde dafür.
+- „Pause all“ ist eine Host-Aktion (`pause-all`/`resume-all`) ohne Kartenliste:
+  eine eingefrorene Seite kann die Liste nicht mehr leeren. Aktionen laufen in
+  Karten-Tracks statt einer globalen Kette; jede Aktion hat ein Zeitlimit.
+- Parse-Budget 45 s, bei Überlast sofortige, retrybare 503 statt Hängen; der
+  Fortschritts-Punkt im Formular ist eine Compositor-Animation.
+- `scripts/install-task-board-watchdog.sh` installiert einen externen
+  systemd-User-Timer (`lib/watchdog.js`), der nach ~2 Minuten ohne Antwort neu
+  startet — nie bei geschlossenem Port, 404 oder 401/403.
+
 ## Pflege
 
 Upstream-Änderungen manuell nachziehen (`git remote add upstream …`,

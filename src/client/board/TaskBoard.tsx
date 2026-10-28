@@ -33,6 +33,13 @@ export const BATCH_DRAG_MIME = 'application/x-dsh-taskboard-cards'
 /** Stable empty set, so clearing the drag marker keeps the same reference. */
 const NO_IDS: ReadonlySet<string> = new Set<string>()
 
+/**
+ * Sentinel waiting reason for a card the Host holds back because the machine is
+ * overloaded: the card only needs the waiting marker, the tooltip carries the
+ * explanation (the blocker fields stay empty on purpose — no card blocks it).
+ */
+const PRESSURE_WAITING: WaitingReason = { blockerTitle: '', lane: '' }
+
 /** How long the "your card had to queue" notice stays on screen. */
 const QUEUED_NOTICE_MS = 12_000
 
@@ -351,6 +358,18 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     for (const [id, reason] of waitingReasonById) texts.set(id, waitingTooltip(reason, workspaceTitles))
     return texts
   }, [waitingReasonById, workspaceTitles])
+  // The Host's launch queue: a run it holds back because the machine is
+  // overloaded says that, instead of looking like a WIP wait. The text is the
+  // same for every held card, so it is resolved once.
+  const queuedById = useMemo(() => snapshot.host?.queued ?? {}, [snapshot.host?.queued])
+  const pressureWaitingIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const [id, entry] of Object.entries(queuedById)) if (entry.reason === 'pressure') ids.add(id)
+    return ids
+  }, [queuedById])
+  const pressureWaitingText = pressureWaitingIds.size === 0
+    ? undefined
+    : t('card.waitingPressure', { load: (snapshot.host?.pressure?.loadRatio ?? 0).toFixed(1) })
   // The Host's question watch as the board uses it: card id → the conversation
   // waiting for the human's answer. The Host owns the detection (it reads the
   // conversations on its poll); the board only points at what it named, and the
@@ -481,9 +500,13 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const pausedIds = snapshot.tasks
     .filter(task => task.archivedAt === undefined && task.pausedAt !== undefined)
     .map(task => task.id)
+  // Both directions are Host actions without a card list: the Host derives
+  // what to pause/resume from its own ledger. A board whose event stream
+  // stalled used to send a stale (often empty) list and the bulk control
+  // silently did nothing — the reported failure.
   const pauseAll = useCallback((): void => {
-    void (runningIds.length > 0 ? controller.pauseTasks(runningIds) : controller.resumeTasks(pausedIds))
-  }, [controller, runningIds, pausedIds])
+    void (runningIds.length > 0 ? controller.pauseAllTasks() : controller.resumeAllTasks())
+  }, [controller, runningIds.length])
   // The button is a pause button while any run is open, and turns into the
   // play button (resume all) once only paused cards are left.
   const bulkPauseMode = runningIds.length > 0 || pausedIds.length === 0
@@ -912,6 +935,9 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                     // drop always tell the same story.
                     const left = columnStepOf(task, machine, 'left', snapshot.host?.sessionDefaultPermission)
                     const right = columnStepOf(task, machine, 'right', snapshot.host?.sessionDefaultPermission)
+                    // A run the Host holds back because the machine is
+                    // overloaded says so; the WIP wait keeps its own text.
+                    const pressure = pressureWaitingIds.has(task.id)
                     return (
                       <MemoTaskCard
                         key={task.id}
@@ -923,8 +949,8 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                         timeZone={snapshot.host?.scheduler.timeZone}
                         selected={selectedIds.has(task.id)}
                         dragging={dragIds.has(task.id)}
-                        waitingReason={waitingReasonById.get(task.id)}
-                        waitingTooltip={waitingTooltipById.get(task.id)}
+                        waitingReason={pressure ? PRESSURE_WAITING : waitingReasonById.get(task.id)}
+                        waitingTooltip={pressure ? pressureWaitingText : waitingTooltipById.get(task.id)}
                         awaitingAnswerSessionId={awaitingAnswerById[task.id]}
                         leftTarget={left.target}
                         leftBlocker={left.blocker}

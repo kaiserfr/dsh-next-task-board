@@ -123,6 +123,80 @@ export interface TaskBoardSnapshot {
      * is paused and the ordinary pause control is not available.
      */
     runningSessions?: Record<string, true>;
+    /**
+     * How loaded the machine running the Host is (see {@link TaskBoardPressure}).
+     * Derived, never ledger state; the board explains a held-back run with it,
+     * and the Host holds new runs back while the machine is overloaded. Absent
+     * on an older Host.
+     */
+    pressure?: TaskBoardPressure;
+    /**
+     * Task id → why the card's run is still in the Host's launch queue: the
+     * lane's WIP slot is taken (`wip`) or the machine is overloaded (`pressure`).
+     * Derived from the queue, never ledger state; absent on an older Host.
+     */
+    queued?: Record<string, TaskBoardQueueEntry>;
+}
+/** One card waiting in the Host's launch queue. */
+export interface TaskBoardQueueEntry {
+    reason: 'wip' | 'pressure';
+    /** When the run was opened (the card's execution startedAt). */
+    since: number;
+}
+/** How loaded the machine running the Host is. Levels are sustained readings. */
+export interface TaskBoardPressure {
+    level: 'ok' | 'busy' | 'overloaded';
+    load1: number;
+    cores: number;
+    /** `load1 / cores`, rounded to two decimals. */
+    loadRatio: number;
+    /** Event-loop delay p95 of the last sample, in milliseconds. */
+    loopP95Ms: number;
+    /** When the current level was first observed. */
+    since?: number;
+}
+/**
+ * Answer of `GET {TASK_BOARD_API_PREFIX}/health`: the Host's own view of its
+ * load and queues. Read by the external watchdog (a process outside dsh, so it
+ * still sees the truth when this event loop is blocked) and by the settings
+ * card; never ledger state.
+ */
+export interface TaskBoardHealth {
+    ok: true;
+    at: number;
+    uptimeMs: number;
+    /** Whether the board is enabled in the current configuration. */
+    active: boolean;
+    pressure: TaskBoardPressure;
+    runs: {
+        /** Open executions (the runs the ledger still works on). */
+        open: number;
+        /** Conversations the roster reports as running right now. */
+        sessions: number;
+        /** Runs still waiting for a launch slot. */
+        queued: number;
+        /** Cards paused by the human. */
+        paused: number;
+    };
+    actions: {
+        /** Action lanes with work in flight. */
+        lanes: number;
+        /** When the Host last finished an action (accepted or refused). */
+        lastResultAt?: number;
+    };
+    parse: {
+        /** Parses in flight right now. */
+        inFlight: number;
+        /** Wall time of the last finished parse. */
+        lastMs?: number;
+        /** When the last parse finished. */
+        lastAt?: number;
+    };
+    /** Present right after the external watchdog restarted the Host. */
+    watchdog?: {
+        at: number;
+        reason?: string;
+    };
 }
 /** SSE event frame: revision/scheduler/power only, never the task list. */
 export interface TaskBoardEventPayload {
@@ -132,6 +206,9 @@ export interface TaskBoardEventPayload {
     /** Enforced limits, so a settings change reaches every open board. */
     maxConcurrentRuns?: number;
     maxDoneTasks?: number;
+    /** Machine pressure and the launch queue's waiting reasons (derived). */
+    pressure?: TaskBoardPressure;
+    queued?: Record<string, TaskBoardQueueEntry>;
     /**
      * Waiting questions, carried on the frame like the limits because the map is
      * derived: it never bumps the revision the frame is gated on.
@@ -241,6 +318,19 @@ export type TaskBoardAction = {
 } | {
     kind: 'resume';
     taskIds: string[];
+}
+/**
+ * Pause every open board run at once. The Host derives the list from its own
+ * ledger — the browser no longer tells it which cards are running, because a
+ * board whose event stream stalled would name an empty or stale list and the
+ * bulk control would silently do nothing.
+ */
+ | {
+    kind: 'pause-all';
+}
+/** Resume every paused card at once (the bulk control's other direction). */
+ | {
+    kind: 'resume-all';
 } | {
     kind: 'confirm-permission';
     taskId: string;
