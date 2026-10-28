@@ -8,7 +8,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
 import { collectKnownTags, compareWipOrder, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason } from '../../core/tasks.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
-import { transitionBlockerOf, type QueuedTransition, type TransitionBlocker, type TransitionError } from '../../core/transitions.ts'
+import { columnStepOf, transitionBlockerOf, type QueuedTransition, type StepBlocker, type TransitionBlocker, type TransitionError } from '../../core/transitions.ts'
 import { t } from '../locales.ts'
 import css from '../board.module.css'
 import { NewTaskModal } from './NewTaskModal.tsx'
@@ -164,7 +164,7 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, sessionRunning }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** The Host is merging this card in the background. */
@@ -180,6 +180,14 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   waitingTooltip?: string
   /** The conversation waiting for the human's answer; undefined when nothing is open. */
   awaitingAnswerSessionId?: string
+  /** Neighboring column one step left; undefined at the board's edge. */
+  leftTarget?: TaskStatus
+  /** Why a step left is unavailable. */
+  leftBlocker?: StepBlocker
+  /** Neighboring column one step right; undefined at the board's edge. */
+  rightTarget?: TaskStatus
+  /** Why a step right is unavailable. */
+  rightBlocker?: StepBlocker
   onSelect: (id: string, event: ReactMouseEvent<HTMLButtonElement>) => void
   onKeySelect: (id: string, event: ReactKeyboardEvent<HTMLButtonElement>) => void
   onOpen: (id: string) => void
@@ -188,6 +196,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   onOpenSession: (sessionId: string) => void
   onTogglePause: (task: TaskRecord) => void
   onStopSession: (task: TaskRecord) => void
+  /** Fire the manual transition into the adjacent column (same as a drop). */
+  onStep: (id: string, status: TaskStatus) => void
   /** The Host says this card's conversation is running right now. */
   sessionRunning: boolean
 }) {
@@ -208,6 +218,10 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       waitingReason={waitingReason}
       waitingTooltip={waitingTooltip}
       awaitingAnswerSessionId={awaitingAnswerSessionId}
+      leftTarget={leftTarget}
+      leftBlocker={leftBlocker}
+      rightTarget={rightTarget}
+      rightBlocker={rightBlocker}
       onClick={onClick}
       onKeyDown={onKeyDown}
       onDoubleClick={onDoubleClick}
@@ -216,6 +230,7 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       onOpenSession={onOpenSession}
       onTogglePause={onTogglePause}
       onStopSession={onStopSession}
+      onStep={onStep}
       sessionRunning={sessionRunning}
     />
   )
@@ -439,6 +454,12 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // Direct card → session jump (active and inactive sessions alike). The
   // controller refreshes a stale roster before it reports a failed jump.
   const openSession = useCallback((sessionId: string): void => { controller.openSession?.(sessionId) }, [controller])
+  // The card's one-column step buttons take the same path as a drop: queue the
+  // manual transition, let the Host validate it, then render the confirmed
+  // snapshot (no optimistic status change).
+  const stepTask = useCallback((id: string, status: TaskStatus): void => {
+    controller.moveTask(id, status)
+  }, [controller])
   // Pause/resume of one card's open run. The card only renders the control
   // while a run is open, so the state of the record picks the direction.
   const togglePause = useCallback((task: TaskRecord): void => {
@@ -832,7 +853,28 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
             </header>
             <div className={css.cards}>
               {visible.map(task => (
-                <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={false} dragging={false} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} onStopSession={stopSession} sessionRunning={snapshot.host?.runningSessions?.[task.id] === true} />
+                <MemoTaskCard
+                  key={task.id}
+                  task={task}
+                  pending={pendingSet.has(task.id)}
+                  releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined}
+                  pendingTransition={pendingTransitionById.get(task.id)}
+                  transitionError={transitionErrorById[task.id]}
+                  timeZone={snapshot.host?.scheduler.timeZone}
+                  selected={false}
+                  dragging={false}
+                  awaitingAnswerSessionId={awaitingAnswerById[task.id]}
+                  onSelect={selectCard}
+                  onKeySelect={selectCardByKey}
+                  onOpen={openDetail}
+                  onDragStart={startDrag}
+                  onDragEnd={endDrag}
+                  onOpenSession={openSession}
+                  onTogglePause={togglePause}
+                  onStopSession={stopSession}
+                  onStep={stepTask}
+                  sessionRunning={snapshot.host?.runningSessions?.[task.id] === true}
+                />
               ))}
               {visible.length === 0 && (
                 <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('archive.empty')}</div>
@@ -862,9 +904,45 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                   <span className={css.columnCount}>{tasks.length}</span>
                 </header>
                 <div className={css.cards}>
-                  {tasks.map(task => (
-                    <MemoTaskCard key={task.id} task={task} pending={pendingSet.has(task.id)} releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined} pendingTransition={pendingTransitionById.get(task.id)} transitionError={transitionErrorById[task.id]} timeZone={snapshot.host?.scheduler.timeZone} selected={selectedIds.has(task.id)} dragging={dragIds.has(task.id)} waitingReason={waitingReasonById.get(task.id)} waitingTooltip={waitingTooltipById.get(task.id)} awaitingAnswerSessionId={awaitingAnswerById[task.id]} onSelect={selectCard} onKeySelect={selectCardByKey} onOpen={openDetail} onDragStart={startDrag} onDragEnd={endDrag} onOpenSession={openSession} onTogglePause={togglePause} onStopSession={stopSession} sessionRunning={snapshot.host?.runningSessions?.[task.id] === true} />
-                  ))}
+                  {tasks.map(task => {
+                    // One-column steps are strictly the adjacent configured
+                    // column, judged with the same blockers as the detail's
+                    // transition buttons (archived/running/paused/permission/
+                    // missing transition), so a disabled arrow and a refused
+                    // drop always tell the same story.
+                    const left = columnStepOf(task, machine, 'left', snapshot.host?.sessionDefaultPermission)
+                    const right = columnStepOf(task, machine, 'right', snapshot.host?.sessionDefaultPermission)
+                    return (
+                      <MemoTaskCard
+                        key={task.id}
+                        task={task}
+                        pending={pendingSet.has(task.id)}
+                        releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined}
+                        pendingTransition={pendingTransitionById.get(task.id)}
+                        transitionError={transitionErrorById[task.id]}
+                        timeZone={snapshot.host?.scheduler.timeZone}
+                        selected={selectedIds.has(task.id)}
+                        dragging={dragIds.has(task.id)}
+                        waitingReason={waitingReasonById.get(task.id)}
+                        waitingTooltip={waitingTooltipById.get(task.id)}
+                        awaitingAnswerSessionId={awaitingAnswerById[task.id]}
+                        leftTarget={left.target}
+                        leftBlocker={left.blocker}
+                        rightTarget={right.target}
+                        rightBlocker={right.blocker}
+                        onSelect={selectCard}
+                        onKeySelect={selectCardByKey}
+                        onOpen={openDetail}
+                        onDragStart={startDrag}
+                        onDragEnd={endDrag}
+                        onOpenSession={openSession}
+                        onTogglePause={togglePause}
+                        onStopSession={stopSession}
+                        onStep={stepTask}
+                        sessionRunning={snapshot.host?.runningSessions?.[task.id] === true}
+                      />
+                    )
+                  })}
                   {tasks.length === 0 && (
                     <div className={css.columnEmpty}>{tagFilter.length > 0 ? t('board.tagEmpty') : t('board.empty')}</div>
                   )}

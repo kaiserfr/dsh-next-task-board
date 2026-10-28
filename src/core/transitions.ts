@@ -82,3 +82,46 @@ export function transitionBlockerOf(
 export function transitionStartsExecution(machine: StateMachine, from: TaskStatus, to: TaskStatus): boolean {
   return machine.actionsFor(from, to).some(action => action === 'run' || action === 'clarify')
 }
+
+/** Direction of a card's one-column step on the board. */
+export type ColumnStep = 'left' | 'right'
+
+/**
+ * Why a card cannot step one column in a direction: `edge` when the board has
+ * no column there, otherwise the ordinary blocker of the neighbor transition.
+ */
+export type StepBlocker = TransitionBlocker | 'edge'
+
+/** One resolved column step: the neighbor and why the step is unavailable. */
+export interface ColumnStepInfo {
+  /** The neighboring column in board order; undefined at the board's edge. */
+  target?: TaskStatus
+  /** Why the arrow must be disabled; absent when the step is ready. */
+  blocker?: StepBlocker
+}
+
+/**
+ * Resolve the card's step to the directly adjacent configured column — never a
+ * longer jump: a neighbor the machine accepts no manual transition to is a
+ * disabled arrow, not a skip to the next allowed column. Readiness uses the
+ * same judgement as a drag/detail transition ({@link transitionBlockerOf}), so
+ * a running/paused card, an unconfirmed elevated permission, an archived card
+ * and a missing transition all disable the arrow identically.
+ * @param task - the card in its current state.
+ * @param machine - the machine the Host enforces.
+ * @param direction - one column left or right in board order.
+ * @param sessionDefaultPermission - the session's default permission for the
+ *   run-start confirmation gate.
+ */
+export function columnStepOf(
+  task: TaskRecord,
+  machine: StateMachine,
+  direction: ColumnStep,
+  sessionDefaultPermission?: TaskPermission,
+): ColumnStepInfo {
+  const index = machine.states.findIndex(state => state.status === task.status)
+  const target = index < 0 ? undefined : machine.states[index + (direction === 'left' ? -1 : 1)]?.status
+  if (target === undefined) return { blocker: 'edge' }
+  const blocker = transitionBlockerOf(task, machine, target, sessionDefaultPermission)
+  return blocker === undefined ? { target } : { target, blocker }
+}

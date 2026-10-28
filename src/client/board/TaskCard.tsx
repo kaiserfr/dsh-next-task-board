@@ -6,9 +6,14 @@
  * session also renders a direct session link, for a running (active) and a
  * settled (inactive) execution alike.
  *
- * The link is a sibling of the card button, not a child: a button may not hold
- * interactive content, and a nested anchor would not be keyboard-reachable.
- * Clicking it jumps straight into the session instead of selecting the card.
+ * The card's left/right edges carry the one-column step chevrons: they move the
+ * card to the directly adjacent column (the same manual transition a drop would
+ * fire) and are disabled at the board's edges and whenever that move is blocked.
+ * The board resolves the target and blocker; the card only renders them.
+ *
+ * The link and the chevrons are siblings of the card button, not children: a
+ * button may not hold interactive content, and a nested anchor would not be
+ * keyboard-reachable. Clicking them acts on the card instead of opening it.
  *
  * Memoized: the card re-renders only when its own task record changes, so a
  * status/filter update on one card (or scrolling) never re-renders every
@@ -16,14 +21,14 @@
  * by the board, so the memo boundary is effective.
  */
 import { memo, type DragEvent, type KeyboardEvent, type MouseEvent } from 'react'
-import type { TaskRecord, WaitingReason } from '../../core/tasks.ts'
+import type { TaskRecord, TaskStatus, WaitingReason } from '../../core/tasks.ts'
 import { isTaskExecuting, isTaskPaused, tagTone } from '../../core/tasks.ts'
-import type { QueuedTransition, TransitionError } from '../../core/transitions.ts'
+import type { ColumnStep, QueuedTransition, StepBlocker, TransitionError } from '../../core/transitions.ts'
 import { mergeStateOf, type MergeState } from '../../core/merge.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import { sessionLinkHref } from '../session-link.ts'
 import css from '../board.module.css'
-import { queuedTransitionText, statusLabel, transitionErrorText } from './transition-text.ts'
+import { queuedTransitionText, blockerText, statusLabel, transitionErrorText } from './transition-text.ts'
 
 /** Badge wording of one merge state (the card's own one-word verdict). */
 const MERGE_KEY: Record<MergeState, TaskBoardKey> = {
@@ -80,7 +85,52 @@ export function isCardBulkActionable(task: TaskRecord, pending: boolean): boolea
   return isCardDraggable(task) && !pending
 }
 
-function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, sessionRunning }: {
+/**
+ * One of the card's two column-step chevrons: a small sibling button at the
+ * card's left or right edge. The wrapper owns the tooltip so the disabled
+ * state's reason stays readable (a disabled button swallows mouse events); the
+ * button itself only fires the transition the board resolved.
+ */
+function CardStepButton({ taskId, direction, target, blocker, disabled, queued, title, onStep }: {
+  taskId: string
+  direction: ColumnStep
+  target?: TaskStatus
+  blocker?: StepBlocker
+  disabled: boolean
+  queued: boolean
+  title: string
+  onStep: (taskId: string, status: TaskStatus) => void
+}) {
+  return (
+    <span
+      className={direction === 'left' ? css.cardStepLeft : css.cardStepRight}
+      title={title}
+    >
+      <button
+        type="button"
+        className={css.cardStep}
+        data-dsh-part={`card-step-${direction}`}
+        data-target={target}
+        data-blocker={blocker}
+        data-queued={queued || undefined}
+        disabled={disabled}
+        title={title}
+        aria-label={title}
+        onClick={(event) => {
+          // The card's own detail click must never also fire.
+          event.stopPropagation()
+          if (target === undefined || disabled) return
+          onStep(taskId, target)
+        }}
+        onDoubleClick={(event) => { event.stopPropagation() }}
+      >
+        <span aria-hidden="true">{direction === 'left' ? '‹' : '›'}</span>
+      </button>
+    </span>
+  )
+}
+
+function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** A merge release of this card runs in the Host's background. */
@@ -105,6 +155,14 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
    * straight into that session; undefined while nothing is open.
    */
   awaitingAnswerSessionId?: string
+  /** Neighboring column to the card's left; undefined at the board's edge. */
+  leftTarget?: TaskStatus
+  /** Why a step left is unavailable (`edge` = no column there). */
+  leftBlocker?: StepBlocker
+  /** Neighboring column to the card's right; undefined at the board's edge. */
+  rightTarget?: TaskStatus
+  /** Why a step right is unavailable (`edge` = no column there). */
+  rightBlocker?: StepBlocker
   onClick: (event: MouseEvent<HTMLButtonElement>) => void
   onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
   onDoubleClick: () => void
@@ -114,6 +172,8 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
   onTogglePause: (task: TaskRecord) => void
   /** Stop the conversation right now (the Host says it is running). */
   onStopSession: (task: TaskRecord) => void
+  /** Fire the manual transition into the adjacent column (same as a drop). */
+  onStep: (taskId: string, status: TaskStatus) => void
   /** Whether the card's conversation is running right now (derived by the Host). */
   sessionRunning: boolean
 }) {
@@ -156,6 +216,27 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
   // from the card's own git/merge records, so a card never claims a merge it did
   // not record; undefined on cards with nothing to say about a merge.
   const merge = mergeStateOf(task)
+  // One-column steps: the board resolved the neighbor and its blocker. A step
+  // already queued for that very target is disabled like the detail's button;
+  // a different waiting target stays selectable (the last click wins per card).
+  const leftQueued = leftTarget !== undefined && pendingTransition?.to === leftTarget
+  const rightQueued = rightTarget !== undefined && pendingTransition?.to === rightTarget
+  const leftDisabled = leftBlocker !== undefined || leftQueued
+  const rightDisabled = rightBlocker !== undefined || rightQueued
+  // The wrapper owns the tooltip (a disabled native button swallows the mouse),
+  // so the title always names the action, the target column and the reason.
+  const stepTitleOf = (direction: ColumnStep, target: TaskStatus | undefined, blocker: StepBlocker | undefined, queued: boolean): string => {
+    const action = t(direction === 'left' ? 'card.step.left' : 'card.step.right')
+    if (target === undefined) return `${action} — ${t('card.step.edge')}`
+    const to = statusLabel(target)
+    if (blocker !== undefined) {
+      return `${action} → ${to} — ${blocker === 'edge' ? t('card.step.edge') : blockerText(blocker)}`
+    }
+    if (queued) return `${action} → ${to} — ${t('card.step.queued')}`
+    return `${action} → ${to}`
+  }
+  const leftTitle = stepTitleOf('left', leftTarget, leftBlocker, leftQueued)
+  const rightTitle = stepTitleOf('right', rightTarget, rightBlocker, rightQueued)
 
   return (
     <div className={css.cardBox} data-dsh-part="card-box">
@@ -169,6 +250,7 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
         data-paused={paused || undefined}
         data-has-session={sessionId !== undefined || undefined}
         data-has-pause={showPauseControl || undefined}
+        data-has-step={!archived || undefined}
         data-answering={answering || undefined}
         data-selected={selected || undefined}
         data-dragging={dragging || undefined}
@@ -306,6 +388,32 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
         >
           <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>
         </button>
+      )}
+      {!archived && (
+        // Column steps: one chevron per card edge, always visible (and usable
+        // with a keyboard), disabled whenever the adjacent move is not allowed.
+        <>
+          <CardStepButton
+            taskId={task.id}
+            direction="left"
+            target={leftTarget}
+            blocker={leftBlocker}
+            disabled={leftDisabled}
+            queued={leftQueued}
+            title={leftTitle}
+            onStep={onStep}
+          />
+          <CardStepButton
+            taskId={task.id}
+            direction="right"
+            target={rightTarget}
+            blocker={rightBlocker}
+            disabled={rightDisabled}
+            queued={rightQueued}
+            title={rightTitle}
+            onStep={onStep}
+          />
+        </>
       )}
       {!archived && awaitingAnswerSessionId !== undefined && (
         // The card's conversation waits for the human: a question-mark anchor in

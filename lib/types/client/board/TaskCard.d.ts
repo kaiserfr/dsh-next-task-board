@@ -6,9 +6,14 @@
  * session also renders a direct session link, for a running (active) and a
  * settled (inactive) execution alike.
  *
- * The link is a sibling of the card button, not a child: a button may not hold
- * interactive content, and a nested anchor would not be keyboard-reachable.
- * Clicking it jumps straight into the session instead of selecting the card.
+ * The card's left/right edges carry the one-column step chevrons: they move the
+ * card to the directly adjacent column (the same manual transition a drop would
+ * fire) and are disabled at the board's edges and whenever that move is blocked.
+ * The board resolves the target and blocker; the card only renders them.
+ *
+ * The link and the chevrons are siblings of the card button, not children: a
+ * button may not hold interactive content, and a nested anchor would not be
+ * keyboard-reachable. Clicking them acts on the card instead of opening it.
  *
  * Memoized: the card re-renders only when its own task record changes, so a
  * status/filter update on one card (or scrolling) never re-renders every
@@ -16,8 +21,8 @@
  * by the board, so the memo boundary is effective.
  */
 import { type DragEvent, type KeyboardEvent, type MouseEvent } from 'react';
-import type { TaskRecord, WaitingReason } from '../../core/tasks.ts';
-import type { QueuedTransition, TransitionError } from '../../core/transitions.ts';
+import type { TaskRecord, TaskStatus, WaitingReason } from '../../core/tasks.ts';
+import type { QueuedTransition, StepBlocker, TransitionError } from '../../core/transitions.ts';
 /** Compact relative/absolute time label. */
 export declare function formatHostTimestamp(ms: number, timeZone?: string): string;
 export declare function formatTime(ms: number, timeZone?: string): string;
@@ -36,7 +41,7 @@ export declare function isCardDraggable(task: TaskRecord): boolean;
  * remain out of the bulk actions even though they can be dragged.
  */
 export declare function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean;
-declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, sessionRunning }: {
+declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
     task: TaskRecord;
     pending: boolean;
     /** A merge release of this card runs in the Host's background. */
@@ -61,6 +66,14 @@ declare function TaskCardInner({ task, pending, releasePending, pendingTransitio
      * straight into that session; undefined while nothing is open.
      */
     awaitingAnswerSessionId?: string;
+    /** Neighboring column to the card's left; undefined at the board's edge. */
+    leftTarget?: TaskStatus;
+    /** Why a step left is unavailable (`edge` = no column there). */
+    leftBlocker?: StepBlocker;
+    /** Neighboring column to the card's right; undefined at the board's edge. */
+    rightTarget?: TaskStatus;
+    /** Why a step right is unavailable (`edge` = no column there). */
+    rightBlocker?: StepBlocker;
     onClick: (event: MouseEvent<HTMLButtonElement>) => void;
     onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
     onDoubleClick: () => void;
@@ -70,6 +83,8 @@ declare function TaskCardInner({ task, pending, releasePending, pendingTransitio
     onTogglePause: (task: TaskRecord) => void;
     /** Stop the conversation right now (the Host says it is running). */
     onStopSession: (task: TaskRecord) => void;
+    /** Fire the manual transition into the adjacent column (same as a drop). */
+    onStep: (taskId: string, status: TaskStatus) => void;
     /** Whether the card's conversation is running right now (derived by the Host). */
     sessionRunning: boolean;
 }): import("react").JSX.Element;
