@@ -55,3 +55,31 @@ export interface TransitionError {
 export declare function transitionBlockerOf(task: TaskRecord, machine: StateMachine, to: TaskStatus, sessionDefaultPermission?: TaskPermission): TransitionBlocker | undefined;
 /** Whether firing this transition starts an execution (clarify or run). */
 export declare function transitionStartsExecution(machine: StateMachine, from: TaskStatus, to: TaskStatus): boolean;
+/** Direction of a card's one-column step on the board. */
+export type ColumnStep = 'left' | 'right';
+/**
+ * Why a card cannot step one column in a direction: `edge` when the board has
+ * no column there, otherwise the ordinary blocker of the neighbor transition.
+ */
+export type StepBlocker = TransitionBlocker | 'edge';
+/** One resolved column step: the neighbor and why the step is unavailable. */
+export interface ColumnStepInfo {
+    /** The neighboring column in board order; undefined at the board's edge. */
+    target?: TaskStatus;
+    /** Why the arrow must be disabled; absent when the step is ready. */
+    blocker?: StepBlocker;
+}
+/**
+ * Resolve the card's step to the directly adjacent configured column — never a
+ * longer jump: a neighbor the machine accepts no manual transition to is a
+ * disabled arrow, not a skip to the next allowed column. Readiness uses the
+ * same judgement as a drag/detail transition ({@link transitionBlockerOf}), so
+ * a running/paused card, an unconfirmed elevated permission, an archived card
+ * and a missing transition all disable the arrow identically.
+ * @param task - the card in its current state.
+ * @param machine - the machine the Host enforces.
+ * @param direction - one column left or right in board order.
+ * @param sessionDefaultPermission - the session's default permission for the
+ *   run-start confirmation gate.
+ */
+export declare function columnStepOf(task: TaskRecord, machine: StateMachine, direction: ColumnStep, sessionDefaultPermission?: TaskPermission): ColumnStepInfo;

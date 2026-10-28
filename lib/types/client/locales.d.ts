@@ -103,6 +103,10 @@ export declare const zh: {
     'card.pause': string;
     'card.stopSession': string;
     'card.resume': string;
+    'card.step.left': string;
+    'card.step.right': string;
+    'card.step.edge': string;
+    'card.step.queued': string;
     'board.pauseAll': string;
     'board.resumeAll': string;
     'card.openSession': string;

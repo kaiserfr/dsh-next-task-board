@@ -355,6 +355,94 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   padding-left: 29px;
 }
 
+/* --- one-column step chevrons ------------------------------------------------ */
+
+/* One arrow per card edge, vertically centered and always visible, so a card
+   can be walked along the board without opening it or dragging. They are
+   siblings of the card button (a button may not nest in a button). The card
+   reserves both edges and a minimum height, so the chevrons never collide with
+   the top-right pause control or the bottom-right session link on a one-line
+   card. */
+.card[data-has-step] {
+  min-height: 74px;
+  padding-left: 26px;
+  padding-right: 26px;
+}
+
+/* The corner controls own wider insets; keep them when they are present. */
+.card[data-has-step][data-answering] {
+  padding-left: 30px;
+}
+
+.card[data-has-step][data-has-session],
+.card[data-has-step][data-has-pause] {
+  padding-right: 30px;
+}
+
+.card[data-executing='true'][data-has-step] {
+  padding-left: 25px;
+  padding-right: 25px;
+}
+
+.card[data-executing='true'][data-has-step][data-answering] {
+  padding-left: 29px;
+}
+
+.card[data-executing='true'][data-has-step][data-has-session],
+.card[data-executing='true'][data-has-step][data-has-pause] {
+  padding-right: 29px;
+}
+
+.cardStepLeft,
+.cardStepRight {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  z-index: 1;
+}
+
+.cardStepLeft {
+  left: 2px;
+}
+
+.cardStepRight {
+  right: 2px;
+}
+
+.cardStep {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cardStep:hover:not(:disabled),
+.cardStep:focus-visible {
+  border-color: var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* A disabled arrow is dimmed and transparent to the mouse, so the wrapper can
+   still show the reason on hover (a disabled button swallows the pointer). */
+.cardStep:disabled {
+  opacity: 0.3;
+  cursor: default;
+  pointer-events: none;
+}
+
 @keyframes dshTbRunningPulse {
   0%, 100% { box-shadow: 0 0 0 2px var(--dsw-alias-state-warn-primary); }
   50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--dsw-alias-state-warn-primary) 50%, transparent); }
@@ -1363,6 +1451,7 @@ textarea.input::-webkit-resizer {
 .cardSession:focus-visible,
 .cardPause:focus-visible,
 .cardQuestion:focus-visible,
+.cardStep:focus-visible,
 .primaryButton:focus-visible,
 .ghostButton:focus-visible,
 .dangerButton:focus-visible,
