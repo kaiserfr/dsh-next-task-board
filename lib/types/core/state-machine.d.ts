@@ -106,7 +106,9 @@ export declare const STAMP_FIELDS: readonly ["doneAt"];
  *   the only pre-implementation column: there is no separate "To do".
  * - `running` is the runner's own state: it is entered by a run and left by
  *   that run settling (success → `ready_for_test`, failure → `failed`),
- *   never by a drag
+ *   never by a drag — except straight onto Done: `running → done` is a manual
+ *   move for the human who decides the work ends here, and the Host settles
+ *   the open run (cancelled) and stops its session instead of waiting for it
  * - every manual move into `ready_for_test` commits the worktree onto the
  *   card's feature branch (`git.commitBranch`), and the runner's own settle
  *   does the same, so no run's work is ever left uncommitted in the worktree.

@@ -65,24 +65,28 @@ export function formatTime(ms: number, timeZone?: string): string {
 }
 
 /**
- * Whether a card may be dragged at all: archived cards are read-only and a card
- * the runner owns (`running`) must not be moved while its execution settles.
- * A card with an action in the outbox is deliberately **not** excluded: further
- * actions queue behind it, so the user is never blocked by a running backend
- * call. The board reuses this to decide which cards a group drag may carry.
+ * Whether a card may be dragged at all: only archived cards are read-only. A
+ * card the runner owns (`running`) may be dragged too — the drop validation
+ * (machine + {@link transitionBlockerOf}) only lets it land on Done, where the
+ * Host settles the open run and stops the session; every other column still
+ * refuses it. A card with an action in the outbox is deliberately **not**
+ * excluded: further actions queue behind it, so the user is never blocked by a
+ * running backend call. The board reuses this to decide which cards a group
+ * drag may carry.
  */
 export function isCardDraggable(task: TaskRecord): boolean {
-  return task.archivedAt === undefined && task.status !== 'running'
+  return task.archivedAt === undefined
 }
 
 /**
  * Whether a card may take part in the selection's bulk archive/delete. The
  * broader drag rule deliberately does not apply here: archiving a card while a
- * Host action for it is on the wire would race that action, so pending cards
- * remain out of the bulk actions even though they can be dragged.
+ * Host action for it is on the wire would race that action (pending cards stay
+ * out), and a card the runner owns cannot be archived/deleted at all — its run
+ * must end first (`running`). Only the drag onto Done may bypass the run.
  */
 export function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean {
-  return isCardDraggable(task) && !pending
+  return task.archivedAt === undefined && task.status !== 'running' && !pending
 }
 
 /**

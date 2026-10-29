@@ -119,7 +119,7 @@ describe('TaskBoard L2 semantic attributes (#506)', () => {
 })
 
 describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
-  it('marks manual and in-flight tasks as draggable but running/archived tasks as not draggable', async () => {
+  it('marks manual and in-flight tasks as draggable; archived tasks are not, running tasks may be dragged onto Done', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
@@ -142,13 +142,17 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     const todoCard = Array.from(cards).find(c => c.getAttribute('data-status') === 'clarification' && !c.hasAttribute('data-pending'))
     expect(todoCard?.getAttribute('draggable')).toBe('true')
 
-    // Running card is not draggable
+    // A running card may be dragged too: the drop validation only lets it land
+    // on Done (the Host settles the open run and stops the session).
     const runningCard = Array.from(cards).find(c => c.getAttribute('data-status') === 'running')
-    expect(runningCard?.getAttribute('draggable')).toBe('false')
+    expect(runningCard?.getAttribute('draggable')).toBe('true')
 
     // A card with an action in flight stays draggable: the next move queues.
     const pendingCard = Array.from(cards).find(c => c.getAttribute('data-pending') === 'true')
     expect(pendingCard?.getAttribute('draggable')).toBe('true')
+
+    // Archived cards never render on the board; the bulk/selection paths keep
+    // them read-only (see `isCardBulkActionable`).
   })
 
   it('drops a backlog card onto the clarification column and triggers controller.moveTask', async () => {
@@ -227,6 +231,39 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     })
 
     expect(moveCalls).toEqual([{ id: 't-ready', status: 'done' }])
+  })
+
+  it('drops a running card onto the done column and moves it, open run or not', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    roots.push(root)
+
+    const moveCalls: Array<{ id: string; status: string }> = []
+    const controller = fakeController(
+      {
+        tasks: [task({
+          id: 't-running', status: 'running',
+          executions: [{
+            id: 'run-1', sessionId: 'session-run', startedAt: 1, endedAt: undefined,
+            result: undefined, error: undefined,
+          }],
+        })],
+      },
+      { moveTask: (id, status) => { moveCalls.push({ id, status }) } },
+    )
+    await act(async () => { root.render(<TaskBoard controller={controller} />) })
+
+    const doneColumn = container.querySelector('section[data-status="done"]')
+    expect(doneColumn).not.toBeNull()
+    const dataTransfer = { getData: (type: string) => (type === 'text/plain' ? 't-running' : '') }
+    await act(async () => {
+      doneColumn!.dispatchEvent(
+        Object.assign(new Event('drop', { bubbles: true, cancelable: true }), { dataTransfer }),
+      )
+    })
+
+    expect(moveCalls).toEqual([{ id: 't-running', status: 'done' }])
   })
 
   it('drops a todo card onto the running column and starts it through the transition', async () => {

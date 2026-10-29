@@ -61,6 +61,25 @@ describe('transitionBlockerOf', () => {
     expect(transitionBlockerOf(card, machine, 'backlog')).toBeUndefined()
     expect(transitionBlockerOf(card, machine, 'running')).toBeUndefined()
   })
+
+  it('never blocks a move onto Done, not even for a running or paused card', () => {
+    // The Host settles the open run (cancelled) and stops its session, so the
+    // runner/pause guard gives way for the Done column only.
+    expect(transitionBlockerOf(task({ status: 'running' }), machine, 'done')).toBeUndefined()
+    expect(transitionBlockerOf(task({
+      status: 'clarification',
+      pausedAt: 3,
+      executions: [openRun()],
+    }), machine, 'done')).toBeUndefined()
+    expect(transitionBlockerOf(task({ status: 'clarification' }), machine, 'done')).toBeUndefined()
+    // Every other target keeps the ordinary blockers.
+    expect(transitionBlockerOf(task({ status: 'running' }), machine, 'ready_for_test')).toBe('running')
+    expect(transitionBlockerOf(task({
+      status: 'clarification',
+      pausedAt: 3,
+      executions: [openRun()],
+    }), machine, 'backlog')).toBe('paused')
+  })
 })
 
 describe('transitionStartsExecution', () => {

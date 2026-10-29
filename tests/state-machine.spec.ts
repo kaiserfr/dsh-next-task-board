@@ -108,9 +108,13 @@ describe('transitions are the drag & drop rule', () => {
   })
 
   it('separates manual targets from the runner transitions', () => {
-    // `running` has only runner transitions; entering it is the `run` action.
-    expect(defaultMachine.targets('running')).toEqual([])
+    // `running` leaves by the runner's settle — except the one manual way out:
+    // straight onto Done, where the Host cancels the open run and stops the
+    // session ("move to done is always allowed").
+    expect(defaultMachine.targets('running')).toEqual(['done'])
     expect(defaultMachine.targets('running', 'runner')).toEqual(['ready_for_test', 'failed', 'clarification'])
+    expect(defaultMachine.canTransition('running', 'done')).toBe(true)
+    expect(defaultMachine.actionsFor('running', 'done')).toEqual([])
     expect(defaultMachine.canTransition('running', 'ready_for_test', 'runner')).toBe(true)
     expect(defaultMachine.canTransition('running', 'clarification', 'runner')).toBe(true)
     // The clarification column and the two corrected columns reach the run
@@ -184,6 +188,7 @@ describe('diagram', () => {
     expect(diagram).toContain('clarification --> running: manual: run')
     expect(diagram).toContain('clarification --> ready_for_test: manual: commitBranch')
     expect(diagram).toContain('ready_for_test --> done: manual: mergeBranch')
+    expect(diagram).toContain('running --> done: manual')
     expect(diagram).toContain('running --> ready_for_test, failed, clarification: runner')
   })
 })

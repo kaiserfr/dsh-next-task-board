@@ -78,7 +78,9 @@ describe('status transitions', () => {
     expect(canMoveManually('ready_for_test', 'done')).toBe(true)
     expect(canMoveManually('clarification', 'ready_for_test')).toBe(true)
     expect(canMoveManually('clarification', 'running')).toBe(false)
-    expect(canMoveManually('running', 'done')).toBe(false)
+    // The one drag out of `running`: a manual move onto Done, where the Host
+    // settles the open run and stops the session.
+    expect(canMoveManually('running', 'done')).toBe(true)
   })
 
   it('withStatus bumps updatedAt and swaps the status', () => {

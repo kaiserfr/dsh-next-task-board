@@ -1312,7 +1312,7 @@ export class HostTaskLedger {
     requestId: string,
     action: TaskBoardAction,
     initiator?: string,
-  ): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[]; review?: ReviewIntent[] } {
+  ): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[]; stopped?: PausedRun[]; review?: ReviewIntent[] } {
     const fingerprint = createHash('sha256').update(JSON.stringify(action)).digest('hex')
     const cached = this.requestCache.get(requestId)
     if (cached !== undefined) {
@@ -1471,12 +1471,13 @@ export class HostTaskLedger {
     this.commit()
   }
 
-  private apply(action: TaskBoardAction, initiator?: string): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[]; review?: ReviewIntent[] } {
+  private apply(action: TaskBoardAction, initiator?: string): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[]; stopped?: PausedRun[]; review?: ReviewIntent[] } {
     const now = this.now()
     let run: OpenedRun | undefined
     let clarification: OpenedRun | undefined
     let paused: PausedRun[] | undefined
     let resumed: ResumedRun[] | undefined
+    let stopped: PausedRun[] | undefined
     let review: ReviewIntent[] | undefined
     switch (action.kind) {
       case 'import': {
@@ -1556,7 +1557,13 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-        if (task.status === 'running' || hasOpenRun(task)) throw new Error('running task cannot be moved')
+        // A move onto Done is always allowed ("in jedem Fall"): an open run —
+        // however it got stuck (paused, clarification round, no session) —
+        // never stands between the human and a finished card. An implementation
+        // run (or a `running` card) forces the plain park instead of the merge
+        // release; every other manual move stays refused while a run is open.
+        const forcingDone = action.status === 'done' && (task.status === 'running' || hasOpenRun(task))
+        if (!forcingDone && (task.status === 'running' || hasOpenRun(task))) throw new Error('running task cannot be moved')
         // The state machine decides whether this move exists at all: an
         // unconfigured transition is refused here, not in the browser. The
         // browser validates its drop targets against the same machine.
@@ -1576,7 +1583,7 @@ export class HostTaskLedger {
         // whole release path — merge, automatic conflict resolution, failure →
         // `failed` — so a drag onto "Done" and the card's release button can
         // never behave differently. Every other move keeps the plain git hooks.
-        const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch')
+        const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch') && !forcingDone
         const released = merges ? this.beginRelease(task, now, initiator) : undefined
         const gitted = merges ? task : this.transitionGit(task, transition, now)
         // The target state over the transition's git hooks: the base the
@@ -1623,6 +1630,24 @@ export class HostTaskLedger {
           run = { task: { ...opened.task, status: action.status }, execution: opened.execution }
           next = run.task
         }
+        if (action.status === 'done' && !merges) {
+          // A card that lands on Done owns no run: every open execution (a
+          // forced implementation run, or a lingering clarification round) is
+          // closed as cancelled here, so the monitor never settles a session
+          // later and yanks the card out of Done again. Any attached session
+          // is handed to the service, which stops the agent's turn, and a pause
+          // stamp is cleared so the card is a plain done card. The merge
+          // release path (`merges`) is deliberately exempt: the release owns
+          // the card's run and writes done/failed (or the conflict run) itself.
+          for (const execution of task.executions) {
+            if (execution.endedAt !== undefined) continue
+            if (execution.sessionId !== undefined) {
+              stopped = [...(stopped ?? []), { taskId: task.id, sessionId: execution.sessionId }]
+            }
+            next = settleExecution(next, execution.id, 'cancelled', now, 'superseded by a manual move to done')
+          }
+          next = withPause(next, false, now)
+        }
         const moved = this.document.tasks.map(item => item.id === action.taskId ? next : item)
         // The Done-column limit: a move that would leave more than N on-board
         // cards in `done` archives the oldest ones (FIFO) until it holds again.
@@ -1648,7 +1673,10 @@ export class HostTaskLedger {
           const task = this.document.tasks.find(item => item.id === id)
           if (task === undefined) throw new Error(`task not found: ${id}`)
           if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-          if (task.status === 'running' || hasOpenRun(task)) throw new Error('running task cannot be moved')
+          // The same "move onto Done is always allowed" rule as the single
+          // move: every open run in the batch is settled as cancelled below.
+          const forcingDone = action.status === 'done' && (task.status === 'running' || hasOpenRun(task))
+          if (!forcingDone && (task.status === 'running' || hasOpenRun(task))) throw new Error('running task cannot be moved')
           const transition = this.machine.transition(task.status, action.status, 'manual')
           if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → ${action.status}`)
           // A batch never opens executions: the runner owns the single run
@@ -1658,20 +1686,32 @@ export class HostTaskLedger {
           // otherwise sit in the clarification column without its round.
           if ((transition.actions ?? []).includes('run')) throw new Error('batch move cannot start executions')
           if ((transition.actions ?? []).includes('clarify')) throw new Error('batch move cannot start the clarification round')
-          return { task, transition }
+          return { task, transition, forcingDone }
         })
         const moved = new Map<string, TaskRecord>()
-        for (const { task, transition } of batch) {
+        for (const { task, transition, forcingDone } of batch) {
           const actions = transition.actions ?? []
-          const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch')
+          const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch') && !forcingDone
           // A group drop onto Done releases every card that carries the merge
           // hook; each release runs on its own card's work chain and writes its
           // own outcome (done/failed/conflict run), exactly like a single drop.
+          // A card whose run is still open is not released — it is settled as
+          // cancelled ("superseded by a manual move to done") and parked.
           if (merges) {
             moved.set(task.id, this.beginRelease(task, now, initiator).task)
             continue
           }
-          const target = withStatus(this.transitionGit(task, transition, now), action.status, now)
+          let target = withStatus(this.transitionGit(task, transition, now), action.status, now)
+          if (action.status === 'done' && !merges) {
+            for (const execution of task.executions) {
+              if (execution.endedAt !== undefined) continue
+              if (execution.sessionId !== undefined) {
+                stopped = [...(stopped ?? []), { taskId: task.id, sessionId: execution.sessionId }]
+              }
+              target = settleExecution(target, execution.id, 'cancelled', now, 'superseded by a manual move to done')
+            }
+            target = withPause(target, false, now)
+          }
           moved.set(task.id, isReworkReturn(task.status, action.status) ? withReworkStamp(target, now) : target)
         }
         // `map` over the ledger array keeps every untouched card in place and
@@ -1855,6 +1895,7 @@ export class HostTaskLedger {
       ...(clarification === undefined ? {} : { clarification }),
       ...(paused === undefined ? {} : { paused }),
       ...(resumed === undefined ? {} : { resumed }),
+      ...(stopped === undefined ? {} : { stopped }),
       ...(review === undefined ? {} : { review }),
     }
   }
