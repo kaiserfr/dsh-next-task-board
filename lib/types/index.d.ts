@@ -35,6 +35,12 @@ export interface Config {
     /** Prevent idle system sleep while sessions run or schedules are armed. */
     preventIdleSleep?: Volatile<boolean>;
     /**
+     * Whether new runs and parses are held back while the machine is overloaded.
+     * False disables the overload gate (cards and parses start immediately even
+     * when load is high); true (default) keeps the gate on.
+     */
+    pressureGate?: Volatile<boolean>;
+    /**
      * WIP limit per workspace/lane: how many task runs of the same workspace may
      * hold a session at the same time. Runs above their lane's limit wait in a
      * FIFO queue and start as soon as a slot in that lane frees up; other
@@ -151,6 +157,7 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     announceToAgent: z<boolean, boolean, "volatile-defined">;
     enabled: z<boolean, boolean, "volatile-defined">;
     preventIdleSleep: z<boolean, boolean, "volatile-defined">;
+    pressureGate: z<boolean, boolean, "volatile-defined">;
     maxConcurrentRuns: z<number, number, "volatile-defined">;
     stateMachine: z<any, any, "volatile">;
     maxDoneTasks: z<number, number, "volatile-defined">;
@@ -168,6 +175,7 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     announceToAgent: z<boolean, boolean, "volatile-defined">;
     enabled: z<boolean, boolean, "volatile-defined">;
     preventIdleSleep: z<boolean, boolean, "volatile-defined">;
+    pressureGate: z<boolean, boolean, "volatile-defined">;
     maxConcurrentRuns: z<number, number, "volatile-defined">;
     stateMachine: z<any, any, "volatile">;
     maxDoneTasks: z<number, number, "volatile-defined">;
