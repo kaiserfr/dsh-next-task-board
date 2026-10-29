@@ -65,11 +65,15 @@ export function transitionBlockerOf(
 ): TransitionBlocker | undefined {
   if (task.archivedAt !== undefined) return 'archived'
   if (task.status === to) return undefined
-  if (task.status === 'running') return 'running'
+  // A move onto Done is always allowed: the Host settles the open run
+  // (cancelled) and stops its session, so neither `running` nor `paused`
+  // blocks the card's way out (the machine must still declare `→ done`).
+  const forcingDone = to === 'done'
+  if (!forcingDone && task.status === 'running') return 'running'
   // A clarify run deliberately does not block moves: it owns no branch and the
   // Host lets the card move on while its round is open. Only an implementation
   // run does.
-  if (hasOpenRun(task)) return isTaskPaused(task) ? 'paused' : 'running'
+  if (!forcingDone && hasOpenRun(task)) return isTaskPaused(task) ? 'paused' : 'running'
   const transition = machine.transition(task.status, to, 'manual')
   if (transition === undefined) return 'invalid'
   if ((transition.actions ?? []).includes('run') && requiresPermissionConfirmation(task, sessionDefaultPermission)) {

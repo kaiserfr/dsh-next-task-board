@@ -1150,3 +1150,70 @@ describe('HostTaskLedger pause/resume of open runs', () => {
     restarted.dispose()
   })
 })
+
+describe('HostTaskLedger forced move onto Done', () => {
+  /** A ledger with one card whose open implementation run holds `session-a`. */
+  function running(extra: ConstructorParameters<typeof HostTaskLedger>[2] = {}): HostTaskLedger {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW, extra)
+    ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
+    const opened = ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
+    ledger.attachSession('a', opened.run!.execution.id, 'session-a')
+    return ledger
+  }
+
+  const cardOf = (ledger: HostTaskLedger): TaskRecord => ledger.state().tasks[0]
+
+  it('moves a running card onto Done, settling the run cancelled and reporting the session to stop', () => {
+    const ledger = running()
+    const result = ledger.applyRequest('done-a', { kind: 'move', taskId: 'a', status: 'done' })
+    const task = cardOf(ledger)
+    expect(task.status).toBe('done')
+    expect(task.pausedAt).toBeUndefined()
+    expect(task.executions[0].result).toBe('cancelled')
+    expect(task.executions[0].error).toContain('manual move to done')
+    expect(task.executions[0].endedAt).toBe(NOW)
+    expect(result.stopped).toEqual([{ taskId: 'a', sessionId: 'session-a' }])
+    expect(ledger.runtimeView().openExecutions).toEqual([])
+    ledger.dispose()
+  })
+
+  it('moves a paused card with an open clarification run onto Done and settles the round', () => {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create-q', { kind: 'create', id: 'q', input: { title: 'Q', description: '', prompt: '' } })
+    ledger.applyRequest('to-todo', { kind: 'move', taskId: 'q', status: 'clarification' })
+    ledger.applyRequest('pause-q', { kind: 'pause', taskIds: ['q'] })
+    expect(cardOf(ledger).status).toBe('clarification')
+    expect(cardOf(ledger).pausedAt).toBe(NOW)
+
+    const result = ledger.applyRequest('done-q', { kind: 'move', taskId: 'q', status: 'done' })
+    const done = cardOf(ledger)
+    expect(done.status).toBe('done')
+    expect(done.pausedAt).toBeUndefined()
+    expect(done.executions[0].kind).toBe('clarify')
+    expect(done.executions[0].result).toBe('cancelled')
+    // The clarification never attached a session, so there is nothing to stop.
+    expect(result.stopped).toBeUndefined()
+    expect(ledger.runtimeView().openExecutions).toEqual([])
+    ledger.dispose()
+  })
+
+  it('still refuses any other manual move of a running card', () => {
+    const ledger = running()
+    expect(() => ledger.applyRequest('back-a', { kind: 'move', taskId: 'a', status: 'backlog' }))
+      .toThrow('running task cannot be moved')
+    ledger.dispose()
+  })
+
+  it('cancels the open runs of a batch dropped onto Done and leaves settled cards untouched', () => {
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create-a', { kind: 'create', id: 'a', input: { title: 'A', description: '', prompt: '' } })
+    ledger.applyRequest('run-a', { kind: 'run', taskId: 'a' })
+    ledger.applyRequest('create-b', { kind: 'create', id: 'b', input: { title: 'B', description: '', prompt: '' } })
+    const result = ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['a', 'b'], status: 'done' })
+    expect(ledger.state().tasks.map(entry => [entry.id, entry.status])).toEqual([['a', 'done'], ['b', 'done']])
+    expect(ledger.state().tasks[0].executions[0].result).toBe('cancelled')
+    expect(ledger.state().tasks[1].executions).toHaveLength(0)
+    expect(result.stopped).toBeUndefined()
+    ledger.dispose()
+  })
+})

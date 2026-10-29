@@ -40,6 +40,7 @@ stateDiagram-v2
     failed --> done: manual
     ready_for_test --> running: manual: run
     failed --> running: manual: run
+    running --> done: manual
     running --> ready_for_test, failed, clarification: runner
 ```
 

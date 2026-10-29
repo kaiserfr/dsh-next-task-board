@@ -124,7 +124,9 @@ function manual(from: TaskStatus, to: TaskStatus, actions?: StateAction[]): Stat
  *   the only pre-implementation column: there is no separate "To do".
  * - `running` is the runner's own state: it is entered by a run and left by
  *   that run settling (success → `ready_for_test`, failure → `failed`),
- *   never by a drag
+ *   never by a drag — except straight onto Done: `running → done` is a manual
+ *   move for the human who decides the work ends here, and the Host settles
+ *   the open run (cancelled) and stops its session instead of waiting for it
  * - every manual move into `ready_for_test` commits the worktree onto the
  *   card's feature branch (`git.commitBranch`), and the runner's own settle
  *   does the same, so no run's work is ever left uncommitted in the worktree.
@@ -198,6 +200,10 @@ export const DEFAULT_STATE_MACHINE: StateMachineConfig = {
     // the drop start an execution instead of a plain status move.
     manual('ready_for_test', 'running', ['run']),
     manual('failed', 'running', ['run']),
+    // The one drag out of `running`: the human decides the card is done and
+    // the open run is cancelled with its session stopped. Everything else that
+    // leaves `running` is still the runner's own settle.
+    manual('running', 'done'),
     { from: 'running', to: 'ready_for_test', trigger: 'runner' },
     { from: 'running', to: 'failed', trigger: 'runner' },
     { from: 'running', to: 'clarification', trigger: 'runner' },

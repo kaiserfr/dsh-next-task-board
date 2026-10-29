@@ -442,6 +442,7 @@ export declare class HostTaskLedger {
         clarification?: OpenedRun;
         paused?: PausedRun[];
         resumed?: ResumedRun[];
+        stopped?: PausedRun[];
         review?: ReviewIntent[];
     };
     openScheduled(taskId: string, nextRunAt: number | undefined, triggeredAt: number): OpenedRun | undefined;

@@ -936,6 +936,10 @@ export class TaskBoardHostService {
     // The pause is already in the ledger (so the monitor no longer touches the
     // run); stopping the sessions happens next, off this call.
     for (const paused of result.paused ?? []) this.stopPausedRun(paused)
+    // A forced move onto Done settled the card's open run in the ledger; the
+    // run's session (if it had attached one) is stopped here, so the agent
+    // stops working instead of talking into a card that is already done.
+    for (const stoppedRun of result.stopped ?? []) this.stopPausedRun(stoppedRun)
     // A card whose run already settled but whose conversation is still attached
     // (a background-job wake-up, or a failure settled before this Host) has no
     // open execution for the pause to suspend. The human's pause must still
