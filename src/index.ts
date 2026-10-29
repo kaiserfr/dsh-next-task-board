@@ -61,6 +61,12 @@ export interface Config {
   /** Prevent idle system sleep while sessions run or schedules are armed. */
   preventIdleSleep?: Volatile<boolean>
   /**
+   * Whether new runs and parses are held back while the machine is overloaded.
+   * False disables the overload gate (cards and parses start immediately even
+   * when load is high); true (default) keeps the gate on.
+   */
+  pressureGate?: Volatile<boolean>
+  /**
    * WIP limit per workspace/lane: how many task runs of the same workspace may
    * hold a session at the same time. Runs above their lane's limit wait in a
    * FIFO queue and start as soon as a slot in that lane frees up; other
@@ -178,6 +184,7 @@ export const Config = z.object({
   announceToAgent: z.boolean().default(false).volatile(),
   enabled: z.boolean().default(true).volatile(),
   preventIdleSleep: z.boolean().default(false).volatile(),
+  pressureGate: z.boolean().default(true).volatile(),
   maxConcurrentRuns: z.number().min(1).step(1).default(1).volatile(),
   // Loose on purpose: the machine is one JSON document the card edits as text
   // and `normalizeStateMachine` validates (with reasons) before it is applied.
@@ -356,6 +363,42 @@ function applyImpl(ctx: Context, config?: Config): void {
   })
   host.setConfiguration(readConfigField(config?.enabled, true), readConfigField(config?.preventIdleSleep, false))
   host.start()
+
+  // Event-driven session feed (replaces the 5 s roster poll): the Host settles
+  // runs, refreshes answers/rework and keeps its power view from process-local
+  // events. Subscriptions are bound to this ctx and dispose with the plugin.
+  // The listeners are typed structurally on purpose: the ambient event
+  // augmentations come from the host packages, not from this plugin's deps.
+  {
+    const on = ctx.on.bind(ctx) as (event: string, listener: (...args: never[]) => void) => () => void
+    const guard = (event: string, run: (...args: never[]) => void): (() => void) => on(event, (...args) => {
+      try { run(...args) } catch (error) { console.warn(`[dsh-task-board] ${event} handler failed`, error) }
+    })
+    guard('agent/status', (...args) => {
+      const payload = args[0] as { agent?: { session?: { header?: { id?: unknown } } }; status?: string }
+      const sessionId = payload?.agent?.session?.header?.id
+      if (typeof sessionId === 'string' && typeof payload?.status === 'string') host.handleAgentStatus(sessionId, payload.status)
+    })
+    guard('session/created', (...args) => {
+      const session = args[0] as { header?: { id?: unknown } }
+      if (typeof session?.header?.id === 'string') host.handleSessionCreated(session.header.id)
+    })
+    guard('session/disposed', (...args) => {
+      const session = args[0] as { header?: { id?: unknown } }
+      if (typeof session?.header?.id === 'string') host.handleSessionDisposed(session.header.id)
+    })
+    guard('session/event', (...args) => {
+      const session = args[0] as { header?: { id?: unknown } }
+      const event = args[1] as { type?: unknown; time?: unknown; data?: unknown }
+      if (typeof session?.header?.id === 'string' && typeof event === 'object' && event !== null && typeof event.type === 'string') {
+        host.handleSessionEvent(session.header.id, {
+          type: event.type,
+          time: typeof event.time === 'number' ? event.time : Date.now(),
+          data: event.data,
+        })
+      }
+    })
+  }
   ctx.effect(() => {
     const disposers: Array<() => void> = []
     try {
@@ -402,6 +445,7 @@ function applyImpl(ctx: Context, config?: Config): void {
     const live = current()
     const active = readConfigField(live.enabled, true)
     host.setConfiguration(active, readConfigField(live.preventIdleSleep, false))
+    host.setPressureGate(readConfigField(live.pressureGate, true))
     host.setMaxConcurrentRuns(readConfigField(live.maxConcurrentRuns, 1))
     host.setMaxDoneTasks(readConfigField(live.maxDoneTasks, DEFAULT_MAX_DONE_TASKS))
     host.setComposeFile(readConfigField(live.composeFile, DEFAULT_COMPOSE_FILE))

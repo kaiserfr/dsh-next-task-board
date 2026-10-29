@@ -116,6 +116,18 @@ export declare class TaskBoardHostService {
      * card; the OS timer is what samples it, so an inactive board still measures.
      */
     private readonly pressureMonitor;
+    /** Overload gate on/off; off makes every pressure verdict `ok` (no holds). */
+    private pressureGateEnabled;
+    /**
+     * Event-fed session runtime: the live roster plus the last observed activity
+     * time. `session/created`/`session/disposed` and `agent/status` keep it fresh
+     * so the board does not have to list sessions on a timer.
+     */
+    private readonly sessionRuntime;
+    /** Wall-clock of the newest session/agent event (drives the fallback poll). */
+    private lastSessionEventAt;
+    /** Debounce handle for conversation-watch refreshes triggered by chat events. */
+    private conversationRefreshPending;
     private readonly loopDelay;
     /** Cards whose launch was already explained as "starting anyway under load". */
     private readonly pressureBypassed;
@@ -205,6 +217,48 @@ export declare class TaskBoardHostService {
     samplePressure(): TaskBoardPressure;
     /** The current machine pressure (no new sample). */
     pressure(): TaskBoardPressure;
+    /** Turn the overload gate on (`true`) or off (`false`). */
+    setPressureGate(enabled: boolean): void;
+    /**
+     * The pressure the board acts on. While the overload gate is off this is
+     * always `ok`, so no launch, queue reason, parse refusal or card notice can
+     * come from machine load; the real reading stays visible in health.
+     */
+    private currentPressure;
+    /** The event-fed roster, shaped like the RPC `session:list` rows. */
+    private rosterItems;
+    /** A session/agent event arrived: mark the feed alive and touch the row. */
+    private touchSession;
+    /**
+     * Whether an execution's session needs a roster-backed reconcile: unknown to
+     * the event feed, gone from it, or quiet for longer than the alive window.
+     * This keeps the safety-net poll targeted instead of letting fresh events
+     * from unrelated sessions hide a stale run forever.
+     */
+    private sessionDue;
+    /** `agent/status`: the turn lifecycle, the event-driven substitute for roster listing. */
+    handleAgentStatus(sessionId: string, status: string): void;
+    /** `session/created`: a live session entered the store. */
+    handleSessionCreated(sessionId: string): void;
+    /** `session/disposed`: the session left the store; settle everything on it. */
+    handleSessionDisposed(sessionId: string): void;
+    /**
+     * `session/event`: the append feed. Chat events replace the rework/answer
+     * polls; an idle transition afterwards runs the settle.
+     */
+    handleSessionEvent(sessionId: string, event: {
+        type: string;
+        time: number;
+        data: unknown;
+    }): void;
+    /** Debounced rework/answer refresh after a chat event (no timer poll). */
+    private queueConversationRefresh;
+    /**
+     * Settle the open executions attached to one session. Event-triggered; each
+     * settle performs exactly one history read (the inspection below remains the
+     * authority on the outcome).
+     */
+    private settleSessionExecutions;
     /**
      * The board's health face, read by the external watchdog and by a human
      * debugging a slow GUI. Aggregates only — no card titles, no conversations.
@@ -477,6 +531,13 @@ export declare class TaskBoardHostService {
      * running or still carries an open execution.
      */
     private reconcileExecutions;
+    /**
+     * Settle one open execution whose inspection is due. The inspection itself
+     * (one history read when the session quieted) stays the only authority on the
+     * outcome; callers decide *when* it is due: the event feed (agent idle, session
+     * disposed) or the safety-net poll.
+     */
+    private settleExecution;
     /**
      * Publish which conversations are running right now, so a card can offer its
      * immediate stop even when its ordinary pause control is unavailable (a paused

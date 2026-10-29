@@ -33,6 +33,11 @@ import {
 import type { TaskPermission } from './core/handover.ts'
 
 const SESSION_POLL_MS = 5_000
+/** Event-driven mode: if a session/agent event arrived within this window, the
+ * board trusts the event feed and skips the full roster poll entirely. */
+const SESSION_EVENT_ALIVE_MS = 30_000
+/** Safety-net poll when the event feed went quiet (missed events, older runtime). */
+const SESSION_FALLBACK_POLL_MS = 60_000
 const SCHEDULE_TICK_MS = 30_000
 const RESUME_GAP_MS = SCHEDULE_TICK_MS + 15_000
 /**
@@ -215,6 +220,18 @@ export class TaskBoardHostService {
    * card; the OS timer is what samples it, so an inactive board still measures.
    */
   private readonly pressureMonitor: PressureMonitor
+  /** Overload gate on/off; off makes every pressure verdict `ok` (no holds). */
+  private pressureGateEnabled = true
+  /**
+   * Event-fed session runtime: the live roster plus the last observed activity
+   * time. `session/created`/`session/disposed` and `agent/status` keep it fresh
+   * so the board does not have to list sessions on a timer.
+   */
+  private readonly sessionRuntime = new Map<string, { running: boolean; present: boolean; updatedAt?: number }>()
+  /** Wall-clock of the newest session/agent event (drives the fallback poll). */
+  private lastSessionEventAt = 0
+  /** Debounce handle for conversation-watch refreshes triggered by chat events. */
+  private conversationRefreshPending = false
   private readonly loopDelay = monitorEventLoopDelay({ resolution: 20 })
   /** Cards whose launch was already explained as "starting anyway under load". */
   private readonly pressureBypassed = new Set<string>()
@@ -401,7 +418,7 @@ export class TaskBoardHostService {
   start(): void {
     if (this.disposed || this.timers.length > 0) return
     this.syncPowerReasons()
-    this.timers.push(setInterval(() => { this.schedulePoll() }, SESSION_POLL_MS))
+    this.timers.push(setInterval(() => { this.schedulePoll() }, SESSION_FALLBACK_POLL_MS))
     this.timers.push(setInterval(() => { this.scheduleTick(false) }, SCHEDULE_TICK_MS))
     // Pressure is sampled on its own timer, not only on the 5 s poll: the board
     // must know how loaded the machine is even while no tab is open (the health
@@ -420,6 +437,7 @@ export class TaskBoardHostService {
   samplePressure(): TaskBoardPressure {
     const previous = this.pressureMonitor.snapshot().level
     const next = this.pressureMonitor.sample(this.eventLoopP95Ms())
+    if (!this.pressureGateEnabled) return next
     if (next.level !== previous) {
       if (next.level === 'overloaded') {
         this.ledger.note(undefined, `System ausgelastet (Last ${next.load1.toFixed(1)} auf ${next.cores} Kernen${next.loopP95Ms >= 100 ? `, Event-Loop p95 ${next.loopP95Ms} ms` : ''}) — neue Läufe warten.`)
@@ -434,7 +452,139 @@ export class TaskBoardHostService {
 
   /** The current machine pressure (no new sample). */
   pressure(): TaskBoardPressure {
+    return this.currentPressure()
+  }
+
+  /** Turn the overload gate on (`true`) or off (`false`). */
+  setPressureGate(enabled: boolean): void {
+    this.pressureGateEnabled = enabled
+  }
+
+  /**
+   * The pressure the board acts on. While the overload gate is off this is
+   * always `ok`, so no launch, queue reason, parse refusal or card notice can
+   * come from machine load; the real reading stays visible in health.
+   */
+  private currentPressure(): TaskBoardPressure {
+    if (!this.pressureGateEnabled) {
+      return { level: 'ok', load1: 0, cores: 1, loadRatio: 0, loopP95Ms: 0 }
+    }
     return this.pressureMonitor.snapshot()
+  }
+
+  /** The event-fed roster, shaped like the RPC `session:list` rows. */
+  private rosterItems(): Array<{ sessionId: string; running: boolean; updatedAt?: number }> {
+    const items: Array<{ sessionId: string; running: boolean; updatedAt?: number }> = []
+    for (const [sessionId, row] of this.sessionRuntime) {
+      if (!row.present) continue
+      items.push({ sessionId, running: row.running, ...(row.updatedAt === undefined ? {} : { updatedAt: row.updatedAt }) })
+    }
+    return items
+  }
+
+  /** A session/agent event arrived: mark the feed alive and touch the row. */
+  private touchSession(sessionId: string, running?: boolean, present?: boolean, updatedAt?: number): void {
+    this.lastSessionEventAt = Date.now()
+    const row = this.sessionRuntime.get(sessionId) ?? { running: false, present: true }
+    if (running !== undefined) row.running = running
+    if (present !== undefined) row.present = present
+    if (updatedAt !== undefined) row.updatedAt = updatedAt
+    this.sessionRuntime.set(sessionId, row)
+  }
+
+  /**
+   * Whether an execution's session needs a roster-backed reconcile: unknown to
+   * the event feed, gone from it, or quiet for longer than the alive window.
+   * This keeps the safety-net poll targeted instead of letting fresh events
+   * from unrelated sessions hide a stale run forever.
+   */
+  private sessionDue(sessionId: string | undefined): boolean {
+    if (sessionId === undefined) return true
+    const row = this.sessionRuntime.get(sessionId)
+    if (row === undefined) return true
+    if (!row.present) return true
+    return Date.now() - (row.updatedAt ?? 0) > SESSION_EVENT_ALIVE_MS
+  }
+
+  /** `agent/status`: the turn lifecycle, the event-driven substitute for roster listing. */
+  handleAgentStatus(sessionId: string, status: string): void {
+    const running = status === 'running'
+    this.touchSession(sessionId, running, true)
+    this.power.updateReasons({
+      runningSessions: [...this.sessionRuntime.values()].filter(row => row.present && row.running).length,
+      armedSchedules: this.ledger.armedScheduleCount(),
+      sessionStateKnown: true,
+    })
+    if (!running) {
+      // A turn ended: settle any open execution of that session (reads its
+      // history once). The 5 s inspection poll is replaced by this trigger.
+      this.refreshRunningSessions(this.rosterItems() as SessionSummary[])
+      void this.settleSessionExecutions(sessionId)
+    } else {
+      this.refreshRunningSessions(this.rosterItems() as SessionSummary[])
+    }
+  }
+
+  /** `session/created`: a live session entered the store. */
+  handleSessionCreated(sessionId: string): void {
+    this.touchSession(sessionId, undefined, true)
+  }
+
+  /** `session/disposed`: the session left the store; settle everything on it. */
+  handleSessionDisposed(sessionId: string): void {
+    this.touchSession(sessionId, false, false)
+    this.power.updateReasons({
+      runningSessions: [...this.sessionRuntime.values()].filter(row => row.present && row.running).length,
+      armedSchedules: this.ledger.armedScheduleCount(),
+      sessionStateKnown: true,
+    })
+    void this.settleSessionExecutions(sessionId)
+  }
+
+  /**
+   * `session/event`: the append feed. Chat events replace the rework/answer
+   * polls; an idle transition afterwards runs the settle.
+   */
+  handleSessionEvent(sessionId: string, event: { type: string; time: number; data: unknown }): void {
+    this.touchSession(sessionId, undefined, true, event.time)
+    if (event.type === 'user/message') this.queueConversationRefresh()
+    if (event.type === 'assistant/message' || event.type === 'turn/end') {
+      const data = (event.data ?? {}) as { interrupted?: boolean }
+      if (data.interrupted === true) {
+        // An aborted turn may need the pause path; settle decisions still run
+        // at the idle transition with a single history read.
+        void this.settleSessionExecutions(sessionId)
+      }
+    }
+  }
+
+  /** Debounced rework/answer refresh after a chat event (no timer poll). */
+  private queueConversationRefresh(): void {
+    if (this.conversationRefreshPending) return
+    this.conversationRefreshPending = true
+    void new Promise<void>(resolve => { setTimeout(resolve, 500) }).then(() => {
+      this.conversationRefreshPending = false
+      if (this.disposed) return
+      const items = this.rosterItems()
+      void this.watchReworkChats(items as SessionSummary[])
+      void this.refreshAwaitingAnswers(items as SessionSummary[])
+    })
+  }
+
+  /**
+   * Settle the open executions attached to one session. Event-triggered; each
+   * settle performs exactly one history read (the inspection below remains the
+   * authority on the outcome).
+   */
+  private async settleSessionExecutions(sessionId: string): Promise<void> {
+    if (this.disposed || !this.active) return
+    const executions = this.ledger.runtimeView().openExecutions.filter(execution => execution.sessionId === sessionId)
+    if (executions.length === 0) return
+    const sessions = this.sessionRuntime.has(sessionId) ? this.rosterItems() as SessionSummary[] : undefined
+    for (const execution of executions) {
+      await this.settleExecution(execution, sessions)
+    }
+    this.pumpLaunchQueue()
   }
 
   /**
@@ -661,7 +811,7 @@ export class TaskBoardHostService {
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
       pendingWork: this.pendingWork(),
-      pressure: this.pressureMonitor.snapshot(),
+      pressure: this.currentPressure(),
       queued: this.queuedRuns(),
       ...(Object.keys(this.runningSessions).length === 0 ? {} : { runningSessions: { ...this.runningSessions } }),
     }
@@ -707,7 +857,7 @@ export class TaskBoardHostService {
       pendingReleases: this.ledger.pendingReleases(),
       notices: this.ledger.notices(),
       pendingWork: this.pendingWork(),
-      pressure: this.pressureMonitor.snapshot(),
+      pressure: this.currentPressure(),
       queued: this.queuedRuns(),
       ...(Object.keys(this.runningSessions).length === 0 ? {} : { runningSessions: { ...this.runningSessions } }),
       ...(changed.length === 0 ? {} : { tasks: changed }),
@@ -718,7 +868,7 @@ export class TaskBoardHostService {
 
   private queuedRuns(): Record<string, TaskBoardQueueEntry> {
     if (this.launchQueue.length === 0) return {}
-    const pressure = this.pressureMonitor.snapshot().level === 'overloaded'
+    const pressure = this.currentPressure().level === 'overloaded'
     const queued: Record<string, TaskBoardQueueEntry> = {}
     for (const opened of this.launchQueue) {
       // The reason is the honest one: either the lane's slot is taken, or the
@@ -1394,6 +1544,14 @@ export class TaskBoardHostService {
     this.reconcileCompose()
     this.reconcileReview()
     await this.reconcileArchivedWorktrees()
+    // Event-first: while session/agent events keep arriving, the board trusts
+    // them (settle, answers, rework, roster). The full pass below is only the
+    // safety net: a stale feed, an older runtime without the event bus, an
+    // open execution whose session the feed has gone quiet about, and the rare
+    // non-event states (orphaned sessions).
+    const openExecutions = this.ledger.runtimeView().openExecutions
+    const dueExecution = openExecutions.some(execution => this.sessionDue(execution.sessionId))
+    if (!dueExecution && Date.now() - this.lastSessionEventAt < SESSION_EVENT_ALIVE_MS) return
     if (!this.active && this.ledger.runtimeView().openExecutions.length === 0) return
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
@@ -1535,41 +1693,54 @@ export class TaskBoardHostService {
    * running or still carries an open execution.
    */
   private async reconcileExecutions(
-    sessions: readonly SessionSummary[],
+    sessions: readonly SessionSummary[] | undefined,
     executions: readonly OpenExecutionReference[],
   ): Promise<void> {
     for (const execution of executions) {
-      // A clarification run is monitored like any other execution: settling it
-      // is what clears the card's Running/Queued badge again (and, because it is
-      // a clarification, leaves the card in its column).
-      if (execution.sessionId === undefined) continue
-      try {
-        const result = await this.runner.inspect(execution.sessionId, execution.startedAt, sessions)
-        if (result.outcome === 'pending') continue
-        // A turn the human stopped in the card's own chat is a pause, not a
-        // failed run: the conversation stays, the execution stays open, and the
-        // card can continue exactly there. Settling it as failed was what left
-        // the card in `failed` while its session kept working (and left the
-        // board unable to pause a run it no longer owned).
-        if (result.outcome === 'failed' && result.error === 'agent turn was aborted by the user') {
-          try {
-            const paused = this.ledger.applyRequest(`chat-stop:${execution.taskId}:${execution.startedAt}`, {
-              kind: 'pause',
-              taskIds: [execution.taskId],
-            })
-            for (const run of paused.paused ?? []) this.stopPausedRun(run)
-          } catch (error) {
-            // No pause transition for this card (custom machine) or it changed
-            // column in between: fall back to the ordinary settlement.
-            this.ledger.settle(execution.taskId, execution.executionId, result.outcome, result.error)
-            console.warn(`[dsh-task-board] could not pause task ${execution.taskId} after a chat stop`, error)
-          }
-          continue
+      await this.settleExecution(execution, sessions)
+    }
+  }
+
+  /**
+   * Settle one open execution whose inspection is due. The inspection itself
+   * (one history read when the session quieted) stays the only authority on the
+   * outcome; callers decide *when* it is due: the event feed (agent idle, session
+   * disposed) or the safety-net poll.
+   */
+  private async settleExecution(
+    execution: OpenExecutionReference,
+    sessions?: readonly SessionSummary[],
+  ): Promise<void> {
+    // A clarification run is monitored like any other execution: settling it
+    // is what clears the card's Running/Queued badge again (and, because it is
+    // a clarification, leaves the card in its column).
+    if (execution.sessionId === undefined) return
+    try {
+      const result = await this.runner.inspect(execution.sessionId, execution.startedAt, sessions)
+      if (result.outcome === 'pending') return
+      // A turn the human stopped in the card's own chat is a pause, not a
+      // failed run: the conversation stays, the execution stays open, and the
+      // card can continue exactly there. Settling it as failed was what left
+      // the card in `failed` while its session kept working (and left the
+      // board unable to pause a run it no longer owned).
+      if (result.outcome === 'failed' && result.error === 'agent turn was aborted by the user') {
+        try {
+          const paused = this.ledger.applyRequest(`chat-stop:${execution.taskId}:${execution.startedAt}`, {
+            kind: 'pause',
+            taskIds: [execution.taskId],
+          })
+          for (const run of paused.paused ?? []) this.stopPausedRun(run)
+        } catch (error) {
+          // No pause transition for this card (custom machine) or it changed
+          // column in between: fall back to the ordinary settlement.
+          this.ledger.settle(execution.taskId, execution.executionId, result.outcome, result.error)
+          console.warn(`[dsh-task-board] could not pause task ${execution.taskId} after a chat stop`, error)
         }
-        this.ledger.settle(execution.taskId, execution.executionId, result.outcome, 'error' in result ? result.error : undefined)
-      } catch {
-        // A transient inspection failure never settles a running execution.
+        return
       }
+      this.ledger.settle(execution.taskId, execution.executionId, result.outcome, 'error' in result ? result.error : undefined)
+    } catch {
+      // A transient inspection failure never settles a running execution.
     }
   }
 
@@ -1740,7 +1911,7 @@ export class TaskBoardHostService {
     // sessions into a frozen GUI. The run stays queued and the card says why.
     // `PRESSURE_MAX_HOLD_MS` keeps a permanently busy machine from turning the
     // queue into a dead end: after the hold the run starts anyway, with a note.
-    const pressure = this.pressureMonitor.snapshot()
+    const pressure = this.currentPressure()
     if (pressure.level === 'overloaded' && this.launchQueue.length > 0) {
       const now = this.now()
       const oldest = this.launchQueue.reduce((min, opened) => Math.min(min, opened.execution.startedAt), now)
