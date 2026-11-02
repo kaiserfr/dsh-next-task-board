@@ -11,6 +11,7 @@ import { useRef, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { collectKnownTags, type TaskRecord, type TaskTag } from '../../core/tasks.ts'
 import { t } from '../locales.ts'
+import css from '../board.module.css'
 import { AiParseSection, DraftNotice, ModalShell, TaskContentFields, TaskTagFields, cleanTags, editDraftKey, parseSourceText, tagsDraftKey, useAiParse, useFormDraftSeat, useStoredFormDraft } from './TaskForm.tsx'
 
 /** Everything the edit-content form carries (the draft seat's payload). */
@@ -19,6 +20,7 @@ interface EditTaskForm {
   description: string
   prompt: string
   tags: TaskTag[]
+  skipTests: boolean
   parseText: string
 }
 
@@ -40,12 +42,14 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
     description: task.description,
     prompt: task.prompt,
     tags: task.tags ?? [],
+    skipTests: task.skipTests === true,
     parseText: openingText,
   }))
   const [title, setTitle] = useState(stored?.title ?? pristine.title)
   const [description, setDescription] = useState(stored?.description ?? pristine.description)
   const [prompt, setPrompt] = useState(stored?.prompt ?? pristine.prompt)
   const [tags, setTags] = useState<TaskTag[]>(stored?.tags ?? pristine.tags)
+  const [skipTests, setSkipTests] = useState(stored?.skipTests ?? pristine.skipTests)
   const [error, setError] = useState<string | undefined>(undefined)
   const submitted = useRef(false)
   const parse = useAiParse(controller, stored?.parseText ?? pristine.parseText, draft => {
@@ -55,7 +59,7 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
   }, () => ({ title, description, prompt }))
 
   /** The whole form as one value: the draft seat's payload. */
-  const form = (): EditTaskForm => ({ title, description, prompt, tags, parseText: parse.text })
+  const form = (): EditTaskForm => ({ title, description, prompt, tags, skipTests, parseText: parse.text })
 
   /** Put one whole form on screen (opening on a draft, or discarding it). */
   const applyForm = (value: EditTaskForm): void => {
@@ -63,6 +67,7 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
     setDescription(value.description)
     setPrompt(value.prompt)
     setTags(value.tags)
+    setSkipTests(value.skipTests)
     parse.setText(value.parseText)
   }
 
@@ -100,6 +105,9 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
       // suddenly carry the derived fallback as its source.
       ...(canParse && parse.text !== openingText ? { parseText: parse.text } : {}),
       ...(tagList.length > 0 ? { tags: tagList } : (task.tags === undefined ? {} : { tags: null })),
+      // Only send the mark when it actually changed, so an untouched form keeps
+      // producing the patch it produced before the field existed.
+      ...(skipTests === (task.skipTests === true) ? {} : { skipTests }),
     }
     // Close at once and let the Host confirm in the background. A rejection
     // restores the draft; the board shows the reason as a notice.
@@ -140,6 +148,16 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
       />
 
       <TaskTagFields tags={tags} knownTags={collectKnownTags(controller.getSnapshot().tasks)} onChange={setTags} />
+
+      <label className={css.scheduleToggle}>
+        <input
+          type="checkbox"
+          checked={skipTests}
+          onChange={event => { setSkipTests(event.target.checked) }}
+        />
+        <span>{t('exec.skipTests')}</span>
+      </label>
+      <p className={css.detailText}>{t('exec.skipTestsHint')}</p>
 
     </ModalShell>
   )

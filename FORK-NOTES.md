@@ -12,7 +12,7 @@ Dieses Repository ist ein **eigenständiger Fork** des DSH-Task-Boards.
 
 ## Änderungen gegenüber dem Upstream
 
-Kurzfassung: **sechsundzwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28 und 29) plus drei
+Kurzfassung: **achtundzwanzig echte Zusatz-Fähigkeiten** (1, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30 und 31) plus drei
 Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 übernommen (siehe unten).
 
@@ -48,6 +48,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 27 | **Mehr können** | **Merge-Freigabe je Karte (Release)**: `ready_for_test → done` ist die Freigabe und läuft für den Zug auf Done und den neuen Knopf „Freigeben (Merge)" (Host-Aktion `approve-merge`) durch dieselbe Routine. Ohne Branch wird die Karte ohne Merge nach Done verschoben und das als `skipped` vermerkt; ein erfolgreicher Merge stempelt `TaskGit.mergedAt` und `TaskMerge.mergedAt`; eine Verweigerung (schmutziger Worktree, Branch über den Prüf-Commit hinaus, kein Prüf-Commit) oder ein git-Fehler schickt die Karte nach `failed` mit dem Grund auf `TaskMerge.error`. Ein **Konflikt** wird nicht dem Menschen zugemutet: der Host rollt den halben Merge im Haupt-Checkout zurück (`git merge --abort`), merged den Basis-Branch **im Worktree der Karte** und lässt den Konflikt dort stehen — die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git commit`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): löst er den Konflikt, merged der Host von selbst nach und die Karte geht nach Done; sonst (zweiter Konflikt, fehlgeschlagener Lauf, oder erfolgreich mit noch ungemergten Dateien) nach `failed`. Der Freigabe-Stempel erlaubt dabei einen HEAD, dessen Vorfahre der Prüf-Commit ist. *Der Konflikt-Weg ist seit 29 ein Rebase auf die aktuelle Basis: die Spiegel-Merge-Maschinerie und die Vorfahren-Ausnahme des Gates sind entfallen.* Die Karte zeigt den Merge-Zustand (`src/core/merge.ts`: merged / unmerged / released / resolving / failed / no-branch) als Badge, der Prüf-Block nennt Commit, Zeitpunkt, Konflikt und Fehler |
 | 28 | **Mehr können** | **`repoSubpath`: Repository-Erkennung je Workspace**: eine Einstellung (JSON-Array `[{ "path": …, "repo": … }]`, längster Präfix gewinnt, relative oder absolute `repo`) nennt das Repository innerhalb eines Workspace-Ordners, der selbst kein Repository ist. Branch, Worktree, Commit und Merge laufen dann dort, und der Prüf-Block fällt für Karten ohne Git-Zustand auf dasselbe Verzeichnis zurück. Geparst/validiert mit `core/repo-config.ts` — dieselbe Funktion für Browser-Feld und Host |
 | 30 | **Mehr können** | **To-do-Spalte und Spec-Freigabe entfernt: Klärung → In progress ist der direkte Weg** — die Default-Maschine hat sechs Spalten (Backlog → Klärung → In progress → Ready for test → Failed → Done), `clarification → running` trägt `run` und schließt den offenen Klärungslauf, `ready_for_test`/`failed` gehen beim Rework zurück nach `clarification`, und `approve-spec`/`specApprovedAt` samt Knopf „Release specification“ sind vollständig entfallen; bestehende To-do-Karten migrieren beim Laden nach `clarification` |
+| 31 | **Mehr können** | **Zweiphasiger Lauf über `Testing` nach `Tested`**: die alte Spalte „Ready for test" heißt „Testing", danach folgt die neue Merge-Spalte „Tested"; der Implementierungslauf testet nicht mehr selbst, ein WIP-freier Testlauf (gleiche Session, `kind: 'test'`) testet und meldet, erst dann ist der Merge aus „Tested" erlaubt; Karten ohne Tests (`skipTests`) springen direkt nach Tested/Done |
 | 29 | **Mehr können** | **Merge-Freigabe setzt den Branch erst auf die aktuelle Basis neu auf (Rebase)**: `git.mergeBranch` prüft weiterhin das Gate (sauberer Worktree, HEAD exakt `reviewedCommit`) und **rebased den Feature-Branch dann auf den Basis-Branch, wie er jetzt steht** — in der Zwischenzeit können andere Karten in die Basis gemergt worden sein, und ohne diesen Schritt träfe die geprüfte Arbeit die neue Basis erst im Merge-Commit, den nie jemand auf ihr gebaut oder getestet hat. Ein Konflikt wird nicht dem Menschen zugemutet: der halb fertige Rebase bleibt **im Worktree der Karte** stehen (Marker, `rebase-merge`), der Haupt-Checkout wird nie angefasst, und die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git -c core.editor=true rebase --continue`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): danach stempelt der Settle des Laufs den rebasten HEAD als Prüf-Commit und der Host merged von selbst nach; ein zweiter Konflikt, ein fehlgeschlagener Lauf oder ein danach noch offener Rebase bricht ihn ab (der Branch steht wieder auf dem geprüften Commit) und schickt die Karte nach `failed`. Die alte Spiegel-Merge-Maschinerie (`beginMergeResolution`, `MergeResolutionStart`, Gate-Ausnahme „Prüf-Commit ist Vorfahre") ist entfallen; `commitBranch`, `hasUnresolvedMerge` und `abortUnresolvedMerge` kennen den unfertigen Rebase |
 
 Die englische Fassung dieser Übersicht steht im README unter
@@ -1071,6 +1072,38 @@ Host-Route und denselben System-Prompt-Abschnitt.
     - **Entfernt:** `dsh-manage-sessions` (Force-Stop/Archivieren/Löschen/Pfad-Kopieren) und `dsh-session-lifecycle` (nur dessen Lösch-Shims) sind deinstalliert — der Board-Stopp ist der Ersatz, der dokumentierte Fallback ist der normale Chat-Stopp von DSH.
     - **Nachtrag nach dem ersten Live-Test (2026-10-27 abends):** „Parse und Fill" blieb bei 0 s stehen und eine Session ließ sich nicht anhalten. Ursache war nicht der Stopp selbst, sondern die *Zustellung*: ein Browser-Tab hält pro Origin nur wenige HTTP/1.1-Verbindungen; mehrere offene Board-Tabs (je ein SSE-Stream) plus der GUI-WebSocket können neue Anfragen (Parse, Aktionen) in die Warteschlange schieben — es passiert dann sichtbar „nichts". Dagegen: (a) ein verstecktes Tab **schließt** seinen Event-Stream und öffnet ihn beim Zurückkommen neu (erste Frame = Snapshot); (b) ein Action-POST ohne Antwort wird nach **20 s** als retrybarer `timeout` behandelt (Banner, gleiche `requestId`), statt unendlich zu hängen; (c) Parse hat clientseitig eine **150-s-Reißleine** mit klarer Meldung; (d) `runningSessions` (aus dem Roster abgeleitet) + Aktion **`stop-session`** geben Karte und Detail einen sofortigen Stopp, der auch eine pausierte Karte erreicht; (e) tippt der Mensch in den Chat einer pausierten Karte, **hebt der Watchdog die Pause auf**, statt den Turn zu töten. Tests: `tests/ai-parse.spec.tsx`, `tests/host-api.spec.ts`, `tests/hard-stop.spec.ts`.
     - **Tests:** `tests/hard-stop.spec.ts` (Eskalation, Job-Kill, Preserve, Orphan-Pause, Watchdog, `acceptAction`-Ergebnisse, Delta-Frames), `tests/command-runner.spec.ts` (Scope-Kill, Timeout); `tests/pause-runner.spec.ts`, `tests/host-routes.spec.ts`, `tests/host-controller.spec.ts`, `tests/controller.spec.ts`, `tests/host-api.spec.ts` und `tests/host-ai.spec.ts` sind auf das neue Protokoll gezogen.
+
+31. **Testphase: `Testing` → `Tested`, Implementierung und Tests in zwei Läufen** — die Karte
+    wird nach der Implementierung nicht mehr erst nach den langen Tests aus „In progress"
+    entlassen, sondern schon davor:
+    - **Spalten.** `ready_for_test` heißt jetzt `testing` (Tests laufen / stehen an); die
+      neue Spalte `tested` ist der **Merge-Riegel**. `testing → tested` ist der einzige Ort,
+      von dem aus `tested → done` (Merge) erlaubt ist. Bestehende `ready_for_test`-Karten
+      migrieren beim Laden nach `tested`.
+    - **Phase 1 (Implementierung, WIP).** Der Prompt verlangt volle Implementierung, aber
+      nur **schnelle Checks** (Build/Lint/Unit) — keine langen oder GUI-Tests. Der Lauf endet
+      mit `FERTIG: <Zusammenfassung> — Tests ausstehend`; das Settle parkt die Karte in
+      `testing` und gibt den WIP-Platz frei.
+    - **Phase 2 (Testlauf, WIP-frei).** Der Host öffnet sofort einen zweiten Lauf
+      (`ExecutionRecord.kind = 'test'`, dieselbe Session, gleiche Start-Queue, aber wie ein
+      Klärungslauf **ohne WIP-Platz**). Sein Prompt ist das kurze „Bitte jetzt testen." plus
+      `TEST_INSTRUCTION`: nur testen (inkl. langer/GUI-Tests), nichts beheben, Worktree sauber
+      hinterlassen, Ergebnis als `FERTIG: Tests grün/rot` melden. Settle `succeeded` →
+      `tested`; `failed` → `failed`; `cancelled` bleibt in `testing`.
+    - **Rote Tests.** Sie sind kein eigener Zustand: der Testlauf endet normal und die Karte
+      steht in `tested`; der Mensch zieht sie nach `running` (Rework) oder `clarification`.
+      `testing → tested` kann auch **manuell** abgekürzt werden (keine Tests / Test von Hand);
+      `start-test` (Knopf „Tests starten") startet den Testlauf nach einem Abbruch erneut.
+    - **Karten ohne Tests.** Die neue Karten-Option „Keine Tests" (`skipTests`, im Formular,
+      nur in Backlog/Klärung editierbar) überspringt `testing`: mit Branch parkt das Settle
+      direkt in `tested`, ohne Branch (nichts zu mergen) direkt in `done`.
+    - **Grenzen.** Die Prüf-/Umgebungsspalte ist jetzt `testing`/`tested` (Start/Stop/Logs,
+      Merge-Knopf nur in `tested`); der Rework-Watch folgt `testing`/`tested`/`failed` und
+      überspringt Karten mit offenem Lauf; der Merge bindet an den geparkten Commit
+      (`reviewedCommit`), der Testlauf ändert keinen Code. Tests:
+      `tests/test-phase.spec.ts`, `tests/state-machine.spec.ts`, `tests/host-ledger.spec.ts`,
+      `tests/git-workflow.spec.ts`.
+
 
 ## Installation
 

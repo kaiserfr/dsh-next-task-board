@@ -16,7 +16,7 @@ import type { TaskHandoverInput } from '../handover.ts'
  * Editable fields on a task (the update patch surface). `freeze` replaces the
  * continuation-card snapshot (restamping frozenAt); an explicit null clears it.
  */
-export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'parseText' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession'>> & {
+export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'parseText' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession' | 'skipTests'>> & {
   freeze?: FreezeSnapshot & { redacted?: boolean } | null
   /** Replaces the handover bundle (restamping bundledAt); an explicit null clears it. */
   handover?: TaskHandoverInput | null
@@ -42,7 +42,10 @@ export const TASK_CONTENT_FIELDS = ['title', 'description', 'prompt'] as const
  * is edited through the same form, so it obeys the same gate.
  */
 export function hasContentPatch(patch: TaskUpdatePatch): boolean {
-  return 'parseText' in patch || (TASK_CONTENT_FIELDS as readonly string[]).some(field => field in patch)
+  // `skipTests` decides the card's whole post-implementation path, so it obeys
+  // the same gate as the content: editable while the card is still being
+  // prepared, frozen once the run has started.
+  return 'parseText' in patch || 'skipTests' in patch || (TASK_CONTENT_FIELDS as readonly string[]).some(field => field in patch)
 }
 
 /**
@@ -50,7 +53,7 @@ export function hasContentPatch(patch: TaskUpdatePatch): boolean {
  * archived) and must still sit in one of the pre-execution columns `backlog` or
  * `clarification`. Fail-closed everywhere else: a running task holds the
  * content its session reads, and once a card moved on to
- * `ready_for_test`/`done`/`failed` its content is the record of what ran.
+ * `testing`/`tested`/`done`/`failed` its content is the record of what ran.
  *
  * Earlier attempts do NOT lock the card: a task whose run failed (or was
  * cancelled) and was dragged back to `backlog`/`clarification` is preparation
@@ -121,6 +124,8 @@ export function applyUpdateTask(
     // Session reuse is a boolean opt-in; false (or an explicit null from a
     // caller that needs to clear it) returns the task to one session per run.
     if ('reuseSession' in patch) next.reuseSession = patch.reuseSession === true ? true : undefined
+    // The "no tests" mark is a plain boolean opt-in; anything but true clears it.
+    if ('skipTests' in patch) next.skipTests = patch.skipTests === true ? true : undefined
     if (workspaceId !== undefined || 'workspaceId' in patch) next.workspaceId = workspaceId
     if (mode !== undefined || 'mode' in patch) next.mode = mode
     if (permission !== undefined || 'permission' in patch) next.permission = permission

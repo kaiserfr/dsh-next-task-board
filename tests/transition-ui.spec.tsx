@@ -181,18 +181,18 @@ function cardWith(container: HTMLElement, title: string): HTMLButtonElement {
 describe('detail transition buttons', () => {
   it('offers every manual transition of the current column, including clarify and run starts', () => {
     const backlog = renderDetail(task({ status: 'backlog' }))
-    expect(transitionTargets(backlog.container)).toEqual(['clarification', 'ready_for_test', 'done', 'failed'])
+    expect(transitionTargets(backlog.container)).toEqual(['clarification', 'testing', 'done', 'failed'])
     expect(transitionTargets(backlog.container)).not.toContain('running')
 
     const clarification = renderDetail(task({ status: 'clarification' }))
     expect(transitionTargets(clarification.container)).toEqual([
-      'running', 'backlog', 'ready_for_test', 'done', 'failed',
+      'running', 'backlog', 'testing', 'done', 'failed',
     ])
     expect(transitionButton(clarification.container, 'running').getAttribute('data-starts')).toBe('true')
     expect(clarification.container.querySelector('button[data-dsh-part="transition-button"][data-target="clarification"]')).toBeNull()
 
     const done = renderDetail(task({ status: 'done' }))
-    expect(transitionTargets(done.container)).toEqual(['backlog', 'clarification', 'ready_for_test', 'failed'])
+    expect(transitionTargets(done.container)).toEqual(['backlog', 'clarification', 'testing', 'failed'])
     expect(transitionTargets(done.container)).not.toContain('running')
   })
 
@@ -347,7 +347,7 @@ describe('card transition badges and queued drops', () => {
     const dataTransfer = transfer()
     await dragStart(cardWith(container, 'A'), dataTransfer)
     expect(JSON.parse(dataTransfer.data['application/x-dsh-taskboard-cards'] ?? '[]')).toEqual(['task-a', 'task-b'])
-    await drop(container.querySelector<HTMLElement>('section[data-status="ready_for_test"]')!, dataTransfer)
+    await drop(container.querySelector<HTMLElement>('section[data-status="testing"]')!, dataTransfer)
     expect(batches).toEqual([['task-a', 'task-b']])
   })
 })

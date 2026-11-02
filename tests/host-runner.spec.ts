@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { SessionSummary } from '@deepseek-ai/dsh-api-session-controller/types'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
-import { COMPLETION_INSTRUCTION, HostExecutionRunner, SessionLaunchError, type LiveSessionAgent } from '../src/host-runner.ts'
+import { COMPLETION_INSTRUCTION, IMPLEMENTATION_PHASE_INSTRUCTION, HostExecutionRunner, SessionLaunchError, type LiveSessionAgent } from '../src/host-runner.ts'
 
 type GatewayRequest = {
   namespace: string
@@ -161,7 +161,7 @@ describe('HostExecutionRunner', () => {
     await expect(new HostExecutionRunner(gateway, commands, workspaceRegistry()).launch(configuredTask())).resolves.toBe('session-a')
     expect(order).toEqual(['preset', 'create', 'rename', 'permission', 'prompt'])
     expect(gateway.invoke.mock.calls[1]?.[0].args).toEqual({ request: { workspaceId: 'workspace-a', agentPreset: 'preset-a' } })
-    expect(promptPayloads).toEqual([{ sessionId: 'session-a', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: `do work\n\n${COMPLETION_INSTRUCTION}` }] }])
+    expect(promptPayloads).toEqual([{ sessionId: 'session-a', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: `do work\n\n${IMPLEMENTATION_PHASE_INSTRUCTION}\n\n${COMPLETION_INSTRUCTION}` }] }])
   })
 
   it('creates the session on the card worktree instead of the pinned workspace', async () => {
@@ -220,7 +220,7 @@ describe('HostExecutionRunner', () => {
     // The pinned permission is re-asserted on the existing session; no
     // create/rename reaches the gateway at all.
     expect(order).toEqual(['preset', 'permission', 'prompt'])
-    expect(promptPayloads).toEqual([{ sessionId: 'session-existing', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: `do work\n\n${COMPLETION_INSTRUCTION}` }] }])
+    expect(promptPayloads).toEqual([{ sessionId: 'session-existing', requestId: expect.any(String), mode: 'queue', content: [{ type: 'text', text: `do work\n\n${IMPLEMENTATION_PHASE_INSTRUCTION}\n\n${COMPLETION_INSTRUCTION}` }] }])
   })
 
   it('sends only the rework framing when a rework continues the session', async () => {
@@ -582,7 +582,7 @@ describe('HostExecutionRunner', () => {
       }),
     })
     // The run's turn ended, but the session still owes a queued prompt: the
-    // card must not move to ready_for_test yet.
+    // card must not move to testing yet.
     await expect(makeRunner(controlBaseline({ 'session-a': [{ id: 'm1', placement: 'queued' }] })).inspect('session-a', 1_000))
       .resolves.toEqual({ outcome: 'pending' })
     // Same for a background job that will wake the session for another turn.

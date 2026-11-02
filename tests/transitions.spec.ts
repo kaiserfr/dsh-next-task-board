@@ -20,7 +20,7 @@ const openRun = (kind?: 'clarify'): ExecutionRecord => ({
 describe('transitionBlockerOf', () => {
   it('reports archived, running and paused cards as hard blockers', () => {
     expect(transitionBlockerOf(task({ archivedAt: 5, status: 'clarification' }), machine, 'running')).toBe('archived')
-    expect(transitionBlockerOf(task({ status: 'running' }), machine, 'ready_for_test')).toBe('running')
+    expect(transitionBlockerOf(task({ status: 'running' }), machine, 'testing')).toBe('running')
     expect(transitionBlockerOf(task({
       status: 'clarification',
       executions: [openRun()],
@@ -73,7 +73,7 @@ describe('transitionBlockerOf', () => {
     }), machine, 'done')).toBeUndefined()
     expect(transitionBlockerOf(task({ status: 'clarification' }), machine, 'done')).toBeUndefined()
     // Every other target keeps the ordinary blockers.
-    expect(transitionBlockerOf(task({ status: 'running' }), machine, 'ready_for_test')).toBe('running')
+    expect(transitionBlockerOf(task({ status: 'running' }), machine, 'testing')).toBe('running')
     expect(transitionBlockerOf(task({
       status: 'clarification',
       pausedAt: 3,
@@ -86,9 +86,9 @@ describe('transitionStartsExecution', () => {
   it('marks the clarify step and the run starts, not plain moves', () => {
     expect(transitionStartsExecution(machine, 'backlog', 'clarification')).toBe(true)
     expect(transitionStartsExecution(machine, 'clarification', 'running')).toBe(true)
-    expect(transitionStartsExecution(machine, 'ready_for_test', 'running')).toBe(true)
+    expect(transitionStartsExecution(machine, 'testing', 'running')).toBe(true)
     expect(transitionStartsExecution(machine, 'failed', 'running')).toBe(true)
-    expect(transitionStartsExecution(machine, 'ready_for_test', 'done')).toBe(false)
+    expect(transitionStartsExecution(machine, 'tested', 'done')).toBe(false)
     expect(transitionStartsExecution(machine, 'done', 'clarification')).toBe(false)
   })
 })

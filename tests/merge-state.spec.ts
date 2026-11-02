@@ -12,7 +12,7 @@ function card(overrides: Partial<TaskRecord> = {}): TaskRecord {
     title: 'Card',
     description: '',
     prompt: 'p',
-    status: 'ready_for_test',
+    status: 'tested',
     createdAt: 0,
     updatedAt: 0,
     executions: [],

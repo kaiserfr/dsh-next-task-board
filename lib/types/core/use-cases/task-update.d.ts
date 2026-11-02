@@ -15,7 +15,7 @@ import type { TaskHandoverInput } from '../handover.ts';
  * Editable fields on a task (the update patch surface). `freeze` replaces the
  * continuation-card snapshot (restamping frozenAt); an explicit null clears it.
  */
-export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'parseText' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession'>> & {
+export type TaskUpdatePatch = Partial<Pick<TaskRecord, 'title' | 'description' | 'prompt' | 'parseText' | 'workspaceId' | 'mode' | 'permission' | 'model' | 'reuseSession' | 'skipTests'>> & {
     freeze?: FreezeSnapshot & {
         redacted?: boolean;
     } | null;
@@ -46,7 +46,7 @@ export declare function hasContentPatch(patch: TaskUpdatePatch): boolean;
  * archived) and must still sit in one of the pre-execution columns `backlog` or
  * `clarification`. Fail-closed everywhere else: a running task holds the
  * content its session reads, and once a card moved on to
- * `ready_for_test`/`done`/`failed` its content is the record of what ran.
+ * `testing`/`tested`/`done`/`failed` its content is the record of what ran.
  *
  * Earlier attempts do NOT lock the card: a task whose run failed (or was
  * cancelled) and was dragged back to `backlog`/`clarification` is preparation

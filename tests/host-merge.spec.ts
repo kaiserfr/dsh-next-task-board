@@ -87,8 +87,10 @@ describe('merge release on the Host service', () => {
       writeFileSync(join(repo, 'feature.txt'), 'main\n')
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
-      await service.apply('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+      await service.apply('park', { kind: 'move', taskId: 'card', status: 'testing' })
       await ledger.awaitCard('card')
+      // The merge gate is `tested`; the test run is skipped by hand here.
+      await service.apply('skip', { kind: 'move', taskId: 'card', status: 'tested' })
 
       await service.apply('release', { kind: 'approve-merge', taskId: 'card' })
       await ledger.awaitCard('card')
@@ -147,13 +149,14 @@ describe('merge release on the Host service', () => {
     })
     try {
       await service.apply('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'p' } })
-      await service.apply('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+      await service.apply('park', { kind: 'move', taskId: 'card', status: 'testing' })
       await ledger.awaitCard('card')
+      await service.apply('skip', { kind: 'move', taskId: 'card', status: 'tested' })
       expect(ledger.task('card')?.git?.reviewedCommit).toBe('abc123')
 
       const snapshot = await service.apply('release', { kind: 'approve-merge', taskId: 'card' })
       // The card has not moved yet: the Host is still merging in the background.
-      expect(snapshot.tasks[0]!.status).toBe('ready_for_test')
+      expect(snapshot.tasks[0]!.status).toBe('tested')
       expect(snapshot.pendingReleases?.card).toBeDefined()
       expect(ledger.pendingReleases().card).toBeDefined()
 

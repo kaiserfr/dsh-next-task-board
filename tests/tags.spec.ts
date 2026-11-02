@@ -23,7 +23,7 @@ import {
   tagTone,
   type TaskRecord,
 } from '../src/core/tasks.ts'
-import { COMPLETION_INSTRUCTION, promptText } from '../src/host-runner.ts'
+import { COMPLETION_INSTRUCTION, IMPLEMENTATION_PHASE_INSTRUCTION, promptText } from '../src/host-runner.ts'
 import { matchesTagFilter } from '../src/client/board/TaskBoard.tsx'
 
 const NOW = 1_700_000_000_000
@@ -115,8 +115,8 @@ describe('promptText tag injection', () => {
     const plain = task()
     // Byte-identical apart from the board's completion contract, which every
     // implementation turn carries at its end.
-    expect(promptText(plain)).toBe(`do it\n\n${COMPLETION_INSTRUCTION}`)
-    expect(promptText(task({ tags: [{ name: 'work' }] }))).toBe(`do it\n\n${COMPLETION_INSTRUCTION}`)
+    expect(promptText(plain)).toBe(`do it\n\n${IMPLEMENTATION_PHASE_INSTRUCTION}\n\n${COMPLETION_INSTRUCTION}`)
+    expect(promptText(task({ tags: [{ name: 'work' }] }))).toBe(`do it\n\n${IMPLEMENTATION_PHASE_INSTRUCTION}\n\n${COMPLETION_INSTRUCTION}`)
   })
 
   it('prepends the tag prompts in tag order', () => {
@@ -131,7 +131,7 @@ describe('promptText tag injection', () => {
       '标签提示（任务看板标签，每次执行前注入）：\n'
       + '- [work] archive to 02-work/\n'
       + '- [obsidian] use the vault layout\n\n'
-      + `do it\n\n${COMPLETION_INSTRUCTION}`,
+      + `do it\n\n${IMPLEMENTATION_PHASE_INSTRUCTION}\n\n${COMPLETION_INSTRUCTION}`,
     )
   })
 

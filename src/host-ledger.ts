@@ -6,7 +6,7 @@ import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
 import type { TaskCompose, TaskGit, TaskMerge, TaskReview } from './core/tasks.ts'
-import { DEFAULT_MAX_DONE_TASKS, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, isReworkReturn, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, implementationParkStatus, isReworkReturn, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -62,7 +62,7 @@ export interface OpenedRun {
  * Outcome of one merge release (the card's "Freigeben (Merge)"): the card as it
  * stands afterwards — in `done` when the merge went through (or when there was
  * nothing to merge), in `failed` with the reason when it did not, still in
- * `ready_for_test` with a `running` execution when the conflict was handed to the
+ * `tested` with a `running` execution when the conflict was handed to the
  * card's agent — plus the run that release started, if any.
  */
 interface ReleaseResult {
@@ -142,8 +142,8 @@ export interface OpenExecutionReference {
   readonly startedAt: number
   /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
   readonly lane: string
-  /** `'clarify'` for the card's clarification round; a real run otherwise. */
-  readonly kind: 'clarify' | 'merge' | undefined
+  /** `'clarify'`/`'test'` for the WIP-free rounds; a real run otherwise. */
+  readonly kind: 'clarify' | 'merge' | 'test' | undefined
 }
 
 /**
@@ -715,7 +715,8 @@ export class HostTaskLedger {
    * only reads each card and the filesystem behind it.
    */
   reviewCandidates(): readonly TaskRecord[] {
-    return this.document.tasks.filter(task => task.archivedAt === undefined && task.status === 'ready_for_test')
+    return this.document.tasks.filter(task => task.archivedAt === undefined
+      && (task.status === 'testing' || task.status === 'tested'))
   }
 
   /**
@@ -787,16 +788,21 @@ export class HostTaskLedger {
   }
 
   /**
-   * The cards the rework watch follows: every settled card in `ready_for_test`
-   * or `failed`, with the conversation the human would write the correction
-   * into. A cheap projection on purpose — the watch runs on the hot poll path,
+   * The cards the rework watch follows: every settled card in `testing`,
+   * `tested` or `failed`, with the conversation the human would write the
+   * correction into. A cheap projection on purpose — the watch runs on the hot poll path,
    * which must not clone the whole document.
    */
   reworkWatch(): ReworkWatchEntry[] {
     const entries: ReworkWatchEntry[] = []
     for (const task of this.document.tasks) {
       if (task.archivedAt !== undefined) continue
-      if (task.status !== 'ready_for_test' && task.status !== 'failed') continue
+      if (task.status !== 'testing' && task.status !== 'tested' && task.status !== 'failed') continue
+      // Only settled cards: while the test run still owns the card, a human
+      // message is not (yet) a review correction — the test run continues, and
+      // the human can pause it first. Windows where the card is mid-run must
+      // never be moved under the execution.
+      if (hasOpenExecution(task)) continue
       // The newest settled conversation, scanning from the tail: that is where
       // the human would write the correction (a clarification round that never
       // opened an implementation has no settle and cannot match).
@@ -1099,8 +1105,8 @@ export class HostTaskLedger {
    * The merge release of one card: replay its feature branch onto the base
    * branch as that stands now and merge it back. The git work is queued on the
    * card's work chain and the action returns at once with `pending: true`: the
-   * card stays in `ready_for_test` (a derived "release running" marker explains
-   * the wait) until the outcome is written back. Nothing optimistic ever claims
+   * card stays in `tested` (a derived "release running" marker explains the
+   * wait) until the outcome is written back. Nothing optimistic ever claims
    * a column the Host has not written.
    *
    * The decision table (the human's "Freigeben (Merge)"):
@@ -1148,8 +1154,8 @@ export class HostTaskLedger {
   private async runRelease(plan: ReleasePlan): Promise<void> {
     try {
       const task = this.task(plan.taskId)
-      if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') {
-        this.pushNotice(plan.taskId, 'release cancelled: the card left the review column before the merge started')
+      if (task === undefined || task.archivedAt !== undefined || task.status !== 'tested') {
+        this.pushNotice(plan.taskId, 'release cancelled: the card left the tested column before the merge started')
         return
       }
       if (task.git === undefined || this.git === undefined) {
@@ -1157,7 +1163,7 @@ export class HostTaskLedger {
         return
       }
       if (plan.reviewedCommit === '') {
-        this.finishRelease(plan, { error: 'merge refused: the card has no reviewed commit; park the card in "Ready for test" again so the approval is bound to the commit you reviewed' })
+        this.finishRelease(plan, { error: 'merge refused: the card has no reviewed commit; park the card in "Testing" again so the approval is bound to the commit you reviewed' })
         return
       }
       if (task.git.reviewedCommit !== plan.reviewedCommit) {
@@ -1184,9 +1190,9 @@ export class HostTaskLedger {
     const task = this.task(plan.taskId)
     if (task === undefined) return
     const now = this.now()
-    // The card left the review column while the merge ran (another tab, a
+    // The card left the tested column while the merge ran (another tab, a
     // send-back): record what git did, but never overwrite the human's move.
-    if (task.status !== 'ready_for_test') {
+    if (task.status !== 'tested') {
       this.patchTask(task.id, current => ({
         ...current,
         ...(outcome.merged === undefined ? {} : { git: outcome.merged }),
@@ -1195,7 +1201,7 @@ export class HostTaskLedger {
           : { merge: { ...plan.base, ...(outcome.merged === undefined ? { error: outcome.error ?? outcome.conflict?.message ?? 'the release finished after the card left the review column' } : { mergedAt: now }) } }),
         updatedAt: now,
       }))
-      this.pushNotice(task.id, 'release finished after the card left the review column; the result was recorded but the column was not changed')
+      this.pushNotice(task.id, 'release finished after the card left the tested column; the result was recorded but the column was not changed')
       return
     }
     if (outcome.merged !== undefined || task.git?.mergedAt !== undefined) {
@@ -1283,7 +1289,7 @@ export class HostTaskLedger {
     this.notify()
     void this.enqueueCardWork(task.id, async () => {
       const current = this.task(task.id)
-      if (current === undefined || current.status !== 'ready_for_test' || current.git?.reviewedCommit === undefined) {
+      if (current === undefined || current.status !== 'tested' || current.git?.reviewedCommit === undefined) {
         this.releases.delete(task.id)
         this.notify()
         return
@@ -1441,7 +1447,7 @@ export class HostTaskLedger {
     const now = this.now()
     const task = this.document.tasks.find(item => item.id === taskId)
     if (task === undefined || task.archivedAt !== undefined || task.pausedAt !== undefined) return false
-    if (task.status !== 'ready_for_test' && task.status !== 'failed' && task.status !== 'clarification') return false
+    if (task.status !== 'testing' && task.status !== 'tested' && task.status !== 'failed' && task.status !== 'clarification') return false
     if (hasOpenExecution(task)) return false
     // The re-opened run covers the activity *since the card was parked*, not
     // only since this call: the turn end that ended the resumed work may land
@@ -1450,7 +1456,8 @@ export class HostTaskLedger {
     const resumedAt = task.executions[task.executions.length - 1]?.endedAt ?? now
     // A clarification or merge run keeps its own semantics; a normal
     // implementation run moves the card back to the runner-owned column.
-    const opened = startExecution(task, now, crypto.randomUUID(), undefined, kind === 'clarify' || kind === 'merge' ? kind : undefined)
+    const opened = startExecution(task, now, crypto.randomUUID(), undefined,
+      kind === 'clarify' || kind === 'merge' || kind === 'test' ? kind : undefined)
     const next = {
       ...opened.task,
       executions: opened.task.executions.map(execution => execution.id === opened.execution.id
@@ -1504,25 +1511,50 @@ export class HostTaskLedger {
 
   settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void {
     const now = this.now()
+    let openedTest: OpenedRun | undefined
+    let movedToDone = false
     this.document.tasks = this.document.tasks.map(task => {
       // A paused run is not settled: the aborted turn the pause produced must
       // not park the card in `failed`/`clarification`. This also closes the race
       // where an inspection started just before the pause was written.
       if (task.id !== taskId || task.pausedAt !== undefined) return task
       const execution = task.executions.find(entry => entry.id === executionId)
-      const settled = settleExecution(task, executionId, outcome, now, error)
+      const settled = settleExecution(task, executionId, outcome, now, error, implementationParkStatus(task))
       // The work leaves the worktree the moment the run settles — success parks
-      // the card in `ready_for_test` on its committed feature branch, and a
-      // failure or cancellation commits just the same so nothing lingers.
+      // the card in `testing` (or, for a test-free card, `tested`/`done`) on its
+      // committed feature branch, and a failure or cancellation commits just the
+      // same so nothing lingers.
       if (settled === task) return task
       const committed = this.commitSettledWork(settled, executionId, now)
       // A conflict-resolution run is not a review: its settle is what makes the
       // Host retry the merge the card was released for.
       if (execution?.kind === 'merge') return this.onMergeRunSettled(committed, outcome, error, now)
-      // A finished implementation run parks the card for a new review, so the
-      // release record of the review before it is dropped here.
-      return outcome === 'succeeded' ? this.clearRelease(committed) : committed
+      if (outcome !== 'succeeded') return committed
+      // A finished implementation run parks the card for a new test round, so
+      // the release record of the test round before it is dropped here.
+      const cleared = this.clearRelease(committed)
+      // A card that still needs its tests opens the WIP-free test run of the
+      // `testing` column right here: it continues the very conversation that
+      // just settled, and the column change already released the lane's WIP
+      // slot. A card the human marked as test-free skipped that column (parked
+      // in `tested`/`done`) and opens no run.
+      if (execution?.kind === undefined && cleared.status === 'testing' && cleared.pausedAt === undefined) {
+        const opened = startExecution(cleared, now, crypto.randomUUID(), undefined, 'test')
+        openedTest = { task: opened.task, execution: opened.execution }
+        return opened.task
+      }
+      if (cleared.status === 'done') movedToDone = true
+      return cleared
     })
+    if (movedToDone) {
+      const limited = enforceDoneLimit(this.document.tasks, this.maxDoneTasks, now)
+      this.document.tasks = [...limited.tasks]
+      this.releaseArchivedWorktrees(limited.archivedIds)
+    }
+    // Register the test run before the commit notification: the service's
+    // ledger subscription takes pending runs, and it runs during that
+    // notification.
+    if (openedTest !== undefined) this.pendingRuns.push(openedTest)
     this.commit()
   }
 
@@ -1574,7 +1606,7 @@ export class HostTaskLedger {
         // the record of what was planned. It stays editable only while the
         // card waits in a pre-execution column: a running task must not change
         // under its session, and a card that moved on to
-        // ready_for_test/done/failed keeps the content that ran. Execution
+        // testing/tested/done/failed keeps the content that ran. Execution
         // targets stay editable (they only affect future runs).
         if (hasContentPatch(action.patch) && !canEditTaskContent(task)) {
           throw new Error('task content is locked outside backlog and clarification')
@@ -1634,7 +1666,7 @@ export class HostTaskLedger {
         // transition skips the hooks.
         const actions = transition.actions ?? []
         // A move that merges the card back (the shipped machine:
-        // `ready_for_test → done`) is the human's merge release and runs the
+        // `tested → done`) is the human's merge release and runs the
         // whole release path — merge, automatic conflict resolution, failure →
         // `failed` — so a drag onto "Done" and the card's release button can
         // never behave differently. Every other move keeps the plain git hooks.
@@ -1709,7 +1741,7 @@ export class HostTaskLedger {
         // Every other column is untouched and surviving cards keep their order.
         // Archived cards give their worktrees to the poll's retry (they are the
         // only cards that no longer need a checkout). A queued release keeps the
-        // card in ready_for_test and therefore does not touch the Done column.
+        // card in tested and therefore does not touch the Done column.
         if (action.status === 'done' && released?.pending !== true) {
           const limited = enforceDoneLimit(moved, this.maxDoneTasks, now)
           this.document.tasks = [...limited.tasks]
@@ -1812,13 +1844,13 @@ export class HostTaskLedger {
         // button). Deliberately not a plain `move`: the release merges, may hand
         // a conflict to the card's agent, and ends in `done` or `failed`, none of
         // which the browser may decide. The state machine still owns whether this
-        // card may be accepted at all (the shipped machine: `ready_for_test →
-        // done`), so a custom machine can forbid it.
+        // card may be accepted at all (the shipped machine: `tested → done`),
+        // so a custom machine can forbid it.
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task.status === 'running' || hasOpenRun(task)) throw new Error('running task cannot be moved')
-        if (task.status !== 'ready_for_test') throw new Error('merge-requires-ready-for-test')
+        if (task.status !== 'tested') throw new Error('merge-requires-tested')
         const transition = this.machine.transition(task.status, 'done', 'manual')
         if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → done`)
         const released = (transition.git === false || !(transition.actions ?? []).includes('git.mergeBranch'))
@@ -1837,14 +1869,28 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task === undefined) throw new Error('task not found')
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
-        // The review controls exist in the review column only; the Host is the
-        // authority for that, not the browser's rendering. A card that left the
-        // column while the click was in flight is refused here.
-        if (task.status !== 'ready_for_test') throw new Error('review-action-requires-ready-for-test')
+        // The review controls exist in the testing/tested columns only; the
+        // Host is the authority for that, not the browser's rendering. A card
+        // that left the column while the click was in flight is refused here.
+        if (task.status !== 'testing' && task.status !== 'tested') throw new Error('review-action-requires-testing')
         review = [{
           taskId: task.id,
           intent: action.kind === 'review-start' ? 'start' : action.kind === 'review-stop' ? 'stop' : 'restart',
         }]
+        break
+      }
+      case 'start-test': {
+        const task = this.document.tasks.find(item => item.id === action.taskId)
+        if (task === undefined) throw new Error('task not found')
+        if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
+        // The manual start is the retry path of the `testing` column: the
+        // automatic run may have been cancelled or the card was parked there by
+        // hand. The card must not already own an open run.
+        if (task.status !== 'testing') throw new Error('test-requires-testing')
+        if (task.pausedAt !== undefined || hasOpenExecution(task)) throw new Error('task already has an open run')
+        const opened = startExecution(task, now, crypto.randomUUID(), initiator, 'test')
+        this.document.tasks = this.document.tasks.map(item => item.id === task.id ? opened.task : item)
+        run = { task: opened.task, execution: opened.execution }
         break
       }
       case 'set-schedule': {
@@ -2013,7 +2059,9 @@ export class HostTaskLedger {
       ? parsed.tasks.map((row) => {
           if (typeof row !== 'object' || row === null) return row
           const record = row as unknown as Record<string, unknown>
-          return record.status === 'todo' ? { ...record, status: 'clarification' } : row
+          if (record.status === 'todo') return { ...record, status: 'clarification' }
+          if (record.status === 'ready_for_test') return { ...record, status: 'tested' }
+          return row
         })
       : parsed.tasks
     if (tasks === undefined || !tasks.every((row): row is TaskRecord => isTaskRecord(row))) {

@@ -329,6 +329,16 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
         {!archived && releasePending === true && (
           <span className={css.cardRunningLabel} data-dsh-part="card-release-pending">{t('card.releasePending')}</span>
         )}
+        {task.skipTests === true && (
+          <span
+            className={css.cardMerge}
+            data-merge="no-tests"
+            data-dsh-part="card-no-tests"
+            title={t('exec.skipTestsHint')}
+          >
+            {t('card.skipTests')}
+          </span>
+        )}
         {merge !== undefined && (
           // The merge verdict, in the free bottom-left corner: is this result in
           // the base branch, still waiting, resolving a conflict, or failed? A

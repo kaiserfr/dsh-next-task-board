@@ -76,7 +76,10 @@ async function mergedCard(ledger: HostTaskLedger, id: string, title: string): Pr
   const dir = ledger.state().tasks.find(task => task.id === id)!.git!.worktreePath!
   // The reviewed work the park commits and the release merges.
   writeFileSync(join(dir, `${id}.txt`), `${id}\n`)
-  ledger.applyRequest(`park-${id}`, { kind: 'move', taskId: id, status: 'ready_for_test' })
+  ledger.applyRequest(`park-${id}`, { kind: 'move', taskId: id, status: 'testing' })
+  await ledger.awaitCard(id)
+  // The merge gate is `tested`; this card is parked by hand (no test run).
+  ledger.applyRequest(`tested-${id}`, { kind: 'move', taskId: id, status: 'tested' })
   await ledger.awaitCard(id)
   ledger.applyRequest(`release-${id}`, { kind: 'move', taskId: id, status: 'done' })
   await ledger.awaitCard(id)

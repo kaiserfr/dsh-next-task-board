@@ -16,32 +16,38 @@ Host refuses any `move` the machine does not list.
 ```mermaid
 stateDiagram-v2
     [*] --> backlog
-    state "columns: backlog | clarification | running | ready_for_test | failed | done" as columns
+    state "columns: backlog | clarification | running | testing | tested | failed | done" as columns
     backlog --> clarification: manual: openBranch, clarify
-    backlog --> ready_for_test: manual: commitBranch
+    backlog --> testing: manual: commitBranch
     backlog --> done: manual
     backlog --> failed: manual
     clarification --> running: manual: run
     clarification --> backlog: manual
-    clarification --> ready_for_test: manual: commitBranch
+    clarification --> testing: manual: commitBranch
     clarification --> done: manual
     clarification --> failed: manual
-    ready_for_test --> backlog: manual
-    ready_for_test --> clarification: manual
-    ready_for_test --> done: manual: mergeBranch
-    ready_for_test --> failed: manual
+    testing --> tested: manual
+    testing --> running: manual: run
+    testing --> clarification: manual
+    testing --> backlog: manual
+    testing --> failed: manual
+    tested --> done: manual: mergeBranch
+    tested --> running: manual: run
+    tested --> clarification: manual
+    tested --> backlog: manual
+    tested --> failed: manual
     done --> backlog: manual
     done --> clarification: manual
-    done --> ready_for_test: manual: commitBranch
+    done --> testing: manual: commitBranch
     done --> failed: manual
     failed --> backlog: manual
     failed --> clarification: manual
-    failed --> ready_for_test: manual: commitBranch
+    failed --> testing: manual: commitBranch
     failed --> done: manual
-    ready_for_test --> running: manual: run
     failed --> running: manual: run
     running --> done: manual
-    running --> ready_for_test, failed, clarification: runner
+    running --> testing, tested, done, failed, clarification: runner
+    testing --> tested, failed: runner
 ```
 
 *Regenerate after changing the machine:*
@@ -58,7 +64,7 @@ definition.
 | Trigger  | Who fires it                                              |
 |----------|-----------------------------------------------------------|
 | `manual` | A human: drag & drop on the board, or a chip in the task detail. |
-| `runner` | The execution runner settling a run (success → `ready_for_test`, failure → `failed`, cancel → `clarification`). |
+| `runner` | The execution runner settling a run (implementation success → `testing`, test-run success → `tested`, failure → `failed`, cancel → `clarification`). |
 | `cron`   | A scheduled run.                                          |
 
 `running` is the runner's own state: it carries `"drop": false` and only
@@ -126,19 +132,24 @@ every card — the column is where the agent asks before anything is implemented
 | `{ kind: "stamp", field: "doneAt" }` | Writes a timestamp into a task field.                    |
 
 In the shipped machine the git actions describe the agentic-programming flow:
-`backlog → clarification` opens the branch, every way into `ready_for_test` commits it
-(`backlog →`, `clarification →`, `done →` and `failed → ready_for_test` all carry
-`git.commitBranch`), and `ready_for_test → done` merges it back. A branch or
+`backlog → clarification` opens the branch, every way into `testing` commits it
+(`backlog →`, `clarification →`, `done →` and `failed → testing` all carry
+`git.commitBranch`), and `tested → done` merges it back. A branch or
 merge hook that refuses fails the move, so a card never claims a branch or a
 merge that did not happen; the commit hook is the deliberate exception — it
 records its failure on the card (below) instead of blocking the park, because
-uncommitted work must not keep a card out of the review column. The `run` action
+uncommitted work must not keep a card out of the test column. The `run` action
 sits on the way into `running`: `clarification → running` starts the card, and
-`ready_for_test → running` / `failed → running` pull a reviewed or failed card
-straight back onto the run column (the run continues the card's conversation, so
-a correction written there is already in context). `clarify`
-rides the same `backlog → clarification` transition as the branch hook — the
-card's clarification step.
+`testing → running` / `tested → running` / `failed → running` pull a card back
+onto the run column (the run continues the card's conversation, so a correction
+written there is already in context). `clarify` rides the same
+`backlog → clarification` transition as the branch hook — the card's
+clarification step. The **test phase** sits between the two: an implementation
+run parks the card in `testing` (WIP released), a second, **WIP-free run of the
+same conversation** tests it (`test` execution kind, prompt only tests and
+reports), and its settle parks the card in `tested`. A card marked *no tests*
+skips `testing` and lands in `tested` (with a branch) or `done` (without one).
+A human may also drag `testing → tested` to skip the test run.
 
 ## Commit policy: nothing stays uncommitted
 
@@ -155,15 +166,15 @@ holding uncommitted card work:
 * A card whose worktree is gone (removed by hand, or archived earlier) falls back
   to the main checkout and checks the branch out there, exactly like a card from
   before this feature.
-* **A run settles into `ready_for_test` only once its session has ended**: the
+* **A run settles into `testing`/`tested` only once its session has ended**: the
   runner reports `succeeded` after the newest `turn/end` solely when a fresh
   roster read no longer lists the session as running and its live inbox and jobs
   are quiet. An agent writing `FERTIG: <summary>` in its answer reports the work
   for the human; it does not move the card while the session is still running.
-* Reaching **`ready_for_test` commits**: the `git.commitBranch` action covers
-  every manual move into the column, and the runner's own settle
-  (`running → ready_for_test`) commits through the same git helper, because a
-  settle fires no configurable action. `git add -A` takes the whole worktree and
+* Reaching **`testing` commits**: the `git.commitBranch` action covers every
+  manual move into the column, and the runner's own settle (`running → testing`,
+  or `tested`/`done` for a test-free card) commits through the same git helper,
+  because a settle fires no configurable action. `git add -A` takes the whole worktree and
   commits it as `task: <title>`; a clean worktree produces no commit and leaves
   the previous `committedAt` in place.
 * **Every settle commits, not only a successful one**: a failed run and a
@@ -193,29 +204,31 @@ holding uncommitted card work:
 
 ## Review gate: the approval is bound to one commit
 
-Reaching `ready_for_test` does not only commit — it stamps the commit the branch
-now stands on as the card's `reviewedCommit`. That is the state a human reviews,
-and `git.mergeBranch` (the way into `done`) takes **exactly** it:
+Reaching `testing` does not only commit — it stamps the commit the branch now
+stands on as the card's `reviewedCommit`. That is the state a human tests, and
+`git.mergeBranch` (the way into `done`) takes **exactly** it. The test run does
+not change code, so the tested commit is the parked one; a red test report is
+corrected by sending the card back through `running` (rework):
 
 * The branch head must still equal `reviewedCommit`, and the worktree must be
   clean. A commit or an edit that lands after the park makes the approval stale:
-  the release is refused, the card stays in `ready_for_test`, and nothing lands on
+  the release is refused, the card stays in `tested`, and nothing lands on
   the base branch. Committing the leftover as a "safety net" is deliberately
   gone — that is precisely the unreviewed work the gate exists to stop.
 * The gate is checked *before* the branch is replayed onto the base (see *Merge
   release*): what goes onto the base is the commit the human saw, never one a
   replay already rewrote.
-* Re-parking the card rebinds the approval: every route back into
-  `ready_for_test` (`git.commitBranch` on the manual moves, and the runner's own
-  settle) stamps the new head. The ordinary way to review new work is therefore
-  `ready_for_test → clarification` (the rework return), correction in the card's chat,
+* Re-parking the card rebinds the approval: every route back into `testing`
+  (`git.commitBranch` on the manual moves, and the runner's own settle) stamps
+  the new head. The ordinary way to review new work is therefore
+  `tested → clarification` (the rework return), correction in the card's chat,
   the next run, and the next park.
 * A card **without** a `reviewedCommit` is refused too (fail closed): cards
   parked before this gate existed, and cards a custom machine routes into
-  `ready_for_test` without `git.commitBranch`. Moving such a card out of the
+  `testing` without `git.commitBranch`. Moving such a card out of the
   review column and back in stamps the commit; a custom machine should carry
-  `git.commitBranch` on every way into `ready_for_test` (it already should, for
-  the commit policy above).
+  `git.commitBranch` on every way into `testing` (it already should, for the
+  commit policy above).
 * The refusal is recorded on the card and the card goes to `failed` (see *Merge
   release*), so the reason stays readable until the card is sent back and
   re-released.
@@ -226,7 +239,7 @@ release.
 
 ## Merge release: how a card reaches `done`
 
-`ready_for_test → done` is not a status move that happens to run git: it is the
+`tested → done` is not a status move that happens to run git: it is the
 card's **merge release**, and both ways of asking for it — dragging the card on
 to Done and the *Release for merge* button in the card's review block (`approve-merge`
 Host action) — go through the same Host routine, so the two can never disagree.
@@ -311,7 +324,7 @@ card keeps working without a branch.
 A card that did not pass the review (or whose run failed) goes back to
 `clarification` when the human writes the correction into the card's **own
 conversation**: the Host watches those chats, fires the ordinary
-`ready_for_test → clarification` (or `failed → clarification`) move on that
+`testing → clarification` / `tested → clarification` (or `failed → clarification`) move on that
 human turn, and stamps the card (`reworkAt`,
 `reworkCount`). No note text is stored anywhere — the transcript *is* the note,
 and the send-back never starts a run. The card's next run is marked as the
@@ -337,8 +350,8 @@ containers:
 * **Lifecycle**: `docker compose up -d` runs **before the implementation run
   gets its prompt** (a clarification round needs no environment), and the
   published host ports are read back with `docker compose ps --format json` and
-  recorded on the card. The stack stays while the card is in `running` or
-  `ready_for_test` — the human tests against it — and is stopped with
+  recorded on the card. The stack stays while the card is in `running`, `testing` or
+  `tested` — the human tests against it — and is stopped with
   `docker compose down -v --remove-orphans` as soon as the card leaves those
   columns, is archived, is deleted, or has vanished from the ledger. A Host
   restart keeps the stacks (their record is in the ledger) and continues to
@@ -412,28 +425,30 @@ the board keeps working.
     { "status": "backlog" },
     { "status": "clarification" },
     { "status": "running", "drop": false },
-    { "status": "ready_for_test", "label": "Review" },
+    { "status": "testing", "label": "Testing" },
+    { "status": "tested", "label": "Tested" },
     { "status": "done" },
     { "status": "failed", "order": 9 }
   ],
   "transitions": [
     { "from": "backlog", "to": "clarification", "actions": ["git.openBranch", "clarify"] },
     { "from": "clarification", "to": "running", "actions": ["run"] },
-    { "from": "clarification", "to": "ready_for_test", "actions": ["git.commitBranch"] },
-    { "from": "ready_for_test", "to": "done", "actions": ["git.mergeBranch"] }
+    { "from": "clarification", "to": "testing", "actions": ["git.commitBranch"] },
+    { "from": "testing", "to": "tested", "trigger": "runner" },
+    { "from": "tested", "to": "done", "actions": ["git.mergeBranch"] }
   ]
 }
 ```
 
-* `states[].status` — one of `backlog`, `clarification`, `running`,
-  `ready_for_test`, `done`, `failed` (the ledger's closed vocabulary). `label` overrides the
+* `states[].status` — one of `backlog`, `clarification`, `running`, `testing`,
+  `tested`, `done`, `failed` (the ledger's closed vocabulary). `label` overrides the
   column title, `order` moves the column, `drop: false` makes it a column that
   never accepts a card.
 * `transitions[]` — `from`/`to` plus optional `trigger`, `actions`, `git`
   (`false` skips the git hooks of that transition). Anything not listed is
   refused. A custom machine should put `git.commitBranch` on its own ways into
-  `ready_for_test`: stored configurations are left as they are, and only the
-  runner's settle commits independently of the configured transitions.
+  `testing`: stored configurations are left as they are, and only the runner's
+  settle commits independently of the configured transitions.
 * `initial` — where new cards land; required when `backlog` is not a column.
 
 Task environments are not part of the machine: the stack is tied to the *run*

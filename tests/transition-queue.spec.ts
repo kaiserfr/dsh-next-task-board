@@ -81,20 +81,20 @@ describe('transition queue', () => {
     await vi.waitFor(() => { expect(requests).toHaveLength(1) })
 
     controller.moveTask('task-a', 'clarification')
-    controller.moveTask('task-a', 'ready_for_test')
+    controller.moveTask('task-a', 'testing')
     expect(controller.getSnapshot().pendingTransitions).toEqual([
-      expect.objectContaining({ taskId: 'task-a', from: 'backlog', to: 'ready_for_test' }),
+      expect.objectContaining({ taskId: 'task-a', from: 'backlog', to: 'testing' }),
     ])
     // Only the update is on the wire; the two moves coalesced into one intent.
     expect(requests).toHaveLength(1)
 
     requests[0]!.resolve(snapshot(2, [{ ...initial, title: 'B', updatedAt: 2 }]))
     await vi.waitFor(() => { expect(requests).toHaveLength(2) })
-    expect(requests[1]!.action).toEqual({ kind: 'move', taskId: 'task-a', status: 'ready_for_test' })
+    expect(requests[1]!.action).toEqual({ kind: 'move', taskId: 'task-a', status: 'testing' })
 
-    requests[1]!.resolve(snapshot(3, [{ ...initial, title: 'B', status: 'ready_for_test', updatedAt: 3 }]))
+    requests[1]!.resolve(snapshot(3, [{ ...initial, title: 'B', status: 'testing', updatedAt: 3 }]))
     await vi.waitFor(() => {
-      expect(controller.getSnapshot().tasks[0]?.status).toBe('ready_for_test')
+      expect(controller.getSnapshot().tasks[0]?.status).toBe('testing')
       expect(controller.getSnapshot().pendingTransitions).toBeUndefined()
     })
     controller.dispose()
@@ -103,7 +103,7 @@ describe('transition queue', () => {
   it('refuses a hard-blocked move instead of queueing it', async () => {
     const initial = task({ status: 'running', executions: [openRun()] })
     const { controller, action } = await makeController(initial)
-    controller.moveTask('task-a', 'ready_for_test')
+    controller.moveTask('task-a', 'testing')
     expect(action).not.toHaveBeenCalled()
     expect(controller.getSnapshot().pendingTransitions).toBeUndefined()
     expect(controller.getSnapshot().transitionErrors?.['task-a']).toMatchObject({ code: 'running' })
@@ -193,7 +193,7 @@ describe('transition queue', () => {
     const { controller, requests } = await makeController(initial)
     void controller.updateTask('task-a', { title: 'B' })
     await vi.waitFor(() => { expect(requests).toHaveLength(1) })
-    controller.moveTask('task-a', 'ready_for_test')
+    controller.moveTask('task-a', 'testing')
 
     // Someone else moves the card to Clarification while it waits.
     requests[0]!.resolve(snapshot(2, [{ ...initial, title: 'B', status: 'clarification', updatedAt: 2 }]))
@@ -201,7 +201,7 @@ describe('transition queue', () => {
       expect(controller.getSnapshot().transitionErrors?.['task-a']).toMatchObject({
         code: 'source-changed',
         from: 'backlog',
-        to: 'ready_for_test',
+        to: 'testing',
       })
     })
     expect(requests).toHaveLength(1)

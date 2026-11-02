@@ -17,7 +17,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
-import type { TaskRecord } from '../../core/tasks.ts'
+import { openExecution, type TaskRecord } from '../../core/tasks.ts'
 import { mergeStateOf, type MergeState } from '../../core/merge.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import css from '../board.module.css'
@@ -87,12 +87,20 @@ export function ReviewSection({ controller, task, timeZone }: {
     setDiff(result.ok ? { text: result.text ?? '' } : { error: result.error ?? t('review.unknownError') })
   }, [controller, task.id])
 
-  // The environment controls and the release exist for the review column only.
-  // A card whose release failed keeps showing the merge verdict and the reason —
-  // that is what the human writes the correction about — but nothing that the
-  // Host would refuse outside the column.
-  const inReview = task.status === 'ready_for_test' && task.archivedAt === undefined
+  // The environment controls and the release exist for the testing/tested
+  // columns only. A card whose release failed keeps showing the merge verdict
+  // and the reason — that is what the human writes the correction about — but
+  // nothing that the Host would refuse outside the columns.
+  const inReview = (task.status === 'testing' || task.status === 'tested') && task.archivedAt === undefined
   if (!inReview && !(task.status === 'failed' && task.merge !== undefined)) return null
+  // The merge release exists in the `tested` column only: a card still in
+  // `testing` has not passed the test phase yet (the test run may even be
+  // running), so releasing it would merge untested work.
+  const releasable = task.status === 'tested'
+  // The manual test start is the retry path of the `testing` column. The Host
+  // refuses it while a run is open; the control says so through its disabled
+  // state instead of pretending a second run could start.
+  const testRunOpen = openExecution(task) !== undefined
 
   const git = task.git
   const merge = mergeStateOf(task)
@@ -135,7 +143,21 @@ export function ReviewSection({ controller, task, timeZone }: {
           {t('review.releasePending')}
         </p>
       )}
-      {inReview && (
+      {task.status === 'testing' && (
+        <div className={css.moveRow}>
+          <button
+            type="button"
+            data-action="start-tests"
+            className={css.primaryButton}
+            disabled={busy || testRunOpen}
+            title={t('review.startTestsHint')}
+            onClick={() => { void controller.startTest(task.id) }}
+          >
+            {t('review.startTests')}
+          </button>
+        </div>
+      )}
+      {releasable && (
         <div className={css.moveRow}>
           <button
             type="button"

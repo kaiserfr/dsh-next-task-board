@@ -112,10 +112,10 @@ describe('transitions are the drag & drop rule', () => {
     // straight onto Done, where the Host cancels the open run and stops the
     // session ("move to done is always allowed").
     expect(defaultMachine.targets('running')).toEqual(['done'])
-    expect(defaultMachine.targets('running', 'runner')).toEqual(['ready_for_test', 'failed', 'clarification'])
+    expect(defaultMachine.targets('running', 'runner')).toEqual(['testing', 'tested', 'done', 'failed', 'clarification'])
     expect(defaultMachine.canTransition('running', 'done')).toBe(true)
     expect(defaultMachine.actionsFor('running', 'done')).toEqual([])
-    expect(defaultMachine.canTransition('running', 'ready_for_test', 'runner')).toBe(true)
+    expect(defaultMachine.canTransition('running', 'testing', 'runner')).toBe(true)
     expect(defaultMachine.canTransition('running', 'clarification', 'runner')).toBe(true)
     // The clarification column and the two corrected columns reach the run
     // column: a card in `clarification` may be dropped onto "In progress" (the
@@ -123,7 +123,8 @@ describe('transitions are the drag & drop rule', () => {
     // be pulled straight back onto it. A card in `backlog` may not — that drag
     // has no transition at all.
     expect(defaultMachine.actionsFor('clarification', 'running')).toEqual(['run'])
-    expect(defaultMachine.actionsFor('ready_for_test', 'running')).toEqual(['run'])
+    expect(defaultMachine.actionsFor('testing', 'running')).toEqual(['run'])
+    expect(defaultMachine.actionsFor('tested', 'running')).toEqual(['run'])
     expect(defaultMachine.actionsFor('failed', 'running')).toEqual(['run'])
     expect(defaultMachine.canTransition('backlog', 'running')).toBe(false)
     expect(defaultMachine.targets('backlog')).not.toContain('running')
@@ -144,11 +145,11 @@ describe('actions hang off transitions', () => {
     expect(defaultMachine.actionsFor('clarification', 'running')).toEqual(['run'])
     // Every manual way into the review column commits, so no run's work waits
     // uncommitted while the card is reviewed.
-    expect(defaultMachine.actionsFor('clarification', 'ready_for_test')).toEqual(['git.commitBranch'])
-    expect(defaultMachine.actionsFor('backlog', 'ready_for_test')).toEqual(['git.commitBranch'])
-    expect(defaultMachine.actionsFor('done', 'ready_for_test')).toEqual(['git.commitBranch'])
-    expect(defaultMachine.actionsFor('failed', 'ready_for_test')).toEqual(['git.commitBranch'])
-    expect(defaultMachine.actionsFor('ready_for_test', 'done')).toEqual(['git.mergeBranch'])
+    expect(defaultMachine.actionsFor('clarification', 'testing')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('backlog', 'testing')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('done', 'testing')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('failed', 'testing')).toEqual(['git.commitBranch'])
+    expect(defaultMachine.actionsFor('tested', 'done')).toEqual(['git.mergeBranch'])
     expect(defaultMachine.actionsFor('clarification', 'done')).toEqual([])
   })
 
@@ -186,10 +187,11 @@ describe('diagram', () => {
     for (const status of ALL_STATUSES) expect(diagram).toContain(status)
     expect(diagram).toContain('backlog --> clarification: manual: openBranch, clarify')
     expect(diagram).toContain('clarification --> running: manual: run')
-    expect(diagram).toContain('clarification --> ready_for_test: manual: commitBranch')
-    expect(diagram).toContain('ready_for_test --> done: manual: mergeBranch')
+    expect(diagram).toContain('clarification --> testing: manual: commitBranch')
+    expect(diagram).toContain('tested --> done: manual: mergeBranch')
     expect(diagram).toContain('running --> done: manual')
-    expect(diagram).toContain('running --> ready_for_test, failed, clarification: runner')
+    expect(diagram).toContain('running --> testing, tested, done, failed, clarification: runner')
+    expect(diagram).toContain('testing --> tested, failed: runner')
   })
 })
 

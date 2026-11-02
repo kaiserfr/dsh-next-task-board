@@ -67,6 +67,7 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
   if (record.mode !== undefined && typeof record.mode !== 'string') return false
   if (record.permission !== undefined && typeof record.permission !== 'string') return false
   if (record.reuseSession !== undefined && typeof record.reuseSession !== 'boolean') return false
+  if (record.skipTests !== undefined && typeof record.skipTests !== 'boolean') return false
   if (record.git !== undefined && (typeof record.git !== 'object' || record.git === null)) return false
   if (record.compose !== undefined && (typeof record.compose !== 'object' || record.compose === null)) return false
   if (record.review !== undefined && (typeof record.review !== 'object' || record.review === null)) return false
@@ -96,11 +97,14 @@ export function isTaskRecord(value: unknown): value is TaskRecord {
 /**
  * Normalize a persisted status back into the closed status union. Legacy rows
  * from the board's former `todo` column migrate to `clarification`, whose role
- * they took over; an unknown status from a future version lands in the neutral
- * first column instead of dropping the row.
+ * they took over; the retired `ready_for_test` column becomes `tested` (a card
+ * parked there had already passed the test phase under the old one-column
+ * flow), and an unknown status from a future version lands in the neutral first
+ * column instead of dropping the row.
  */
 function normalizeStatus(status: unknown): TaskStatus {
   if (status === 'todo') return 'clarification'
+  if (status === 'ready_for_test') return 'tested'
   return isTaskStatus(status) ? status : 'backlog'
 }
 
@@ -337,6 +341,7 @@ function normalizeReview(value: unknown): TaskReview | undefined {
       : undefined
     task.permission = isTaskPermission(row.permission) ? row.permission as TaskPermission : undefined
     task.reuseSession = row.reuseSession === true ? true : undefined
+    task.skipTests = row.skipTests === true ? true : undefined
     task.freeze = normalizeFreeze(row.freeze)
     task.handover = normalizeHandover(row.handover)
     task.git = normalizeGit(row.git)
@@ -375,7 +380,9 @@ function normalizeReview(value: unknown): TaskReview | undefined {
       const rework = execution.rework === true ? true : undefined
       const kind = execution.kind === 'clarify'
         ? 'clarify' as const
-        : execution.kind === 'merge' ? 'merge' as const : undefined
+        : execution.kind === 'merge'
+          ? 'merge' as const
+          : execution.kind === 'test' ? 'test' as const : undefined
       if (rework === execution.rework && kind === execution.kind) return execution
       return { ...execution, rework, kind }
     })

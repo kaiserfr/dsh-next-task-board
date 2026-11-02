@@ -76,7 +76,7 @@ function harness(options: HarnessOptions = {}) {
     id: 'card',
     input: { title: 'Card', description: '', prompt: 'work', workspaceId: 'ws-1' },
   })
-  ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+  ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'testing' })
 
   // A record with a running stamp means "the board started this", also when it
   // was written by an earlier Host process: that is what the service seeds at
@@ -150,7 +150,7 @@ describe('review environments on the Host', () => {
     const { service, ledger } = harness()
     ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' })
     await expect(service.apply('late', { kind: 'review-start', taskId: 'card' }))
-      .rejects.toThrow(/review-action-requires-ready-for-test/)
+      .rejects.toThrow(/review-action-requires-testing/)
     service.dispose()
   })
 
@@ -222,7 +222,7 @@ describe('review environments on the Host', () => {
     await poll()
     expect(runner.calls).toEqual([])
 
-    ledger.applyRequest('park-again', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    ledger.applyRequest('park-again', { kind: 'move', taskId: 'card', status: 'testing' })
     await service.apply('start', { kind: 'review-start', taskId: 'card' })
     await flush()
     expect(runner.calls).toHaveLength(1)
@@ -343,7 +343,7 @@ describe('review plans for cards without git state', () => {
       id: 'card',
       input: { title: 'Card', description: '', prompt: 'work', workspaceId: 'ws-1' },
     })
-    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'testing' })
     const workflow = new ReviewWorkflow({
       compose: { up: async () => undefined, down: async () => {} },
       workspaceRegistry: registry,

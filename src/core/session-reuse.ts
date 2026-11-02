@@ -10,9 +10,11 @@ import type { ExecutionRecord, TaskRecord } from './tasks.ts'
  * to mint a fresh conversation. Two sources, in this order:
  *
  * 1. the newest SETTLED execution's session, when the task opted in
- *    (`reuseSession === true`) or this run works off a rework
- *    (`options.rework`: the human's correction was typed into that
- *    conversation, so a fresh session would lose it);
+ *    (`reuseSession === true`), this run works off a rework (`options.rework`:
+ *    the human's correction was typed into that conversation, so a fresh
+ *    session would lose it), or this is the card's test run (`options.test`:
+ *    the tests belong to the implementation the agent just finished, so the
+ *    run continues that very conversation);
  * 2. the card's clarification session (`clarificationSessionId`), always: the
  *    questions were settled there with the human, so the run that starts
  *    the work continues exactly that conversation instead of asking again in a
@@ -27,16 +29,17 @@ import type { ExecutionRecord, TaskRecord } from './tasks.ts'
  * @param task - the task about to run.
  * @param idleSessionIds - ids the last roster saw as present and not running;
  *   undefined when that roster is unknown.
- * @param options - `rework: true` for a run that works off a send-back.
+ * @param options - `rework: true` for a run that works off a send-back,
+ *   `test: true` for the card's test run.
  * @returns the session id to continue in, or undefined for a fresh session.
  */
 export function reusableSessionId(
   task: TaskRecord,
   idleSessionIds: ReadonlySet<string> | undefined,
-  options: { rework?: boolean } = {},
+  options: { rework?: boolean; test?: boolean } = {},
 ): string | undefined {
   if (idleSessionIds === undefined) return undefined
-  if (task.reuseSession === true || options.rework === true) {
+  if (task.reuseSession === true || options.rework === true || options.test === true) {
     let last: ExecutionRecord | undefined
     for (let index = task.executions.length - 1; index >= 0; index -= 1) {
       const candidate = task.executions[index]

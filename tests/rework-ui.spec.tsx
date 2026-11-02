@@ -26,7 +26,7 @@ function card(overrides: Partial<TaskRecord> = {}): TaskRecord {
     title: 'Login flow',
     description: '',
     prompt: 'open the page',
-    status: 'ready_for_test',
+    status: 'tested',
     createdAt: 0,
     updatedAt: 0,
     executions: [{ id: 'e1', sessionId: 'session-run', startedAt: 0, endedAt: 1, result: 'succeeded', error: undefined }],
@@ -62,7 +62,7 @@ function render(element: React.ReactElement): HTMLElement {
 }
 
 describe('rework after a failed test', () => {
-  it('offers no correction note field on a card parked in ready_for_test', () => {
+  it('offers no correction note field on a card parked in tested', () => {
     const container = render(<TaskDetail controller={controller()} task={card()} />)
     expect(container.querySelector('[data-dsh-part="rework"]')).toBeNull()
     expect(container.querySelector('textarea')).toBeNull()

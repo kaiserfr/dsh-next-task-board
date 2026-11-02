@@ -110,7 +110,7 @@ export declare class GitWorkflow {
     private workDir;
     /**
      * Commit what the worktree holds onto the card's feature branch, stamping
-     * `committedAt`. Called whenever a card reaches `ready_for_test` — the
+     * `committedAt`. Called whenever a card reaches `testing` — the
      * configurable `git.commitBranch` action and the runner settling a run there
      * — so no run's work is ever left uncommitted in the worktree, no matter
      * whether the run succeeded, failed or was cancelled.
@@ -138,7 +138,7 @@ export declare class GitWorkflow {
     /**
      * Merge the card's feature branch back into the base branch — but only the
      * exact commit the human reviewed. Called by the release path (the
-     * `ready_for_test` → `done` move and the card's release action); an
+     * `tested` → `done` move and the card's release action); an
      * already-merged branch is left alone.
      *
      * Before anything is merged, the branch is **replayed onto the base as it

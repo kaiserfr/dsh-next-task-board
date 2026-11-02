@@ -159,6 +159,34 @@ describe('HostTaskLedger', () => {
     ledger.dispose()
   })
 
+  it('migrates the retired ready_for_test column to tested', () => {
+    const root = tempRoot()
+    const legacy = { ...task('legacy-review'), status: 'ready_for_test' }
+    writeFileSync(join(root, 'ledger-v2.json'), JSON.stringify({
+      schemaVersion: 3,
+      revision: 1,
+      tasks: [legacy],
+      scheduler: { timeZone: 'UTC', ledgerId: 'legacy-review' },
+    }))
+    const ledger = new HostTaskLedger(root, () => NOW)
+    expect(ledger.state().tasks[0].status).toBe('tested')
+    ledger.dispose()
+  })
+
+  it('migrates a v2 document with a ready_for_test row to tested too', () => {
+    const root = tempRoot()
+    const legacy = { ...task('legacy-review-v2'), status: 'ready_for_test' }
+    writeFileSync(join(root, 'ledger-v2.json'), JSON.stringify({
+      schemaVersion: 2,
+      revision: 1,
+      tasks: [legacy],
+      scheduler: { timeZone: 'UTC', ledgerId: 'legacy-review-v2' },
+    }))
+    const ledger = new HostTaskLedger(root, () => NOW)
+    expect(ledger.state().tasks[0].status).toBe('tested')
+    ledger.dispose()
+  })
+
   it('migrates a v2 document with a todo row to clarification too', () => {
     const root = tempRoot()
     const legacy = { ...task('legacy-v2'), status: 'todo' }
@@ -837,12 +865,12 @@ describe('HostTaskLedger state machine', () => {
   })
 })
 
-describe('HostTaskLedger rework (ready_for_test/failed → clarification is stamped)', () => {
-  /** A card parked in `ready_for_test`, as a finished run leaves it. */
+describe('HostTaskLedger rework (testing/failed → clarification is stamped)', () => {
+  /** A card parked in `testing`, as a finished run leaves it. */
   function parked(): HostTaskLedger {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'open the page' } })
-    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'testing' })
     return ledger
   }
 
@@ -863,7 +891,7 @@ describe('HostTaskLedger rework (ready_for_test/failed → clarification is stam
     const ledger = parked()
     ledger.applyRequest('fail', { kind: 'move', taskId: 'card', status: 'failed' })
     expect(ledger.applyRequest('back', { kind: 'move', taskId: 'card', status: 'clarification' }).state.tasks[0].reworkCount).toBe(1)
-    ledger.applyRequest('park-again', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    ledger.applyRequest('park-again', { kind: 'move', taskId: 'card', status: 'testing' })
     const second = ledger.applyRequest('back-again', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(second.state.tasks[0].reworkCount).toBe(2)
     ledger.dispose()
@@ -871,7 +899,8 @@ describe('HostTaskLedger rework (ready_for_test/failed → clarification is stam
 
   it('does not stamp a move that is not a send-back', () => {
     const ledger = parked()
-    // Review → done is an acceptance, and clarification → backlog is a plain move.
+    // Tested → done is an acceptance, and clarification → backlog is a plain move.
+    ledger.applyRequest('skip-test', { kind: 'move', taskId: 'card', status: 'tested' })
     expect(ledger.applyRequest('accept', { kind: 'move', taskId: 'card', status: 'done' }).state.tasks[0].reworkAt).toBeUndefined()
     ledger.applyRequest('backlog', { kind: 'move', taskId: 'card', status: 'backlog' })
     expect(ledger.state().tasks[0].reworkAt).toBeUndefined()
@@ -884,7 +913,7 @@ describe('HostTaskLedger rework (ready_for_test/failed → clarification is stam
     let clock = NOW
     const ledger = new HostTaskLedger(tempRoot(), () => clock)
     ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'open the page' } })
-    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'ready_for_test' })
+    ledger.applyRequest('park', { kind: 'move', taskId: 'card', status: 'testing' })
     clock += 10
     ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
     clock += 10
@@ -894,6 +923,11 @@ describe('HostTaskLedger rework (ready_for_test/failed → clarification is stam
     // Settle it and park the card again: the marker is spent, the stamp stays.
     clock += 10
     ledger.settle('card', started.run!.execution.id, 'succeeded', undefined)
+    // The implementation park opened the WIP-free test run; settling it parks
+    // the card in `tested`, from which the next run can be pulled on to the run
+    // column again.
+    const testRun = ledger.state().tasks[0]!.executions.at(-1)!
+    ledger.settle('card', testRun.id, 'succeeded', undefined)
     const plain = ledger.applyRequest('run-again', { kind: 'run', taskId: 'card' })
     expect(plain.run?.execution.rework).toBeUndefined()
     expect(plain.run?.task.reworkAt).toBe(NOW + 10)
@@ -959,10 +993,10 @@ describe('HostTaskLedger group move (move-many)', () => {
   it('moves every card in one write and keeps the cards in their order', () => {
     const ledger = seeded(['a', 'b', 'c'])
     const before = ledger.state().revision
-    const result = ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['c', 'a'], status: 'ready_for_test' })
+    const result = ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['c', 'a'], status: 'testing' })
     // Untouched card stays put; the moved pair keeps its ledger order (a, c).
     expect(result.state.tasks.map(task => task.id)).toEqual(['a', 'b', 'c'])
-    expect(result.state.tasks.filter(task => task.status === 'ready_for_test').map(task => task.id)).toEqual(['a', 'c'])
+    expect(result.state.tasks.filter(task => task.status === 'testing').map(task => task.id)).toEqual(['a', 'c'])
     // One revision bump for the whole batch, not one per card.
     expect(result.state.revision).toBe(before + 1)
     ledger.dispose()
@@ -972,16 +1006,16 @@ describe('HostTaskLedger group move (move-many)', () => {
     const ledger = seeded(['a', 'b'])
     ledger.applyRequest('start-a', { kind: 'run', taskId: 'a' })
     const before = statusOf(ledger)
-    expect(() => ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['b', 'a'], status: 'ready_for_test' }))
+    expect(() => ledger.applyRequest('batch', { kind: 'move-many', taskIds: ['b', 'a'], status: 'testing' }))
       .toThrow('running task cannot be moved')
     expect(statusOf(ledger)).toEqual(before)
     ledger.dispose()
   })
 
-  it('refuses to drag a running card into ready_for_test, so only the session end parks it', () => {
+  it('refuses to drag a running card into testing, so only the session end parks it', () => {
     const ledger = seeded(['a'])
     ledger.applyRequest('start-a', { kind: 'run', taskId: 'a' })
-    expect(() => ledger.applyRequest('park-a', { kind: 'move', taskId: 'a', status: 'ready_for_test' }))
+    expect(() => ledger.applyRequest('park-a', { kind: 'move', taskId: 'a', status: 'testing' }))
       .toThrow('running task cannot be moved')
     expect(statusOf(ledger)).toEqual([['a', 'running']])
     // The execution still owns the card: the Host settle is the only way out.
@@ -1033,9 +1067,9 @@ describe('HostTaskLedger group move (move-many)', () => {
   it('rejects an unknown card and an archived card without moving the rest', () => {
     const ledger = seeded(['a', 'b'])
     ledger.applyRequest('archive-b', { kind: 'archive', taskId: 'b' })
-    expect(() => ledger.applyRequest('batch-unknown', { kind: 'move-many', taskIds: ['a', 'nope'], status: 'ready_for_test' }))
+    expect(() => ledger.applyRequest('batch-unknown', { kind: 'move-many', taskIds: ['a', 'nope'], status: 'testing' }))
       .toThrow('task not found: nope')
-    expect(() => ledger.applyRequest('batch-archived', { kind: 'move-many', taskIds: ['a', 'b'], status: 'ready_for_test' }))
+    expect(() => ledger.applyRequest('batch-archived', { kind: 'move-many', taskIds: ['a', 'b'], status: 'testing' }))
       .toThrow('archived task is read-only')
     expect(statusOf(ledger)).toEqual([['a', 'backlog'], ['b', 'backlog']])
     ledger.dispose()

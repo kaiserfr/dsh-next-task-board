@@ -91,7 +91,7 @@ describe('enforceDoneLimit', () => {
       makeTask('old', 'done', 2),
       makeTask('failed', 'failed', 3),
       makeTask('fresh', 'done', 4),
-      makeTask('review', 'ready_for_test', 5),
+      makeTask('review', 'testing', 5),
     ]
     const result = enforceDoneLimit(tasks, 1, 100)
     expect(result.archivedIds).toEqual(['old'])
@@ -125,7 +125,7 @@ describe('enforceDoneLimit', () => {
 
 describe('withStatus done stamp', () => {
   it('stamps doneAt on entering done, clears it on leaving, and keeps it on a same-status move', () => {
-    const task = makeTask('a', 'ready_for_test', 10)
+    const task = makeTask('a', 'testing', 10)
     const done = withStatus(task, 'done', 20)
     expect(done.doneAt).toBe(20)
     const again = withStatus(done, 'done', 30)

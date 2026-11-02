@@ -243,7 +243,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.setConfiguration(false, false)
     await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
     expect(ledger.state().tasks[0].executions[0].result).toBe('succeeded')
-    expect(ledger.state().tasks[0].status).toBe('ready_for_test')
+    expect(ledger.state().tasks[0].status).toBe('testing')
     // One history probe plus the live inbox/job baseline that confirms the
     // session has nothing left to run.
     expect(stream.mock.calls.map(call => (call[0] as GatewayRequest).method)).toEqual(['follow', 'control'])
@@ -445,6 +445,11 @@ describe('TaskBoardHostService rework continuation', () => {
     ledger.attachSession('card', first!.execution.id, 'session-first')
     clock += 1_000
     ledger.settle('card', first!.execution.id, 'succeeded', undefined)
+    // The park opened the WIP-free test run; close it so the card is settled
+    // before the human sends it back.
+    const testRun = ledger.state().tasks[0]!.executions.at(-1)!
+    ledger.attachSession('card', testRun.id, 'session-first')
+    ledger.settle('card', testRun.id, 'succeeded', undefined)
     ledger.applyRequest('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
     expect(ledger.state().tasks[0].reworkAt).toBe(now + 1_000)
     expect(ledger.state().tasks[0].reuseSession).toBeUndefined()
@@ -580,10 +585,10 @@ describe('TaskBoardHostService poll heartbeat', () => {
     expect(ledger.state().tasks[0].executions[0].result).toBe('succeeded')
     // The poll roster plus the fresh roster read that confirms the park.
     expect(list).toHaveBeenCalledTimes(2)
-    // `follow` probes the run's history head, `control` confirms the session is
-    // at rest, and the trailing `follow` is the rework watch looking at the card
-    // that this very poll parked in `ready_for_test`.
-    expect(stream.mock.calls.map(call => (call[0] as GatewayRequest).method)).toEqual(['follow', 'control', 'follow'])
+    // `follow` probes the run's history head and `control` confirms the session
+    // is at rest. The rework watch does not read the card yet: the park opened
+    // the WIP-free test run, and a card mid-run is never watched.
+    expect(stream.mock.calls.map(call => (call[0] as GatewayRequest).method)).toEqual(['follow', 'control'])
     expect(page).toHaveBeenCalledOnce()
     service.dispose()
   })
@@ -842,8 +847,11 @@ describe('TaskBoardHostService lane occupancy', () => {
 
     settle(ledger, 'busy')
     await flush()
+    // The settle parks the busy card in `testing` and immediately opens its
+    // WIP-free test run in the same conversation; the queued card starts too.
     expect(created()).toBe(1)
-    expect(prompts).toHaveLength(1)
+    expect(prompts).toHaveLength(2)
+    expect(prompts[1]?.text).toContain('testen')
     service.dispose()
   })
 
@@ -899,7 +907,7 @@ describe('TaskBoardHostService lane occupancy', () => {
 /**
  * The run's own completion report, end to end through the service. The report
  * is a note for the human: until the session itself has ended the card stays in
- * In progress, and only the session's end settles it into Ready for test.
+ * In progress, and only the session's end settles it into the test column.
  */
 describe('TaskBoardHostService completion report', () => {
   it("leaves the card in In progress on the agent's FERTIG line while the session still runs", async () => {
@@ -923,6 +931,8 @@ describe('TaskBoardHostService completion report', () => {
     const { gateway } = makeGateway(request => {
       if (request.namespace !== 'session') throw new Error('unexpected namespace')
       if (request.method === 'list') return { items: [{ sessionId: 'session-card', running: sessionRunning }] }
+      // The park opens the WIP-free test run; it continues the same session.
+      if (request.method === 'prompt') return { accepted: true }
       throw new Error('unexpected gateway call: ' + request.method)
     }, sessionStream({ follow }))
     const service = new TaskBoardHostService(gateway, { ledger, power: new PowerInhibitor({ platform: 'linux' }), now: () => now })
@@ -939,7 +949,7 @@ describe('TaskBoardHostService completion report', () => {
     sessionRunning = false
     await poll()
     card = ledger.state().tasks.find(task => task.id === 'card')!
-    expect(card.status).toBe('ready_for_test')
+    expect(card.status).toBe('testing')
     expect(card.executions[0]?.result).toBe('succeeded')
     expect(card.executions[0]?.endedAt).toBe(now)
     service.dispose()
@@ -954,6 +964,11 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
     const run = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
     ledger.attachSession('card', run!.execution.id, 'session-card')
     ledger.settle('card', run!.execution.id, 'succeeded', undefined)
+    // The park opened the WIP-free test run; settle it so the card stands at
+    // the merge gate (`tested`) with no open execution.
+    const testRun = ledger.state().tasks[0]!.executions.at(-1)!
+    ledger.attachSession('card', testRun.id, 'session-card')
+    ledger.settle('card', testRun.id, 'succeeded', undefined)
     return ledger
   }
 
@@ -962,6 +977,7 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
     const { gateway, stream } = makeGateway(request => {
       if (request.namespace !== 'session') throw new Error('unexpected namespace')
       if (request.method === 'list') return { items: [{ sessionId: 'session-card', running: false, updatedAt }] }
+      if (request.method === 'prompt') return { accepted: true }
       throw new Error('unexpected gateway call: ' + request.method)
     }, sessionStream({ follow }))
     const instance = new TaskBoardHostService(gateway, {
@@ -1007,7 +1023,7 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
 
     await poll(instance)
 
-    expect(ledger.state().tasks[0].status).toBe('ready_for_test')
+    expect(ledger.state().tasks[0].status).toBe('tested')
     expect(ledger.state().tasks[0].reworkAt).toBeUndefined()
     instance.dispose()
   })
@@ -1026,7 +1042,7 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
     await poll(instance)
     await poll(instance)
 
-    expect(ledger.state().tasks[0].status).toBe('ready_for_test')
+    expect(ledger.state().tasks[0].status).toBe('tested')
     expect(stream).toHaveBeenCalledOnce()
     instance.dispose()
   })
@@ -1046,7 +1062,7 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
 
     // Unreadable history is never evidence of "no human turn": the card stays.
     await poll(instance)
-    expect(ledger.state().tasks[0].status).toBe('ready_for_test')
+    expect(ledger.state().tasks[0].status).toBe('tested')
     readable = true
     await poll(instance)
     expect(ledger.state().tasks[0].status).toBe('clarification')
@@ -1079,6 +1095,11 @@ describe('TaskBoardHostService session/card synchronization', () => {
     const run = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
     ledger.attachSession('card', run!.execution.id, 'session-card')
     ledger.settle('card', run!.execution.id, 'succeeded', undefined)
+    // The park opened the WIP-free test run; settle it too so the card stands
+    // at the merge gate with no open execution.
+    const testRun = ledger.state().tasks[0]!.executions.at(-1)!
+    ledger.attachSession('card', testRun.id, 'session-card')
+    ledger.settle('card', testRun.id, 'succeeded', undefined)
     return ledger
   }
 
@@ -1093,6 +1114,8 @@ describe('TaskBoardHostService session/card synchronization', () => {
       if (request.namespace !== 'session') throw new Error('unexpected namespace')
       if (request.method === 'list') return { items: [roster()] }
       if (request.method === 'projections') return { values: {} }
+      // The park opens the WIP-free test run; it continues the same session.
+      if (request.method === 'prompt') return { accepted: true }
       throw new Error('unexpected gateway call: ' + request.method)
     }, sessionStream({ follow }))
     return new TaskBoardHostService(gateway, {
@@ -1131,7 +1154,7 @@ describe('TaskBoardHostService session/card synchronization', () => {
     await sync(instance)
 
     const card = ledger.state().tasks[0]!
-    expect(card.status).toBe('ready_for_test')
+    expect(card.status).toBe('testing')
     expect(card.executions[0]?.result).toBe('succeeded')
     instance.dispose()
   })
@@ -1151,11 +1174,14 @@ describe('TaskBoardHostService session/card synchronization', () => {
     await sync(instance)
 
     const card = ledger.state().tasks[0]!
-    expect(card.status).toBe('running')
-    expect(card.executions).toHaveLength(2)
+    // The resumed conversation was the test run: it keeps the card in the
+    // merge gate and is re-opened in place.
+    expect(card.status).toBe('tested')
+    expect(card.executions).toHaveLength(3)
     expect(card.executions[0]?.result).toBe('succeeded')
-    expect(card.executions[1]?.sessionId).toBe('session-card')
-    expect(card.executions[1]?.endedAt).toBeUndefined()
+    expect(card.executions[1]?.kind).toBe('test')
+    expect(card.executions[2]?.sessionId).toBe('session-card')
+    expect(card.executions[2]?.endedAt).toBeUndefined()
     instance.dispose()
   })
 
@@ -1176,8 +1202,8 @@ describe('TaskBoardHostService session/card synchronization', () => {
     await sync(instance)
 
     const card = ledger.state().tasks[0]!
-    expect(card.status).toBe('ready_for_test')
-    expect(card.executions).toHaveLength(1)
+    expect(card.status).toBe('tested')
+    expect(card.executions).toHaveLength(2)
     instance.dispose()
   })
 
@@ -1196,8 +1222,8 @@ describe('TaskBoardHostService session/card synchronization', () => {
     await sync(instance)
 
     const card = ledger.state().tasks[0]!
-    expect(card.status).toBe('ready_for_test')
-    expect(card.executions).toHaveLength(1)
+    expect(card.status).toBe('tested')
+    expect(card.executions).toHaveLength(2)
     instance.dispose()
   })
 })

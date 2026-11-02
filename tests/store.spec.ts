@@ -156,6 +156,15 @@ describe('parseLedger', () => {
     expect(parsed[2].status).toBe('clarification')
   })
 
+  it('migrates the retired ready_for_test status to tested', () => {
+    const base = {
+      id: 't-ready', title: 'ready', description: '', prompt: '',
+      createdAt: NOW, updatedAt: NOW, executions: [],
+    }
+    const parsed = parseLedger(JSON.stringify([{ ...base, status: 'ready_for_test' }]))
+    expect(parsed[0]!.status).toBe('tested')
+  })
+
   it('loads legacy rows without execution targets and keeps their pins absent', () => {
     const legacy = createTask({ title: 'legacy', description: '', prompt: '' }, 1, 't-1')
     const parsed = parseLedger(JSON.stringify([legacy]))
@@ -178,7 +187,7 @@ describe('parseLedger', () => {
   it('keeps the git workflow state — commit, review and merge stamps included', () => {
     const base = {
       id: 't1', title: 'a', description: '', prompt: 'a',
-      createdAt: NOW, updatedAt: NOW, executions: [], status: 'ready_for_test',
+      createdAt: NOW, updatedAt: NOW, executions: [], status: 'testing',
       git: { branch: 'task/a-t1', base: 'main', repoPath: '/repo', worktreePath: '/wt/t1', committedAt: 1234, reviewedCommit: 'abc123', mergedAt: 5678 },
     }
     const parsed = parseLedger(JSON.stringify([base]))

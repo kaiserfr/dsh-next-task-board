@@ -113,10 +113,10 @@ describe('card column-step chevrons', () => {
   })
 
   it('uses the directly adjacent column, not the next allowed one', async () => {
-    const board = mount({ tasks: [task({ status: 'ready_for_test' })] })
+    const board = mount({ tasks: [task({ status: 'testing' })] })
     await board.render()
 
-    expect(stepButton(board.container, 'right').getAttribute('data-target')).toBe('failed')
+    expect(stepButton(board.container, 'right').getAttribute('data-target')).toBe('tested')
     expect(stepButton(board.container, 'left').getAttribute('data-target')).toBe('running')
   })
 

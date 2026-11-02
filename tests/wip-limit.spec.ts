@@ -52,7 +52,10 @@ function harness(now: number, workspaces: Record<string, string> = {}) {
   })
   const started: string[] = []
   const releases: Array<() => void> = []
-  vi.spyOn(service.runner, 'launch').mockImplementation(async (task) => {
+  vi.spyOn(service.runner, 'launch').mockImplementation(async (task, options = {}) => {
+    // The WIP-free test run opened by a park is not an implementation launch:
+    // these cases count lane slots, so it neither records nor waits.
+    if (options.test === true) return `session-${task.id}`
     started.push(task.id)
     await new Promise<void>(resolve => releases.push(resolve))
     return `session-${task.id}`
@@ -122,7 +125,8 @@ describe('task-board WIP limit', () => {
     await flush()
     settleTask('c')
     await flush()
-    expect(ledger.runtimeView().openExecutions).toEqual([])
+    // The parks opened their WIP-free test runs; they hold no lane slot.
+    expect(ledger.runtimeView().openExecutions.filter(execution => execution.kind !== 'test')).toEqual([])
     service.dispose()
   })
 

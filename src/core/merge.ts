@@ -40,10 +40,11 @@ export function mergeStateOf(task: TaskRecord): MergeState | undefined {
   if (merge?.skipped === true) return 'no-branch'
   if (merge !== undefined) return task.status === 'running' && merge.attempts > 0 ? 'resolving' : 'released'
   if (task.archivedAt !== undefined) return undefined
-  // Cards the review step is about: the review column always states whether its
-  // work is merged, and a card that reached `done` with a branch but without a
-  // merge is worth naming too (a release can be skipped by a plain move).
-  if (task.status === 'ready_for_test') return task.git === undefined ? 'no-branch' : 'unmerged'
+  // Cards the test/merge step is about: `testing` and `tested` always state
+  // whether their work is merged, and a card that reached `done` with a branch
+  // but without a merge is worth naming too (a release can be skipped by a
+  // plain move).
+  if (task.status === 'testing' || task.status === 'tested') return task.git === undefined ? 'no-branch' : 'unmerged'
   if (task.status === 'done' && task.git !== undefined) return 'unmerged'
   return undefined
 }

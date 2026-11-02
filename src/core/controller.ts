@@ -859,6 +859,26 @@ export class BoardController {
   }
 
   /**
+   * Start the card's test run from the `testing` column (the "Tests starten"
+   * control): the Host opens the WIP-free test execution of the card's own
+   * conversation. Normally the Host starts it automatically right after the
+   * implementation run parks the card; this is the manual retry after a
+   * cancelled run, or for a card dragged into `testing` by hand.
+   * @param id - the card to test.
+   * @returns whether the action was accepted locally.
+   */
+  async startTest(id: string): Promise<boolean> {
+    const task = this.tasks.find(candidate => candidate.id === id)
+    if (task === undefined || task.archivedAt !== undefined || task.status !== 'testing') {
+      this.refuse('the test run can only be started from the testing column', id)
+      return false
+    }
+    if (this.deps.transport === undefined) return false
+    this.enqueue({ kind: 'start-test', taskId: id }, id, {}, currentOf(this.deps.sessions))
+    return true
+  }
+
+  /**
    * Confirm a card's above-default permission binding through the Host
    * (resolves the pending-confirmation transaction; no-op otherwise).
    */
@@ -915,8 +935,8 @@ export class BoardController {
 
   private async reviewAction(kind: 'review-start' | 'review-stop' | 'review-restart', id: string): Promise<boolean> {
     const task = this.tasks.find(candidate => candidate.id === id)
-    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') {
-      this.refuse('the review environment can only be controlled from the review column', id)
+    if (task === undefined || task.archivedAt !== undefined || (task.status !== 'testing' && task.status !== 'tested')) {
+      this.refuse('the review environment can only be controlled from the testing column', id)
       return false
     }
     if (this.deps.transport === undefined) return false
@@ -937,8 +957,8 @@ export class BoardController {
    */
   async approveMerge(id: string): Promise<boolean> {
     const task = this.tasks.find(candidate => candidate.id === id)
-    if (task === undefined || task.archivedAt !== undefined || task.status !== 'ready_for_test') {
-      this.refuse('the merge can only be released from the review column', id)
+    if (task === undefined || task.archivedAt !== undefined || task.status !== 'tested') {
+      this.refuse('the merge can only be released from the tested column', id)
       return false
     }
     if (this.deps.transport === undefined) return false
@@ -1474,6 +1494,7 @@ export class BoardController {
       case 'create': return 'create task'
       case 'update': return 'save task'
       case 'move': return 'move task'
+      case 'start-test': return 'start test run'
       case 'move-many': return 'move tasks'
       case 'delete': return 'delete task'
       case 'archive': return 'archive task'

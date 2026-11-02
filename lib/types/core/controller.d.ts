@@ -432,6 +432,16 @@ export declare class BoardController {
      */
     runTask(id: string): Promise<boolean>;
     /**
+     * Start the card's test run from the `testing` column (the "Tests starten"
+     * control): the Host opens the WIP-free test execution of the card's own
+     * conversation. Normally the Host starts it automatically right after the
+     * implementation run parks the card; this is the manual retry after a
+     * cancelled run, or for a card dragged into `testing` by hand.
+     * @param id - the card to test.
+     * @returns whether the action was accepted locally.
+     */
+    startTest(id: string): Promise<boolean>;
+    /**
      * Confirm a card's above-default permission binding through the Host
      * (resolves the pending-confirmation transaction; no-op otherwise).
      */

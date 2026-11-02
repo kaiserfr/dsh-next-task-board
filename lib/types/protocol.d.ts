@@ -104,7 +104,7 @@ export interface TaskBoardSnapshot {
     reviewPlans?: Record<string, TaskBoardReviewPlan>;
     /**
      * Review-column cards whose merge release the Host is carrying out right now
-     * (see {@link TaskBoardPendingReleases}). The card stays in `ready_for_test`
+     * (see {@link TaskBoardPendingReleases}). The card stays in `tested`
      * until the merge settles; this marker explains the wait and never claims a
      * column the Host has not written. Absent on an older Host.
      */
@@ -336,6 +336,15 @@ export type TaskBoardAction = {
     taskId: string;
 } | {
     kind: 'approve-merge';
+    taskId: string;
+}
+/**
+ * Start the card's test run without waiting for the automatic one: the
+ * `testing` column's WIP-free run. Used by the card's "Tests starten" control
+ * after a cancelled test run or for a card parked in `testing` by hand.
+ */
+ | {
+    kind: 'start-test';
     taskId: string;
 } | {
     kind: 'review-start';

@@ -121,10 +121,14 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
     ledger.settle('card', started.executions.at(-1)!.id, 'succeeded')
     await flush()
     await poll()
-    expect(ledger.state().tasks[0].status).toBe('ready_for_test')
+    expect(ledger.state().tasks[0].status).toBe('testing')
     expect(calls.down).toEqual([])
     expect(ledger.state().tasks[0].compose?.project).toBe('dsh-tb-card')
 
+    // The park opened the WIP-free test run; a green test run parks the card in
+    // `tested`, the merge gate.
+    ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
+    await flush()
     // Accepting the card ends the environment.
     await service.apply('done', { kind: 'move', taskId: 'card', status: 'done' })
     await ledger.awaitCard('card')
@@ -141,6 +145,9 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
     await flush()
     ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
     await flush()
+    // The park opened the WIP-free test run; close it so the card is settled.
+    ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
+    await flush()
 
     // Back to To do (a rework return): the next run brings a fresh stack up.
     await service.apply('rework', { kind: 'move', taskId: 'card', status: 'clarification' })
@@ -152,7 +159,12 @@ describe.skipIf(!hasGit)('task environment lifecycle', () => {
     // A deleted card has no record left — the Host still owns the project.
     await service.apply('run-again', { kind: 'move', taskId: 'card', status: 'running' })
     await flush()
-    expect(calls.up).toHaveLength(2)
+    // The implementation run, the WIP-free test run and the second
+    // implementation each see the stack up (up is idempotent).
+    expect(calls.up).toHaveLength(3)
+    ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
+    await flush()
+    // Close the auto test run as well before deleting the card.
     ledger.settle('card', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
     await flush()
     ledger.applyRequest('delete', { kind: 'delete', taskId: 'card' })

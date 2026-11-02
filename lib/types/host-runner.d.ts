@@ -193,6 +193,13 @@ export interface PromptTextOptions {
      * finished; the only job is the conflict.
      */
     merge?: boolean;
+    /**
+     * This run is the test run of the `testing` column (phase 2): the card is
+     * implemented, and the turn only tests and reports. With `continued` it is
+     * the short "test now" turn in the implementation conversation; without it
+     * the card body is included and the test contract follows.
+     */
+    test?: boolean;
 }
 /**
  * The clarification addendum: what the `backlog → clarification` run tells the agent to
@@ -203,10 +210,10 @@ export declare const CLARIFICATION_ADDENDUM: readonly string[];
 /**
  * The completion report a run's agent writes as the last line of its answer.
  * This is a report for the human reading the card's chat, **not** the run's
- * settlement: the Host advances the card to "待测试" (`ready_for_test`) only
- * once the execution's session has come to rest (see
- * {@link HostExecutionRunner.inspect}). A session that keeps its turn open
- * therefore keeps the card in "In Arbeit" — the report alone never moves it.
+ * settlement: the Host advances the card only once the execution's session has
+ * come to rest (see {@link HostExecutionRunner.inspect}). A session that keeps
+ * its turn open therefore keeps the card in its column — the report alone never
+ * moves it.
  *
  * The board's system-prompt rule (`TASK_BOARD_GUIDANCE`) interpolates this
  * constant and {@link COMPLETION_INSTRUCTION}, so the report the agent is asked
@@ -214,11 +221,27 @@ export declare const CLARIFICATION_ADDENDUM: readonly string[];
  */
 export declare const COMPLETION_MARKER = "FERTIG:";
 /**
- * The instruction that teaches one run how to report completion. Kept in the
- * same language as the board's other injected preambles; the marker itself is
- * fixed by {@link COMPLETION_MARKER}.
+ * The instruction that teaches one run how to report the end of its phase.
+ * Kept in the same language as the board's other injected preambles; the
+ * marker itself is fixed by {@link COMPLETION_MARKER}. The report is for the
+ * human — the Host never parses it.
  */
 export declare const COMPLETION_INSTRUCTION: string;
+/**
+ * Phase 1 (the implementation run): what the card's run may still do and what
+ * it must leave for the test phase. The card is split in two runs on purpose —
+ * the long/GUI tests run in the WIP-free test run of the `testing` column, so
+ * the implementation run must not hold the lane's slot while they run.
+ */
+export declare const IMPLEMENTATION_PHASE_INSTRUCTION: string;
+/**
+ * Phase 2 (the test run of the `testing` column): the run only tests and
+ * reports. It must not change code — the conversation continues the
+ * implementation, but the test phase is not an implementation round (a red
+ * report is corrected by sending the card back through the run column). The
+ * worktree must stay clean because the merge gate refuses a dirty checkout.
+ */
+export declare const TEST_INSTRUCTION: string;
 /**
  * Compose the execution prompt (issue #6): a continuation card (one carrying
  * a frozen snapshot) has its instruction mandatorily wrapped in a source
@@ -234,15 +257,17 @@ export declare const COMPLETION_INSTRUCTION: string;
  * conversation, so the round's turn only frames it and never rewrites the
  * card's `prompt`, which stays the record of what was originally asked.
  *
- * Every implementation turn carries {@link COMPLETION_INSTRUCTION} as its last
- * block, so the run knows how to report itself done no matter which turn does
- * the work (full prompt, go-ahead, continue, rework) — the board's
- * `announceToAgent` system-prompt section is off by default and must not be the
- * only carrier of that report. The report is written for the human; it is not
- * what settles the execution. Only the clarification turn is exempt: it
- * implements nothing and must not report a finished card.
+ * Every implementation turn carries {@link IMPLEMENTATION_PHASE_INSTRUCTION}
+ * and {@link COMPLETION_INSTRUCTION} as its last blocks, so the run knows what
+ * belongs to phase 1 and how to report it no matter which turn does the work
+ * (full prompt, go-ahead, continue, rework) — the board's `announceToAgent`
+ * system-prompt section is off by default and must not be the only carrier of
+ * that report. The report is written for the human; it is not what settles the
+ * execution. The clarification turn is exempt (it implements nothing), and the
+ * test run gets {@link TEST_INSTRUCTION} instead of the implementation phase.
  * @param task - the card being run.
- * @param options - continuation flag plus the round's rework mark.
+ * @param options - continuation flag plus the round's rework mark, or the test
+ *   phase of the `testing` column.
  */
 export declare function promptText(task: TaskRecord, options?: PromptTextOptions): string;
 export declare class HostExecutionRunner {
@@ -285,7 +310,8 @@ export declare class HostExecutionRunner {
      *   `clarification: true` to open the card's
      *   clarification run instead of a run prompt, `implement: true` to send only
      *   the go-ahead into the clarification conversation this run continues,
-     *   `merge: true` to open the conflict-resolution turn of a merge release, or
+     *   `merge: true` to open the conflict-resolution turn of a merge release,
+     *   `test: true` for the test run of the `testing` column, or
      *   `resume: true` to write the "continue" turn of a resumed pause into the
      *   continued session.
      * @returns the session id the execution runs in.
@@ -296,6 +322,7 @@ export declare class HostExecutionRunner {
         clarification?: boolean;
         implement?: boolean;
         merge?: boolean;
+        test?: boolean;
         resume?: boolean;
         resumeMessages?: readonly string[];
     }): Promise<string>;
@@ -412,7 +439,7 @@ export declare class HostExecutionRunner {
     /**
      * Whether the human has written in a card's conversation since `since`, and
      * when. This is how the board notices a rework: the reviewed card sits in
-     * `ready_for_test`, the human types the correction into that card's own chat,
+     * `testing`/`tested`, the human types the correction into that card's own chat,
      * and the Host sends the card back — the correction itself stays where it was
      * written, the ledger only keeps the stamp (there is no note field).
      *

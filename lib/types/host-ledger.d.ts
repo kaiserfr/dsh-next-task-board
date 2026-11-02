@@ -63,8 +63,8 @@ export interface OpenExecutionReference {
     readonly startedAt: number;
     /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
     readonly lane: string;
-    /** `'clarify'` for the card's clarification round; a real run otherwise. */
-    readonly kind: 'clarify' | 'merge' | undefined;
+    /** `'clarify'`/`'test'` for the WIP-free rounds; a real run otherwise. */
+    readonly kind: 'clarify' | 'merge' | 'test' | undefined;
 }
 /**
  * One card the rework watch follows (see {@link HostTaskLedger.reworkWatch}): a
@@ -270,9 +270,9 @@ export declare class HostTaskLedger {
      */
     runtimeView(): LedgerRuntimeView;
     /**
-     * The cards the rework watch follows: every settled card in `ready_for_test`
-     * or `failed`, with the conversation the human would write the correction
-     * into. A cheap projection on purpose — the watch runs on the hot poll path,
+     * The cards the rework watch follows: every settled card in `testing`,
+     * `tested` or `failed`, with the conversation the human would write the
+     * correction into. A cheap projection on purpose — the watch runs on the hot poll path,
      * which must not clone the whole document.
      */
     reworkWatch(): ReworkWatchEntry[];
@@ -386,8 +386,8 @@ export declare class HostTaskLedger {
      * The merge release of one card: replay its feature branch onto the base
      * branch as that stands now and merge it back. The git work is queued on the
      * card's work chain and the action returns at once with `pending: true`: the
-     * card stays in `ready_for_test` (a derived "release running" marker explains
-     * the wait) until the outcome is written back. Nothing optimistic ever claims
+     * card stays in `tested` (a derived "release running" marker explains the
+     * wait) until the outcome is written back. Nothing optimistic ever claims
      * a column the Host has not written.
      *
      * The decision table (the human's "Freigeben (Merge)"):

@@ -67,7 +67,7 @@ describe('a clarification execution never moves the card', () => {
     const run = startExecution(card(), NOW, 'run-1')
     expect(run.task.status).toBe('running')
     expect(hasOpenRun(run.task)).toBe(true)
-    expect(settleExecution(run.task, 'run-1', 'succeeded', NOW + 1, undefined).status).toBe('ready_for_test')
+    expect(settleExecution(run.task, 'run-1', 'succeeded', NOW + 1, undefined).status).toBe('testing')
   })
 })
 

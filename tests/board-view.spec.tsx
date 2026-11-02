@@ -205,10 +205,10 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
       .map(column => column.getAttribute('data-status'))
     // The full default column order: the swap moved `failed` in front of
     // `done`, every other column kept its slot, and none is lost or doubled.
-    expect(statuses).toEqual(['backlog', 'clarification', 'running', 'ready_for_test', 'failed', 'done'])
+    expect(statuses).toEqual(['backlog', 'clarification', 'running', 'testing', 'tested', 'failed', 'done'])
   })
 
-  it('drops a ready_for_test card onto the done column and triggers controller.moveTask', async () => {
+  it('drops a tested card onto the done column and triggers controller.moveTask', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const root = createRoot(container)
@@ -216,7 +216,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
 
     const moveCalls: Array<{ id: string; status: string }> = []
     const controller = fakeController(
-      { tasks: [task({ id: 't-ready', status: 'ready_for_test' })] },
+      { tasks: [task({ id: 't-ready', status: 'tested' })] },
       { moveTask: (id, status) => { moveCalls.push({ id, status }) } },
     )
     await act(async () => { root.render(<TaskBoard controller={controller} />) })
@@ -813,7 +813,7 @@ describe('TaskBoard multi-selection and group drag', () => {
     // A plain target for the whole batch: the clarification column is refused
     // for a group drop (it would open a round per card), so the batch goes to
     // the review column, whose transition only carries the commit hook.
-    await drop(board.column('ready_for_test'), dataTransfer)
+    await drop(board.column('testing'), dataTransfer)
     expect(batches).toEqual([['t-a', 't-b']])
     expect(singles).toEqual([])
     // A successful move ends the selection and the drag marker.
@@ -851,7 +851,7 @@ describe('TaskBoard multi-selection and group drag', () => {
     const board = await render(
       [
         task({ id: 't-a', title: 'A', status: 'backlog' }),
-        task({ id: 't-b', title: 'B', status: 'ready_for_test' }),
+        task({ id: 't-b', title: 'B', status: 'testing' }),
       ],
       {
         moveTask: (id, status) => { singles.push({ id, status }) },
@@ -863,23 +863,23 @@ describe('TaskBoard multi-selection and group drag', () => {
     await click(board.card('B'), { ctrlKey: true })
     const dataTransfer = transfer()
     await dragStart(board.card('A'), dataTransfer)
-    // ready_for_test → ready_for_test is not a transition, so B stays behind.
-    await drop(board.column('ready_for_test'), dataTransfer)
-    expect(singles).toEqual([{ id: 't-a', status: 'ready_for_test' }])
+    // testing → testing is not a transition, so B stays behind.
+    await drop(board.column('testing'), dataTransfer)
+    expect(singles).toEqual([{ id: 't-a', status: 'testing' }])
     expect(batches).toEqual([])
   })
 
   it('changes nothing on an invalid drop and keeps the selection', async () => {
     const singles: Array<{ id: string; status: string }> = []
     const board = await render(
-      [task({ id: 't-b', title: 'B', status: 'ready_for_test' })],
+      [task({ id: 't-b', title: 'B', status: 'testing' })],
       { moveTask: (id, status) => { singles.push({ id, status }) } },
     )
 
     await click(board.card('B'))
     const dataTransfer = transfer()
     await dragStart(board.card('B'), dataTransfer)
-    await drop(board.column('ready_for_test'), dataTransfer)
+    await drop(board.column('testing'), dataTransfer)
     expect(singles).toEqual([])
     // An aborted drop is no reason to lose the selection.
     expect(board.bar()?.textContent).toContain('1')
