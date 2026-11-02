@@ -130,7 +130,7 @@ describe('repoSubpath', () => {
       title: 'Card',
       description: '',
       prompt: 'p',
-      status: 'ready_for_test',
+      status: 'testing',
       createdAt: 0,
       updatedAt: 0,
       executions: [],

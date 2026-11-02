@@ -117,7 +117,7 @@ export interface TaskBoardSnapshot {
   reviewPlans?: Record<string, TaskBoardReviewPlan>
   /**
    * Review-column cards whose merge release the Host is carrying out right now
-   * (see {@link TaskBoardPendingReleases}). The card stays in `ready_for_test`
+   * (see {@link TaskBoardPendingReleases}). The card stays in `tested`
    * until the merge settles; this marker explains the wait and never claims a
    * column the Host has not written. Absent on an older Host.
    */
@@ -322,6 +322,12 @@ export type TaskBoardAction =
   | { kind: 'resume-all' }
   | { kind: 'confirm-permission'; taskId: string }
   | { kind: 'approve-merge'; taskId: string }
+  /**
+   * Start the card's test run without waiting for the automatic one: the
+   * `testing` column's WIP-free run. Used by the card's "Tests starten" control
+   * after a cancelled test run or for a card parked in `testing` by hand.
+   */
+  | { kind: 'start-test'; taskId: string }
   | { kind: 'review-start'; taskId: string }
   | { kind: 'review-stop'; taskId: string }
   | { kind: 'review-restart'; taskId: string }
@@ -451,6 +457,7 @@ function validImportedKnownFields(value: Record<string, unknown>): boolean {
   // must carry a well-formed list or none at all, so a hand-edited export
   // cannot smuggle a malformed tag past the gate.
   if (value.tags !== undefined && !isTaskTagList(value.tags)) return false
+  if (value.skipTests !== undefined && typeof value.skipTests !== 'boolean') return false
   if (value.schedule !== undefined) {
     const schedule = record(value.schedule)
     if (schedule === undefined || typeof schedule.enabled !== 'boolean' || typeof schedule.cron !== 'string') return false
@@ -509,6 +516,7 @@ function importedTask(value: unknown): TaskRecord | undefined {
     ...(task.mode === undefined ? {} : { mode: task.mode }),
     ...(task.permission === undefined ? {} : { permission: task.permission }),
     ...(task.reuseSession === undefined ? {} : { reuseSession: task.reuseSession }),
+    ...(task.skipTests === undefined ? {} : { skipTests: task.skipTests }),
     ...(task.archivedAt === undefined ? {} : { archivedAt: task.archivedAt }),
     ...(task.doneAt === undefined ? {} : { doneAt: task.doneAt }),
     ...(task.freeze === undefined ? {} : { freeze: task.freeze }),
@@ -549,11 +557,12 @@ function handoverPayload(value: unknown): TaskHandoverInput | undefined {
 
 function createInput(value: unknown): value is NewTaskInput {
   const input = record(value)
-  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'tags'])) return false
+  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'skipTests', 'tags'])) return false
   if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.prompt !== 'string') return false
   if (!optionalString(input.parseText)) return false
   if (!optionalString(input.workspaceId) || !optionalString(input.mode) || !optionalString(input.model)) return false
   if (input.reuseSession !== undefined && typeof input.reuseSession !== 'boolean') return false
+  if (input.skipTests !== undefined && typeof input.skipTests !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false
   if (input.tags !== undefined && !isTaskTagList(input.tags)) return false
   if (input.freeze !== undefined && freezePayload(input.freeze) === undefined) return false
@@ -568,9 +577,11 @@ function createInput(value: unknown): value is NewTaskInput {
 
 function updatePatch(value: unknown): boolean {
   const patch = record(value)
-  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'tags'])) return false
+  if (patch === undefined || !exactKeys(patch, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'freeze', 'handover', 'model', 'reuseSession', 'skipTests', 'tags'])) return false
   // null (or false) clears the reuse opt-in; only a real boolean is accepted.
   if (patch.reuseSession !== undefined && patch.reuseSession !== null && typeof patch.reuseSession !== 'boolean') return false
+  // null/false clears the "no tests" mark; only a real boolean is accepted.
+  if (patch.skipTests !== undefined && patch.skipTests !== null && typeof patch.skipTests !== 'boolean') return false
   for (const key of ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'model'] as const) {
     if (!optionalString(patch[key])) return false
   }
@@ -687,6 +698,7 @@ function parseEnvelopeAction(value: unknown): TaskBoardActionEnvelope | undefine
         : undefined
     case 'confirm-permission':
     case 'approve-merge':
+    case 'start-test':
     case 'review-start':
     case 'review-stop':
     case 'review-restart':

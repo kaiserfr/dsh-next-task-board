@@ -6,7 +6,8 @@ export const STATUS_KEY: Record<TaskStatus, TaskBoardKey> = {
   backlog: 'board.status.backlog',
   clarification: 'board.status.clarification',
   running: 'board.status.running',
-  ready_for_test: 'board.status.ready_for_test',
+  testing: 'board.status.testing',
+  tested: 'board.status.tested',
   done: 'board.status.done',
   failed: 'board.status.failed',
 }

@@ -40,6 +40,7 @@ interface NewTaskForm {
   permission: string
   model: string
   reuseSession: boolean
+  skipTests: boolean
   scheduleEnabled: boolean
   scheduleCron: string
   freezeText: string
@@ -67,6 +68,7 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
     permission: initialTask?.permission ?? '',
     model: initialTask?.model ?? '',
     reuseSession: initialTask?.reuseSession ?? false,
+    skipTests: initialTask?.skipTests === true,
     scheduleEnabled: initialTask?.schedule?.enabled ?? false,
     scheduleCron: initialTask?.schedule?.cron ?? '',
     freezeText: '',
@@ -83,6 +85,7 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
   const [permission, setPermission] = useState(stored?.permission ?? pristine.permission)
   const [model, setModel] = useState(stored?.model ?? pristine.model)
   const [reuseSession, setReuseSession] = useState(stored?.reuseSession ?? pristine.reuseSession)
+  const [skipTests, setSkipTests] = useState(stored?.skipTests ?? pristine.skipTests)
   const [scheduleEnabled, setScheduleEnabled] = useState(stored?.scheduleEnabled ?? pristine.scheduleEnabled)
   const [scheduleCron, setScheduleCron] = useState(stored?.scheduleCron ?? pristine.scheduleCron)
   const [scheduleError, setScheduleError] = useState<string | undefined>(undefined)
@@ -118,6 +121,7 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
     permission,
     model,
     reuseSession,
+    skipTests,
     scheduleEnabled,
     scheduleCron,
     freezeText,
@@ -137,6 +141,7 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
     setPermission(value.permission)
     setModel(value.model)
     setReuseSession(value.reuseSession)
+    setSkipTests(value.skipTests)
     setScheduleEnabled(value.scheduleEnabled)
     setScheduleCron(value.scheduleCron)
     setFreezeText(value.freezeText)
@@ -217,6 +222,7 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
       permission: permission === '' ? undefined : permission as TaskPermission,
       model: model === '' ? undefined : model,
       ...(reuseSession ? { reuseSession: true } : {}),
+      ...(skipTests ? { skipTests: true } : {}),
       ...(tagList.length > 0 ? { tags: tagList } : {}),
       schedule: scheduleEnabled ? { enabled: true, cron: scheduleCron.trim() } : undefined,
     }
@@ -372,6 +378,16 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
           <span>{t('exec.reuseSession')}</span>
         </label>
         <p className={css.detailText}>{t('exec.reuseSessionHint')}</p>
+
+        <label className={css.scheduleToggle}>
+          <input
+            type="checkbox"
+            checked={skipTests}
+            onChange={event => { setSkipTests(event.target.checked) }}
+          />
+          <span>{t('exec.skipTests')}</span>
+        </label>
+        <p className={css.detailText}>{t('exec.skipTestsHint')}</p>
 
         <section className={css.detailSection}>
           <h4>{t('detail.schedule')}</h4>

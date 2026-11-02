@@ -56,7 +56,7 @@ export declare class TaskBoardHostService {
      */
     private maxConcurrentRuns;
     /**
-     * Rework watch: per card in a settled column (`ready_for_test`/`failed`), the
+     * Rework watch: per card in a settled column (`testing`/`tested`/`failed`), the
      * `updatedAt` its conversation had when it was last read. An unchanged chat
      * costs no history RPC; the entry is dropped as soon as the card leaves the
      * watched columns. See {@link watchReworkChats}.
@@ -553,7 +553,8 @@ export declare class TaskBoardHostService {
     /** Reuse the session list this poll already fetched: one list RPC per tick, not 1 + E. */
     /**
      * Settle every open execution whose session has finished. This is the only
-     * automatic path into `ready_for_test`: the runner reports 'succeeded' only
+     * automatic path into `testing` (the implementation park) and, through the
+     * test run's settle, into `tested`: the runner reports 'succeeded' only
      * once the session has come to rest (no running turn, nothing queued, no
      * live job), so the column change is always the session's last action — an
      * agent's own `FERTIG:` report never moves the card while its session runs.

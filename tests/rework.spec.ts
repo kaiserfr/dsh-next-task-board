@@ -1,5 +1,5 @@
 /**
- * Rework without a board-side note: sending a card back from `ready_for_test`
+ * Rework without a board-side note: sending a card back from `testing`/`tested`
  * (or `failed`) to `clarification` stamps it, and the correction itself is the human's
  * own turn in the card's conversation — the next run continues that chat and
  * opens with the rework framing instead of repeating the card body.
@@ -19,10 +19,11 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
 
 describe('rework return', () => {
   it('is exactly the way back from the review and failure columns', () => {
-    expect(isReworkReturn('ready_for_test', 'clarification')).toBe(true)
+    expect(isReworkReturn('testing', 'clarification')).toBe(true)
+    expect(isReworkReturn('tested', 'clarification')).toBe(true)
     expect(isReworkReturn('failed', 'clarification')).toBe(true)
     // Accepting the work, or moving on from any other column, is no rework.
-    expect(isReworkReturn('ready_for_test', 'done')).toBe(false)
+    expect(isReworkReturn('tested', 'done')).toBe(false)
     expect(isReworkReturn('clarification', 'clarification')).toBe(false)
     expect(isReworkReturn('done', 'clarification')).toBe(false)
   })

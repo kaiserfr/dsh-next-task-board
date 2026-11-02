@@ -22,7 +22,7 @@
  * normalizer reports why and the caller keeps the default.
  */
 /** Task lifecycle status. The closed union is stable; the machine says which are columns. */
-export type TaskStatus = 'backlog' | 'clarification' | 'running' | 'ready_for_test' | 'done' | 'failed';
+export type TaskStatus = 'backlog' | 'clarification' | 'running' | 'testing' | 'tested' | 'done' | 'failed';
 /** Every status the ledger knows, independent of any machine configuration. */
 export declare const ALL_STATUSES: readonly TaskStatus[];
 /** Brand an unknown string as a status; undefined when it is not one. */
@@ -105,21 +105,25 @@ export declare const STAMP_FIELDS: readonly ["doneAt"];
  *   questions are settled — that drag is the go-ahead, and `clarification` is
  *   the only pre-implementation column: there is no separate "To do".
  * - `running` is the runner's own state: it is entered by a run and left by
- *   that run settling (success → `ready_for_test`, failure → `failed`),
- *   never by a drag — except straight onto Done: `running → done` is a manual
- *   move for the human who decides the work ends here, and the Host settles
- *   the open run (cancelled) and stops its session instead of waiting for it
- * - every manual move into `ready_for_test` commits the worktree onto the
- *   card's feature branch (`git.commitBranch`), and the runner's own settle
- *   does the same, so no run's work is ever left uncommitted in the worktree.
- *   Reaching `ready_for_test` also stamps the reviewed commit the merge gate is
- *   bound to
- * - `ready_for_test → done` merges that reviewed commit back (and refuses when
- *   the branch moved on since)
- * - `ready_for_test → running` and `failed → running` pull the card onto the
- *   run column from there: the run continues the card's conversation, so a
- *   correction the human typed into that chat is already in context
- * - a card sent back for rework leaves `ready_for_test`/`failed` for
+ *   that run settling. An implementation run parks the card in `testing`
+ *   (success), `tested` (the card needs no tests but has a branch) or `done`
+ *   (no tests and nothing to merge); a failure goes to `failed`, a cancelled
+ *   run back to `clarification`. `running` is never a drop target — except
+ *   straight onto Done: `running → done` is a manual move for the human who
+ *   decides the work ends here, and the Host settles the open run (cancelled)
+ *   and stops its session instead of waiting for it.
+ * - `testing` is the test phase: the card is parked there (WIP released) and a
+ *   WIP-free test run of the same conversation tests it. The test run's settle
+ *   parks the card in `tested`; a red test report is corrected by pulling the
+ *   card back to `running` (or `clarification`), which starts a rework run.
+ *   A human may drag `testing → tested` to skip the run (no tests / manual test).
+ * - `tested` is the merge gate: `git.commitBranch` (and the settle) bound the
+ *   approval to the commit that was tested, and `tested → done` merges exactly
+ *   that commit (`git.mergeBranch`); a branch that moved on is refused.
+ * - `failed` is the off-ramp after a failed run or refused merge; `failed →
+ *   running` (and `tested → running`) pull the card back onto the run column so
+ *   the conversation can be corrected and continued.
+ * - a card sent back for rework leaves `testing`/`tested`/`failed` for
  *   `clarification` again (the waiting column the human pulls it on from) —
  *   the correction lives in the card's chat, and the return never starts a run
  * - every manual → manual move is allowed, as before — except a drag straight

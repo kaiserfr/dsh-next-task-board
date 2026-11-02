@@ -1,7 +1,7 @@
 /**
  * Git integration tests: real temporary repositories, no mocks of git itself.
  * Covers the agentic-programming flow — feature branch on backlog → todo,
- * checkout before a run, commit + merge on ready_for_test → done — and the
+ * checkout before a run, commit + merge on testing → done — and the
  * no-op behavior for workspaces that are not git worktrees.
  */
 import { spawnSync } from 'node:child_process'
@@ -291,12 +291,18 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       ledger.settle('card-1', run!.execution.id, 'succeeded')
       await ledger.awaitCard('card-1')
       const parked = ledger.state().tasks[0]
-      expect(parked.status).toBe('ready_for_test')
+      expect(parked.status).toBe('testing')
       // The park committed: the card worktree is clean while the card is
       // reviewed, and the card records when.
       expect(parked.git?.committedAt).toBe(NOW)
       expect(git(dir, ['status', '--porcelain'])).toBe('')
       expect(git(dir, ['log', '-1', '--pretty=%s'])).toBe('task: Fix login')
+
+      // The implementation park opened the WIP-free test run; a green test run
+      // parks the card in `tested`, the merge gate.
+      ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
+      await ledger.awaitCard('card-1')
+      expect(ledger.state().tasks[0].status).toBe('tested')
 
       ledger.applyRequest('r-done', { kind: 'move', taskId: 'card-1', status: 'done' })
       await ledger.awaitCard('card-1')
@@ -416,27 +422,30 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
 
       const task = ledger.state().tasks[0]
       // The park still happened; the failure is visible in the execution history.
-      expect(task.status).toBe('ready_for_test')
+      expect(task.status).toBe('testing')
       expect(task.git?.committedAt).toBeUndefined()
-      expect(task.executions.at(-1)?.error).toMatch(/^commit failed: git commit/)
+      expect(task.executions.find(entry => entry.id === run!.execution.id)?.error).toMatch(/^commit failed: git commit/)
       expect(git(dir, ['status', '--porcelain'])).toContain('feature.txt')
 
+      // The automatic test run owns the card; close it (the tests never ran)
+      // before the manual move back.
+      ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'cancelled')
       // The same holds for a manual drag into the review column: the move goes
       // through, the refused commit is recorded on the newest settled execution.
       ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
       writeFileSync(join(dir, 'second.txt'), 'more work\n')
-      ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
       const again = ledger.state().tasks[0]
-      expect(again.status).toBe('ready_for_test')
-      // Two refusals are recorded, appended to one another.
-      expect(again.executions.at(-1)?.error?.split('commit failed').length).toBe(3)
+      expect(again.status).toBe('testing')
+      // Both refusals are recorded on the card's executions.
+      expect(again.executions.filter(entry => entry.error?.includes('commit failed')).length).toBe(2)
     } finally {
       ledger.dispose()
     }
   })
 
-  it('opens the branch and commits when a card is dragged straight into ready_for_test', async () => {
+  it('opens the branch and commits when a card is dragged straight into testing', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -445,10 +454,10 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
-      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
       const parked = ledger.state().tasks[0]
-      expect(parked.status).toBe('ready_for_test')
+      expect(parked.status).toBe('testing')
       expect(parked.git?.branch).toBe('task/fix-login-card1')
       // The park cut branch and worktree; there was nothing to commit yet.
       const dir = parked.git!.worktreePath!
@@ -457,7 +466,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       writeFileSync(join(dir, 'feature.txt'), 'no run at all\n')
       // Back out and in again: that park commits the work.
       ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
       const again = ledger.state().tasks[0]
       expect(again.git?.committedAt).toBe(NOW)
@@ -563,8 +572,10 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
 
-      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
+      // The merge gate is `tested`; a manual park skips the test run.
+      ledger.applyRequest('r-tested', { kind: 'move', taskId: 'card-1', status: 'tested' })
       ledger.applyRequest('r-done', { kind: 'move', taskId: 'card-1', status: 'done' })
       await ledger.awaitCard('card-1')
 
@@ -609,8 +620,10 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       writeFileSync(join(repo, 'feature.txt'), 'main\n')
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
-      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
+      // The merge gate is `tested`; a manual park skips the test run.
+      ledger.applyRequest('r-tested', { kind: 'move', taskId: 'card-1', status: 'tested' })
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
       await ledger.awaitCard('card-1')
       const run = ledger.state().tasks[0].executions.at(-1)!
@@ -657,8 +670,10 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       writeFileSync(join(repo, 'feature.txt'), 'main\n')
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
-      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
+      // The merge gate is `tested`; a manual park skips the test run.
+      ledger.applyRequest('r-tested', { kind: 'move', taskId: 'card-1', status: 'tested' })
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
       await ledger.awaitCard('card-1')
       const run = ledger.state().tasks[0].executions.at(-1)!
@@ -700,8 +715,10 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       writeFileSync(join(repo, 'feature.txt'), 'main\n')
       git(repo, ['add', '-A'])
       git(repo, ['commit', '-qm', 'main work'])
-      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
+      // The merge gate is `tested`; a manual park skips the test run.
+      ledger.applyRequest('r-tested', { kind: 'move', taskId: 'card-1', status: 'tested' })
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
       await ledger.awaitCard('card-1')
       const run = ledger.state().tasks[0].executions.at(-1)!
@@ -729,7 +746,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         id: 'card-1',
         input: { title: 'Docs only', description: '', prompt: 'p' },
       })
-      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'testing' })
+      ledger.applyRequest('r-tested', { kind: 'move', taskId: 'card-1', status: 'tested' })
       ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
       const task = ledger.state().tasks[0]
       expect(task.status).toBe('done')
@@ -749,7 +767,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Docs only', description: '', prompt: 'p' },
       })
       expect(() => ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' }))
-        .toThrow(/merge-requires-ready-for-test/)
+        .toThrow(/merge-requires-tested/)
     } finally {
       ledger.dispose()
     }
@@ -775,6 +793,11 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       const reviewed = ledger.state().tasks[0].git!.reviewedCommit
       expect(reviewed).toBe(git(dir, ['rev-parse', 'HEAD']))
 
+      // Settle the auto test run (which changes nothing) to reach `tested`.
+      ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
+      await ledger.awaitCard('card-1')
+      expect(ledger.state().tasks[0].status).toBe('tested')
+
       // A commit after the park invalidates the approval: the release fails and
       // nothing lands on main.
       writeFileSync(join(dir, 'later.txt'), 'nobody reviewed this\n')
@@ -795,8 +818,9 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       // Re-parking rebinds the approval to the new head and drops the failed
       // release record; the next release then goes through.
       ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
-      ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'ready_for_test' })
+      ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
+      ledger.applyRequest('r-tested-2', { kind: 'move', taskId: 'card-1', status: 'tested' })
       const rebound = ledger.state().tasks[0].git!.reviewedCommit
       expect(rebound).toBe(git(dir, ['rev-parse', 'HEAD']))
       expect(rebound).not.toBe(reviewed)

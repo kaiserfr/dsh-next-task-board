@@ -45,7 +45,7 @@ export interface ExecutionRecord {
   frozenBy?: string
   /**
    * Whether this run was started to work off a rework: the card had been sent
-   * back from `ready_for_test`/`failed` to `clarification` (see
+   * back from `testing`/`tested`/`failed` to `clarification` (see
    * {@link TaskRecord.reworkAt}) and the human has not started a run since. The
    * correction itself was typed by the human into the card's own conversation,
    * so this mark only carries the two consequences the board owes that round:
@@ -64,9 +64,14 @@ export interface ExecutionRecord {
    * Host replayed the card's feature branch onto it and left the conflict in the
    * worktree, so this run's whole job is to resolve it and finish the replay — it
    * is an ordinary run in every other respect (it moves the card like one, and
-   * its settle is what makes the Host retry the merge).
+   * its settle is what makes the Host retry the merge). `'test'` marks the
+   * test run of the `testing` column: the Host opens it automatically (or from
+   * the card's "Tests starten" button) once the implementation run settled, it
+   * continues the same conversation, its prompt only tests and reports, and it
+   * is WIP-free like a clarification run because it changes no code. Its settle
+   * parks the card in `tested`.
    */
-  kind?: 'clarify' | 'merge'
+  kind?: 'clarify' | 'merge' | 'test'
 }
 
 /**
@@ -131,18 +136,18 @@ export interface TaskGit {
   worktreePath?: string
   /**
    * When the card's work was last committed onto the feature branch (ms epoch).
-   * Written when a card reaches `ready_for_test` (the `git.commitBranch` action
+   * Written when a card reaches `testing` (the `git.commitBranch` action
    * and the runner's own settle), so the worktree never keeps uncommitted card
    * work. A park that found nothing to commit leaves the previous instant.
    */
   committedAt?: number
   /**
-   * Commit the human reviews in `ready_for_test`, i.e. the branch head at the
+   * Commit the human reviews in `testing`, i.e. the branch head at the
    * instant the card was parked there (full SHA). The approval is bound to this
    * one commit: `git.mergeBranch` refuses unless the branch still stands exactly
    * here and the worktree is clean, so committing after the review invalidates
    * it instead of slipping unreviewed work into the base branch. Re-parking the
-   * card (every way back into `ready_for_test` commits) stamps the new head, and
+   * card (every way back into `testing` commits) stamps the new head, and
    * so does the settle of a conflict-resolution run, whose commit lands on top of
    * this one.
    */
@@ -447,7 +452,15 @@ export interface TaskRecord {
    */
   reuseSession?: boolean
   /**
-   * Rework stamp: a human reviewed the card in `ready_for_test` (or the run
+   * The card has no tests: no test run is opened for it. The implementation
+   * run settles straight into the merge gate (`tested`) when the card has a
+   * branch, or straight into `done` when there is nothing to merge either. Set
+   * by the human in the card's form (editable while the card waits in
+   * `backlog`/`clarification`), never by an agent.
+   */
+  skipTests?: boolean
+  /**
+   * Rework stamp: a human reviewed the card in `testing`/`tested` (or the run
    * landed in `failed`) and sent it back to `clarification`. The correction is typed
    * into the card's own conversation — the board keeps no note of its own — so
    * the stamp is the record that the card went through a rework and when.
@@ -579,6 +592,8 @@ export interface NewTaskInput {
   model?: string
   /** Reuse the previous execution's session for later runs (issue #1419). */
   reuseSession?: boolean
+  /** The card has no tests: skip the test phase (see {@link TaskRecord.skipTests}). */
+  skipTests?: boolean
   /**
    * Optional scheduled-run rule requested at creation time (the new-task
    * dialog): an enable flag plus a 5-field cron expression. The create use
@@ -675,14 +690,14 @@ export function normalizeParseText(value: unknown): string | undefined {
 
 /**
  * Whether this move sends the card back for rework: out of the review column
- * (`ready_for_test`) or out of a failed run (`failed`) into `clarification`. Every such
+ * (`testing`/`tested`) or out of a failed run (`failed`) into `clarification`. Every such
  * move is stamped ({@link withReworkStamp}), no matter who fired it — the
  * human's drag/chip or the Host noticing a correction in the card's chat.
  * @param from - the column the card leaves.
  * @param to - the column the card enters.
  */
 export function isReworkReturn(from: TaskStatus, to: TaskStatus): boolean {
-  return to === 'clarification' && (from === 'ready_for_test' || from === 'failed')
+  return to === 'clarification' && (from === 'testing' || from === 'tested' || from === 'failed')
 }
 
 /**
@@ -708,7 +723,7 @@ export function pendingRework(task: TaskRecord): boolean {
   if (task.reworkAt === undefined) return false
   let newestRunAt = 0
   for (const execution of task.executions) {
-    if (execution.kind === 'clarify') continue
+    if (execution.kind === 'clarify' || execution.kind === 'test') continue
     if (execution.startedAt > newestRunAt) newestRunAt = execution.startedAt
   }
   return task.reworkAt > newestRunAt
@@ -764,6 +779,7 @@ export function createTask(input: NewTaskInput, now: number, id: string): TaskRe
     permission: isTaskPermission(input.permission) ? input.permission : undefined,
     model: normalizeTargetId(input.model),
     reuseSession: input.reuseSession === true ? true : undefined,
+    skipTests: input.skipTests === true ? true : undefined,
     ...(input.freeze === undefined ? {} : { freeze: freezeOf(input.freeze, now) }),
     ...(input.handover === undefined ? {} : { handover: { ...input.handover, bundledAt: now } }),
     ...(tags === undefined ? {} : { tags }),
@@ -821,15 +837,18 @@ export function withSchedule(
  * a lane slot, and the board shows the card as Running and links the session),
  * but the card keeps its column — the clarification must not leave
  * `clarification`, because the human pulls it on to the run column afterwards.
+ * `kind: 'test'` opens the WIP-free test run of the `testing` column: the card
+ * already stands in `testing`, so this run keeps the column too; its settle
+ * parks it in `tested`.
  */
 export function startExecution(
   task: TaskRecord,
   now: number,
   executionId: string,
   initiatedBy?: string,
-  kind?: 'clarify' | 'merge',
+  kind?: 'clarify' | 'merge' | 'test',
 ): { task: TaskRecord; execution: ExecutionRecord } {
-  const clarification = kind === 'clarify'
+  const keepsColumn = kind === 'clarify' || kind === 'test'
   const execution: ExecutionRecord = {
     id: executionId,
     sessionId: undefined,
@@ -841,9 +860,10 @@ export function startExecution(
     ...(initiatedBy === undefined || initiatedBy === '' ? {} : { initiatedBy }),
     // The run records how it was started: a run that works off a send-back
     // continues the corrected conversation and opens with the rework framing.
-    // A clarification is not that round (it must not consume the marker the
-    // implementation run still has to honour), and a conflict-resolution run is
-    // not one either — it opens with its own merge framing.
+    // A clarification/test run is not that round (it must not consume the
+    // marker the implementation run still has to honour), and a
+    // conflict-resolution run is not one either — it opens with its own merge
+    // framing.
     ...(kind !== undefined || !pendingRework(task) ? {} : { rework: true }),
     // Capture the card's freeze provenance on the execution record so the
     // audit trail stays queryable even if the snapshot is replaced later.
@@ -855,7 +875,7 @@ export function startExecution(
   return {
     task: {
       ...task,
-      ...(clarification ? {} : { status: 'running' as TaskStatus }),
+      ...(keepsColumn ? {} : { status: 'running' as TaskStatus }),
       updatedAt: now,
       // A fresh run is never a continuation of a pause: the stamp only ever
       // describes the run that is open right now.
@@ -871,15 +891,20 @@ export function startExecution(
  * matching column. No-op (returns the input task) when the execution is not
  * the task's latest or is already settled.
  *
- * The caller owns the timing: `'succeeded'` — the `ready_for_test` park — is
- * passed only after the execution's session has ended (see
- * `HostExecutionRunner.inspect`), never on an intermediate turn boundary of a
- * session that is still working.
+ * The caller owns the timing: `'succeeded'` — the park — is passed only after
+ * the execution's session has ended (see `HostExecutionRunner.inspect`), never
+ * on an intermediate turn boundary of a session that is still working.
  *
  * A clarification run is the exception: its outcome is recorded, but the card
  * keeps its column. Settling a chat must never park the card in
- * `ready_for_test`/`failed`; it waits in `clarification` for the human to pull
- * it on.
+ * `testing`/`tested`/`failed`; it waits in `clarification` for the human to pull
+ * it on. A test run keeps the column on failure/cancellation too (the tests did
+ * not complete; the human restarts them) and parks the card in `tested` only
+ * when its session ended normally.
+ *
+ * @param park - where a succeeded implementation run parks the card: `testing`
+ *   by default, `tested`/`done` for a card without tests (see
+ *   {@link implementationParkStatus}).
  */
 export function settleExecution(
   task: TaskRecord,
@@ -887,6 +912,7 @@ export function settleExecution(
   outcome: 'succeeded' | 'failed' | 'cancelled',
   now: number,
   error: string | undefined,
+  park: TaskStatus = 'testing',
 ): TaskRecord {
   const index = task.executions.findIndex(execution => execution.id === executionId)
   if (index === -1) return task
@@ -897,11 +923,37 @@ export function settleExecution(
   executions[index] = settled
   const status: TaskStatus = execution.kind === 'clarify'
     ? task.status
-    : outcome === 'succeeded'
-      ? 'ready_for_test'
-      : outcome === 'failed' ? 'failed'
-        : task.status === 'running' ? 'clarification' : task.status
-  return { ...task, status, updatedAt: now, pausedAt: undefined, executions }
+    : execution.kind === 'test'
+      ? outcome === 'succeeded' ? 'tested' : outcome === 'failed' ? 'failed' : task.status
+      : execution.kind === 'merge'
+        // The conflict-resolution run returns to the merge gate on success; the
+        // release retry then finishes the merge (or fails it).
+        ? outcome === 'succeeded' ? 'tested' : 'failed'
+        : outcome === 'succeeded'
+          ? park
+          : outcome === 'failed' ? 'failed'
+            : task.status === 'running' ? 'clarification' : task.status
+  return {
+    ...task,
+    status,
+    updatedAt: now,
+    pausedAt: undefined,
+    ...(status === 'done' ? { doneAt: now } : {}),
+    executions,
+  }
+}
+
+/**
+ * Where a succeeded implementation run parks the card. A card with tests goes
+ * to the `testing` column, whose WIP-free test run does the testing; a card the
+ * human marked as test-free skips that column and goes straight to the merge
+ * gate (`tested`) — or straight to `done` when it has no branch to merge
+ * either.
+ * @param task - the card whose implementation run just succeeded.
+ */
+export function implementationParkStatus(task: TaskRecord): TaskStatus {
+  if (task.skipTests !== true) return 'testing'
+  return task.git === undefined ? 'done' : 'tested'
 }
 
 /** Whether the card's open run is paused (still `running`, but not worked on). */
@@ -1004,7 +1056,7 @@ function holdsLaneSlot(task: TaskRecord): boolean {
   if (task.archivedAt !== undefined || task.pausedAt !== undefined) return false
   const latest = task.executions[task.executions.length - 1]
   if (latest === undefined || latest.endedAt !== undefined) return false
-  return latest.kind !== 'clarify' && latest.sessionId !== undefined
+  return latest.kind !== 'clarify' && latest.kind !== 'test' && latest.sessionId !== undefined
 }
 
 /**

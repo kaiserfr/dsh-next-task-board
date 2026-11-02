@@ -71,12 +71,12 @@ describe('createTask', () => {
 })
 
 describe('status transitions', () => {
-  it('manual moves go to backlog/clarification/ready_for_test/done but never out of running', () => {
+  it('manual moves go to backlog/clarification/testing/tested/done but never out of running', () => {
     expect(canMoveManually('clarification', 'backlog')).toBe(true)
     expect(canMoveManually('failed', 'clarification')).toBe(true)
     expect(canMoveManually('done', 'backlog')).toBe(true)
-    expect(canMoveManually('ready_for_test', 'done')).toBe(true)
-    expect(canMoveManually('clarification', 'ready_for_test')).toBe(true)
+    expect(canMoveManually('tested', 'done')).toBe(true)
+    expect(canMoveManually('clarification', 'testing')).toBe(true)
     expect(canMoveManually('clarification', 'running')).toBe(false)
     // The one drag out of `running`: a manual move onto Done, where the Host
     // settles the open run and stops the session.
@@ -102,10 +102,10 @@ describe('status transitions', () => {
 })
 
 describe('settleExecution', () => {
-  it('parks a successful run in ready_for_test (done stays manual)', () => {
+  it('parks a successful run in testing (done stays manual)', () => {
     const { task } = startExecution(sampleTask(), NOW, 'exec-1')
     const settled = settleExecution(task, 'exec-1', 'succeeded', NOW + 10, undefined)
-    expect(settled.status).toBe('ready_for_test')
+    expect(settled.status).toBe('testing')
     expect(settled.executions[0].endedAt).toBe(NOW + 10)
     expect(settled.executions[0].result).toBe('succeeded')
     expect(settled.executions[0].error).toBeUndefined()
@@ -126,11 +126,11 @@ describe('settleExecution', () => {
     expect(settled.executions[0].result).toBe('cancelled')
   })
 
-  it('parks a recurring task in ready_for_test too on successful execution', () => {
+  it('parks a recurring task in testing too on successful execution', () => {
     const recurring = withSchedule(sampleTask(), { enabled: true, cron: '0 12 * * *' }, NOW)
     const { task } = startExecution(recurring, NOW, 'exec-1')
     const settled = settleExecution(task, 'exec-1', 'succeeded', NOW + 10, undefined)
-    expect(settled.status).toBe('ready_for_test')
+    expect(settled.status).toBe('testing')
     expect(settled.executions[0].result).toBe('succeeded')
   })
 

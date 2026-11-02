@@ -15,11 +15,11 @@
  *   the card, and every later step checks the branch out as before,
  * - the run works in that worktree, which never changes branch (`useBranch` is a
  *   no-op there),
- * - reaching `ready_for_test` commits what the run left behind onto the feature
+ * - reaching `testing` commits what the run left behind onto the feature
  *   branch (`git.commitBranch`, and the runner's own settle), so no run's work
  *   ever waits uncommitted in the worktree, and stamps the resulting head as the
  *   card's `reviewedCommit` — the commit the human reviews,
- * - `ready_for_test` → `done` (a human accepts the work) **replays** the feature
+ * - `tested` → `done` (a human accepts the work) **replays** the feature
  *   branch onto its base branch as that stands *now* (`git rebase` — other cards
  *   may have merged into it since this card was cut) and then merges the branch
  *   back, but **only** while the branch still stands exactly on that reviewed
@@ -332,7 +332,7 @@ export class GitWorkflow {
 
   /**
    * Commit what the worktree holds onto the card's feature branch, stamping
-   * `committedAt`. Called whenever a card reaches `ready_for_test` — the
+   * `committedAt`. Called whenever a card reaches `testing` — the
    * configurable `git.commitBranch` action and the runner settling a run there
    * — so no run's work is ever left uncommitted in the worktree, no matter
    * whether the run succeeded, failed or was cancelled.
@@ -385,7 +385,7 @@ export class GitWorkflow {
   /**
    * Merge the card's feature branch back into the base branch — but only the
    * exact commit the human reviewed. Called by the release path (the
-   * `ready_for_test` → `done` move and the card's release action); an
+   * `tested` → `done` move and the card's release action); an
    * already-merged branch is left alone.
    *
    * Before anything is merged, the branch is **replayed onto the base as it
@@ -423,11 +423,11 @@ export class GitWorkflow {
     const git = task.git
     if (git === undefined || git.mergedAt !== undefined) return undefined
     if (git.reviewedCommit === undefined) {
-      throw new Error(`merge refused: ${git.branch} has no reviewed commit; park the card in "Ready for test" again so the approval is bound to the commit you reviewed`)
+      throw new Error(`merge refused: ${git.branch} has no reviewed commit; park the card in "Testing" again so the approval is bound to the commit you reviewed`)
     }
     const { dir, checkout } = this.workDir(git)
     if (this.isDirty(dir)) {
-      throw new Error(`merge refused: ${dir} still holds uncommitted work, so the reviewed commit ${short(git.reviewedCommit)} is not what the worktree shows; park the card in "Ready for test" again`)
+      throw new Error(`merge refused: ${dir} still holds uncommitted work, so the reviewed commit ${short(git.reviewedCommit)} is not what the worktree shows; park the card in "Testing" again`)
     }
     if (checkout) await this.runAsync(dir, ['checkout', git.branch], task.id)
     const head = this.head(dir)

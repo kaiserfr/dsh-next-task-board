@@ -134,7 +134,7 @@ describe('use-case: update content editability', () => {
     // Once the card left the pre-execution columns its content is the record
     // of what ran, so it stays read-only there.
     const parked = settleExecution(running, 'e-run', 'succeeded', NOW + 1, undefined)
-    expect(parked.status).toBe('ready_for_test')
+    expect(parked.status).toBe('testing')
     expect(canEditTaskContent(parked)).toBe(false)
 
     expect(canEditTaskContent({ ...fresh, status: 'done' })).toBe(false)

@@ -255,7 +255,8 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 .statusDot[data-status='clarification'] { background: var(--dsw-alias-state-business-secondary); }
 .statusDot[data-status='todo'] { background: var(--dsw-alias-state-business-primary); }
 .statusDot[data-status='running'] { background: var(--dsw-alias-state-warn-primary); }
-.statusDot[data-status='ready_for_test'] { background: var(--dsw-alias-state-warn-secondary); }
+.statusDot[data-status='testing'] { background: var(--dsw-alias-state-warn-secondary); }
+.statusDot[data-status='tested'] { background: var(--dsw-alias-state-success-secondary); }
 .statusDot[data-status='done'] { background: var(--dsw-alias-state-success-primary); }
 .statusDot[data-status='failed'] { background: var(--dsw-alias-state-error-primary); }
 
@@ -1037,9 +1038,14 @@ textarea.input::-webkit-resizer {
   border-color: var(--dsw-alias-state-warn-primary);
 }
 
-.statusBadge[data-status='ready_for_test'] {
+.statusBadge[data-status='testing'] {
   color: var(--dsw-alias-state-warn-secondary);
   border-color: var(--dsw-alias-state-warn-secondary);
+}
+
+.statusBadge[data-status='tested'] {
+  color: var(--dsw-alias-state-success-secondary);
+  border-color: var(--dsw-alias-state-success-secondary);
 }
 
 .statusBadge[data-status='done'] {

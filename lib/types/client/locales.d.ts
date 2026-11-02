@@ -21,7 +21,8 @@ export declare const zh: {
     'board.status.backlog': string;
     'board.status.clarification': string;
     'board.status.running': string;
-    'board.status.ready_for_test': string;
+    'board.status.testing': string;
+    'board.status.tested': string;
     'board.status.done': string;
     'board.status.failed': string;
     'board.runs': string;
@@ -189,7 +190,8 @@ export declare const zh: {
     'delete.cancel': string;
     'status.move.backlog': string;
     'status.move.clarification': string;
-    'status.move.ready_for_test': string;
+    'status.move.testing': string;
+    'status.move.tested': string;
     'status.move.done': string;
     'status.move.running': string;
     'status.move.failed': string;
@@ -244,6 +246,11 @@ export declare const zh: {
     'exec.model.unknown': string;
     'exec.reuseSession': string;
     'exec.reuseSessionHint': string;
+    'exec.skipTests': string;
+    'exec.skipTestsHint': string;
+    'card.skipTests': string;
+    'review.startTests': string;
+    'review.startTestsHint': string;
     'detail.executionSettings': string;
     'exec.hint': string;
     'settings.title': string;

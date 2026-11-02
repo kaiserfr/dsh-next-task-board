@@ -4,7 +4,7 @@
  * (title, description, prompt, and the "Parse with AI" source) exactly while
  * the card waits in a pre-execution column — `backlog` or `todo` — whatever ran
  * before. A running task and a card that moved on to
- * `ready_for_test`/`done`/`failed` fail closed — no edit affordance — and the
+ * `testing`/`tested`/`done`/`failed` fail closed — no edit affordance — and the
  * edit modal saves through the controller only after validating the title.
  */
 import { act } from 'react'

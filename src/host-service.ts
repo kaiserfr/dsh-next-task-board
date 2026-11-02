@@ -175,7 +175,7 @@ export class TaskBoardHostService {
    */
   private maxConcurrentRuns = 1
   /**
-   * Rework watch: per card in a settled column (`ready_for_test`/`failed`), the
+   * Rework watch: per card in a settled column (`testing`/`tested`/`failed`), the
    * `updatedAt` its conversation had when it was last read. An unchanged chat
    * costs no history RPC; the entry is dropped as soon as the card leaves the
    * watched columns. See {@link watchReworkChats}.
@@ -1134,10 +1134,10 @@ export class TaskBoardHostService {
       this.reviewEnvs.delete(intent.taskId)
       return
     }
-    if (task.archivedAt !== undefined || task.status !== 'ready_for_test') {
-      // The review controls only exist in the review column; a queued action
-      // that lost its column is dropped instead of staring a stack for a card
-      // that is no longer under review.
+    if (task.archivedAt !== undefined || (task.status !== 'testing' && task.status !== 'tested')) {
+      // The review controls only exist in the testing/tested columns; a queued
+      // action that lost its column is dropped instead of starting a stack for
+      // a card that is no longer under review.
       return
     }
     const current = this.reviewEnvs.get(task.id) ?? task.review
@@ -1258,6 +1258,10 @@ export class TaskBoardHostService {
     // and its prompt is the run prompt plus the clarification addendum
     // (composed by the runner).
     const clarification = opened.execution.kind === 'clarify'
+    // The test run of the `testing` column is WIP-free like a clarification run,
+    // but it is a real test: it continues the implementation conversation, its
+    // prompt only tests and reports, and its settle parks the card in `tested`.
+    const testRun = opened.execution.kind === 'test'
     // The automatic conflict resolution of a merge release is an ordinary run in
     // every structural respect, but its turn is the merge framing: the card's
     // feature is finished, and the only job is the conflict the Host left in the
@@ -1287,7 +1291,7 @@ export class TaskBoardHostService {
       const reuseSessionId = reusableSessionId(
         opened.task,
         this.idleSessionIds,
-        rework ? { rework: true } : {},
+        rework ? { rework: true } : testRun ? { test: true } : {},
       )
       if (rework && reuseSessionId === undefined) {
         console.warn(`[dsh-task-board] rework for task ${opened.task.id} starts a fresh session: the corrected conversation is gone or busy, so its remarks are not in context`)
@@ -1296,7 +1300,7 @@ export class TaskBoardHostService {
       // holds the card's instruction, its questions and their answers:
       // the run only has to be told to implement now. Any other session (a
       // fresh one, or a previous run's conversation) still needs the full prompt.
-      const implement = !clarification && !mergeRun && reuseSessionId !== undefined && reuseSessionId === opened.task.clarificationSessionId
+      const implement = !clarification && !mergeRun && !testRun && reuseSessionId !== undefined && reuseSessionId === opened.task.clarificationSessionId
       const clarificationSessionId = opened.task.clarificationSessionId
       const sessionId = await this.runner.launch(launched, clarification
         ? {
@@ -1308,6 +1312,7 @@ export class TaskBoardHostService {
             ...(rework ? { rework: true } : {}),
             ...(implement ? { implement: true } : {}),
             ...(mergeRun ? { merge: true } : {}),
+            ...(testRun ? { test: true } : {}),
           })
       // Paused while the session was being created: stop the turn it may
       // already be running and keep the card paused. The session stays attached
@@ -1437,6 +1442,7 @@ export class TaskBoardHostService {
         await this.runner.launch(resumed.task, {
           reuseSessionId: sessionId,
           resume: true,
+          ...(resumed.execution.kind === 'test' ? { test: true } : {}),
           ...(preserved === undefined || preserved.length === 0 ? {} : { resumeMessages: preserved }),
         })
       } catch (error) {
@@ -1497,7 +1503,8 @@ export class TaskBoardHostService {
     if (this.disposed || this.composeProjects.size === 0) return
     const keep = new Set<string>()
     for (const task of this.ledger.state().tasks) {
-      const wanted = task.archivedAt === undefined && (task.status === 'running' || task.status === 'ready_for_test')
+      const wanted = task.archivedAt === undefined
+        && (task.status === 'running' || task.status === 'testing' || task.status === 'tested')
       const record = this.composeProjects.get(task.id)
       if (record === undefined) continue
       if (wanted) keep.add(task.id)
@@ -1793,7 +1800,8 @@ export class TaskBoardHostService {
   /** Reuse the session list this poll already fetched: one list RPC per tick, not 1 + E. */
   /**
    * Settle every open execution whose session has finished. This is the only
-   * automatic path into `ready_for_test`: the runner reports 'succeeded' only
+   * automatic path into `testing` (the implementation park) and, through the
+   * test run's settle, into `tested`: the runner reports 'succeeded' only
    * once the session has come to rest (no running turn, nothing queued, no
    * live job), so the column change is always the session's last action — an
    * agent's own `FERTIG:` report never moves the card while its session runs.
@@ -1934,7 +1942,7 @@ export class TaskBoardHostService {
     for (const row of this.ledger.sessionWatch()) {
       if (row.open || row.paused || row.archived || row.status === 'done') continue
       if (releasing[row.taskId] !== undefined) continue
-      if (row.status !== 'ready_for_test' && row.status !== 'failed' && row.status !== 'clarification') continue
+      if (row.status !== 'testing' && row.status !== 'tested' && row.status !== 'failed' && row.status !== 'clarification') continue
       if (row.settledAt === undefined) continue
       const summary = byId.get(row.sessionId)
       if (summary === undefined || summary.running !== true) continue
@@ -2128,12 +2136,12 @@ export class TaskBoardHostService {
       // makes the overlap safe.
       const holding = new Map<string, number>()
       for (const execution of open) {
-        if (execution.kind === 'clarify') continue
+        if (execution.kind === 'clarify' || execution.kind === 'test') continue
         if (execution.sessionId === undefined) continue
         holding.set(execution.lane, (holding.get(execution.lane) ?? 0) + 1)
       }
       const index = this.launchQueue.findIndex((opened) => {
-        if (opened.execution.kind === 'clarify') return true
+        if (opened.execution.kind === 'clarify' || opened.execution.kind === 'test') return true
         const lane = taskLane(opened.task)
         return (holding.get(lane) ?? 0) + (this.launchesInFlight.get(lane) ?? 0) < this.maxConcurrentRuns
       })
@@ -2142,8 +2150,9 @@ export class TaskBoardHostService {
       if (next === undefined) return
       const lane = taskLane(next.task)
       // A WIP-free launch must not raise the lane's in-flight count either, or
-      // the question rounds of the following cards would queue behind it.
-      const wipFree = next.execution.kind === 'clarify'
+      // the clarification/test rounds of the following cards would queue behind
+      // it.
+      const wipFree = next.execution.kind === 'clarify' || next.execution.kind === 'test'
       if (!wipFree) this.launchesInFlight.set(lane, (this.launchesInFlight.get(lane) ?? 0) + 1)
       let released = false
       const release = (): void => {

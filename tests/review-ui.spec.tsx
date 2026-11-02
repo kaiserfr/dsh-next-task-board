@@ -26,7 +26,7 @@ function card(overrides: Partial<TaskRecord> = {}): TaskRecord {
     title: 'Card',
     description: '',
     prompt: 'p',
-    status: 'ready_for_test',
+    status: 'testing',
     createdAt: 0,
     updatedAt: 0,
     executions: [],
@@ -76,6 +76,7 @@ function harness(options: { task?: TaskRecord; plan?: Record<string, unknown> | 
     reviewStart: record('reviewStart'),
     reviewStop: record('reviewStop'),
     reviewRestart: record('reviewRestart'),
+    startTest: record('startTest'),
     openWorktree: record('openWorktree'),
     loadReviewLogs: record('loadReviewLogs'),
     loadReviewDiff: record('loadReviewDiff'),
@@ -181,6 +182,18 @@ describe('review block', () => {
     expect(calls.loadReviewLogs).toEqual(['card-1'])
     await act(async () => { await Promise.resolve() })
     expect(container.querySelector('[data-dsh-part="review-logs"]')?.textContent).toContain('log line')
+  })
+
+  it('offers the manual test start in testing and the release only in tested', () => {
+    const testing = harness({ task: card({ status: 'testing' }) }).controller
+    const testingView = render(<TaskDetail controller={testing} task={card({ status: 'testing' })} />)
+    expect(control(testingView, 'start-tests')).not.toBeNull()
+    expect(control(testingView, 'release')).toBeNull()
+
+    const tested = harness({ task: card({ status: 'tested' }) }).controller
+    const testedView = render(<TaskDetail controller={tested} task={card({ status: 'tested' })} />)
+    expect(control(testedView, 'release')).not.toBeNull()
+    expect(control(testedView, 'start-tests')).toBeNull()
   })
 
   it('says what is missing when the workspace configures nothing', () => {
