@@ -18,7 +18,8 @@ import type { TaskRecord } from './tasks.ts'
  * - `resolving` — the replay onto the base conflicted and a resolution run is
  *   working on it,
  * - `released` — the human released the card and the Host is merging,
- * - `failed` — the release failed; the card carries the reason,
+ * - `failed` — the release failed; the card carries the reason and stands in
+ *   `clarification` (the badge is the only place the card states it there),
  * - `unmerged` — the card has a branch but was not merged (yet),
  * - `no-branch` — there is nothing to merge (no repository, or a card released
  *   without a branch), which is a statement, not an error.

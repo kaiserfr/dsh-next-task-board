@@ -433,6 +433,10 @@ export class TaskBoardHostService {
       // A settle frees its lane's WIP slot, so the next queued run starts here.
       this.pumpLaunchQueue()
     })
+    // The ledger's own startup recovery can open a run (the question round of an
+    // interrupted release) before this listener exists; take those now instead
+    // of waiting for the next ledger change.
+    for (const run of this.ledger.takeRuns()) this.launchQueue.push(run)
     this.power.subscribe(() => {
       // updateReasons emits on every poll tick even when nothing changed;
       // gate on the actual snapshot so the 5 s heartbeat does not push an
@@ -463,6 +467,9 @@ export class TaskBoardHostService {
     this.samplePressure()
     this.schedulePoll()
     this.scheduleTick(true)
+    // Runs the ledger recovered at startup (the question round of an interrupted
+    // release) were queued before the board started; start them with it.
+    this.pumpLaunchQueue()
   }
 
   /**
@@ -1070,7 +1077,9 @@ export class TaskBoardHostService {
    * the destructive level — the pause preserves human messages, the hard stop
    * does not), force the agent to rest if the runtime disagrees, and settle the
    * open run as cancelled so the card leaves the run column instead of waiting
-   * for a session that no longer works.
+   * for a session that no longer works. A conflict-resolution run is the
+   * exception: it is paused instead, keeping the card in `running` because its
+   * conflict stays in the worktree and the human continues the same conversation.
    */
   hardStop(taskId: string): void {
     const task = this.ledger.task(taskId)
@@ -1086,7 +1095,12 @@ export class TaskBoardHostService {
         }
       }
       for (const execution of open) this.ledger.settle(taskId, execution.id, 'cancelled', 'Session hart gestoppt (offline).')
-      this.ledger.note(taskId, 'Session hart gestoppt; der Lauf wurde als abgebrochen abgerechnet.')
+      // A cancelled conflict-resolution run was paused instead of settled (its
+      // conflict stays in the worktree); say that instead of claiming the run
+      // was accounted as cancelled.
+      this.ledger.note(taskId, this.ledger.task(taskId)?.pausedAt === undefined
+        ? 'Session hart gestoppt; der Lauf wurde als abgebrochen abgerechnet.'
+        : 'Session hart gestoppt; der Lösungslauf bleibt pausiert und kann mit „Weitermachen" fortgesetzt werden.')
     })().catch(error => { safeConsoleError(`[dsh-task-board] hard stop of task ${taskId} failed`, error) })
   }
 

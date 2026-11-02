@@ -63,8 +63,12 @@ export interface ExecutionRecord {
    * conflict-resolution run of a merge release: the base branch had moved on, the
    * Host replayed the card's feature branch onto it and left the conflict in the
    * worktree, so this run's whole job is to resolve it and finish the replay — it
-   * is an ordinary run in every other respect (it moves the card like one, and
-   * its settle is what makes the Host retry the merge). `'test'` marks the
+   * is an ordinary run in every other respect (its settle is what makes the Host
+   * retry the merge). A successful settle parks the card in `tested`; a failed
+   * one sends it to `clarification` with the reason on the card, where the
+   * automatic clarification run asks how the problem should be fixed. A
+   * cancellation is not an outcome of the release at all: the card stays in
+   * `running` (paused) so the same conversation can be continued. `'test'` marks the
    * test run of the `testing` column: the Host opens it automatically (or from
    * the card's "Tests starten" button) once the implementation run settled, it
    * continues the same conversation, its prompt only tests and reports, and it
@@ -176,12 +180,18 @@ export interface TaskMerge {
   commit?: string
   /**
    * Automatic conflict-resolution runs started for this release. At most one is
-   * ever started: a second conflict fails the release.
+   * ever started: a second conflict ends the release and sends the card to
+   * `clarification`.
    */
   attempts: number
   /** The conflict that needed the agent, as text (files included). */
   conflict?: string
-  /** Why the release ended in `failed` (the card's column says the rest). */
+  /**
+   * Why the release failed. The card states it through its merge badge; the
+   * release itself never keeps the card in `failed` — every failure parks it in
+   * `clarification`, where the automatic clarification run asks how the problem
+   * should be fixed.
+   */
   error?: string
   /** When the automatic resolution finished (ms epoch). */
   resolvedAt?: number
@@ -902,6 +912,13 @@ export function startExecution(
  * not complete; the human restarts them) and parks the card in `tested` only
  * when its session ended normally.
  *
+ * A conflict-resolution run returns to the merge gate on success. Its failure is
+ * a failed release, so the card is parked in `clarification` (the Host opens the
+ * question round there). Its cancellation never moves the card: the Host treats
+ * that abort as a pause before settling (see `HostTaskLedger.settle`), and the
+ * `task.status` fallback here only keeps a card that was moved by hand in that
+ * move.
+ *
  * @param park - where a succeeded implementation run parks the card: `testing`
  *   by default, `tested`/`done` for a card without tests (see
  *   {@link implementationParkStatus}).
@@ -926,9 +943,13 @@ export function settleExecution(
     : execution.kind === 'test'
       ? outcome === 'succeeded' ? 'tested' : outcome === 'failed' ? 'failed' : task.status
       : execution.kind === 'merge'
-        // The conflict-resolution run returns to the merge gate on success; the
-        // release retry then finishes the merge (or fails it).
-        ? outcome === 'succeeded' ? 'tested' : 'failed'
+        // The conflict-resolution run returns to the merge gate on success, and
+        // the release retry then finishes the merge. A failed resolution is a
+        // failed release: the card goes to `clarification`, where the Host opens
+        // the question round. A cancellation keeps the column the caller set —
+        // an abort is a pause (handled before this point), and a manual move to
+        // Done must win over the cancelled run it closes.
+        ? outcome === 'succeeded' ? 'tested' : outcome === 'cancelled' ? task.status : 'clarification'
         : outcome === 'succeeded'
           ? park
           : outcome === 'failed' ? 'failed'

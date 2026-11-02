@@ -410,7 +410,9 @@ export declare class TaskBoardHostService {
      * the destructive level — the pause preserves human messages, the hard stop
      * does not), force the agent to rest if the runtime disagrees, and settle the
      * open run as cancelled so the card leaves the run column instead of waiting
-     * for a session that no longer works.
+     * for a session that no longer works. A conflict-resolution run is the
+     * exception: it is paused instead, keeping the card in `running` because its
+     * conflict stays in the worktree and the human continues the same conversation.
      */
     hardStop(taskId: string): void;
     /**

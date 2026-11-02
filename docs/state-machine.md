@@ -64,7 +64,7 @@ definition.
 | Trigger  | Who fires it                                              |
 |----------|-----------------------------------------------------------|
 | `manual` | A human: drag & drop on the board, or a chip in the task detail. |
-| `runner` | The execution runner settling a run (implementation success → `testing`, test-run success → `tested`, failure → `failed`, cancel → `clarification`). |
+| `runner` | The execution runner settling a run (implementation success → `testing`, test-run success → `tested`, failure → `failed` — a conflict-resolution run's failure → `clarification`, cancel → `clarification`; a cancelled conflict-resolution run is paused in `running` instead). |
 | `cron`   | A scheduled run.                                          |
 
 `running` is the runner's own state: it carries `"drop": false` and only
@@ -126,7 +126,7 @@ every card — the column is where the agent asks before anything is implemented
 |---------------------|------------------------------------------------------------------------|
 | `git.openBranch`    | Cuts the card's feature branch (`task/<slug>-<id8>`) from the base branch **and its own worktree** under `$DSH_HOME/task-board/worktrees/<id>`: the run session is created on that directory, so the main checkout keeps the branch the human left it on. A branch that already exists is re-attached; where `git worktree` refuses, the historical shared checkout is used instead. No-op without a git repository. |
 | `git.commitBranch`  | Commits the worktree onto the card's feature branch (`committedAt` stamp) and stamps the resulting head as `reviewedCommit` — the commit the review column shows, cutting the branch first when the card has none. No-op without a repository or when the worktree is clean — never an empty commit. |
-| `git.mergeBranch`   | Replays the feature branch onto its base branch as that stands now (`git rebase` — other cards may have merged meanwhile) and merges it back — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused before anything is replayed. On the release into `done` this is the merge release: a refusal or a failure parks the card in `failed` with the reason, and a **conflict** in the replay is resolved by the card's own agent instead (see *Merge release*). |
+| `git.mergeBranch`   | Replays the feature branch onto its base branch as that stands now (`git rebase` — other cards may have merged meanwhile) and merges it back — but **only** the commit the card was parked on: a card without a recorded review commit, a dirty worktree, or a branch that moved past that commit is refused before anything is replayed. On the release into `done` this is the merge release: a refusal or a failure parks the card in `clarification` (with the reason and an automatic question round), and a **conflict** in the replay is resolved by the card's own agent instead (see *Merge release*). |
 | `run`               | Opens an execution for the card and moves it to the transition target (drag onto "In progress"). A human start from `clarification` closes the open clarification round and continues the card's clarification session; the detail transition buttons and cron do the same. It never checks a specification release: starting the work *is* the go-ahead. |
 | `clarify`           | Opens the card's clarification run: the same execution as `run` (same queue, but WIP-free — the clarification column starts without waiting for a lane slot), its prompt asks the agent's open questions in the card's chat and stops, it checks no branch out, and settling it leaves the card in its column. |
 | `{ kind: "stamp", field: "doneAt" }` | Writes a timestamp into a task field.                    |
@@ -229,9 +229,9 @@ corrected by sending the card back through `running` (rework):
   review column and back in stamps the commit; a custom machine should carry
   `git.commitBranch` on every way into `testing` (it already should, for the
   commit policy above).
-* The refusal is recorded on the card and the card goes to `failed` (see *Merge
-  release*), so the reason stays readable until the card is sent back and
-  re-released.
+* The refusal is recorded on the card and the card goes to `clarification` (see
+  *Merge release*), where the automatic question round asks how the problem is
+  to be fixed. The reason stays readable through the card's merge badge.
 
 `reviewedCommit` is only a bind — the commit that reaches `done`, is the one the
 human saw in the review column, replayed onto the base as it stood at the
@@ -263,11 +263,12 @@ Host action) — go through the same Host routine, so the two can never disagree
   card may be reactivated — and releasing it is what **archiving** does; the
   branch, the commits and the review stamp survive in the repository.
 * **The release is refused or fails** (dirty worktree, a branch past the reviewed
-  commit, no reviewed commit, git's own error): the card goes to `failed` with
-  the Host's reason on its `merge` record. From there the ordinary rework path
-  applies — the human writes the correction into the card's chat, the card
-  returns to `clarification`, the next park rebinds the approval and clears the release
-  record, and the next release tries again.
+  commit, no reviewed commit, git's own error): the card goes to
+  `clarification` with the Host's reason on its `merge` record, and a
+  clarification run opens automatically to ask how the problem is to be fixed.
+  The human answers in that chat and pulls the card on to the run column; the
+  next park rebinds the approval and clears the release record, and the next
+  release tries again.
 * **The replay conflicts.** The half-done rebase **stays in the card's own
   worktree**, markers and all, and is never handed to the human's checkout: the
   card moves to `running` on a `merge` execution whose turn is the merge framing
@@ -278,23 +279,27 @@ Host action) — go through the same Host routine, so the two can never disagree
 * **One attempt.** A release starts at most one resolution run
   (`MERGE_RESOLVE_ATTEMPTS`). When it settles `succeeded` and the replay is
   finished, the Host retries the release by itself: success parks the card in
-  `done`, and a second conflict (or a run that failed, was cancelled, or
-  "succeeded" without finishing the replay — unmerged files and an unfinished
-  rebase are checked, never trusted) parks the card in `failed` with the reason.
-  A failed or refused resolution aborts the unfinished rebase, which puts the
-  branch back onto `reviewedCommit`, so neither the next run nor a later release
-  starts on top of a half-done replay.
+  `done`, and a second conflict (or a run that failed, or "succeeded" without
+  finishing the replay — unmerged files and an unfinished rebase are checked,
+  never trusted) parks the card in `clarification` with the reason, where the
+  question round opens automatically. A **cancelled** resolution run is not a
+  failed release: the Host pauses the card in `running`, leaves the conflict in
+  the worktree, and *Continue* (`Weitermachen`) resumes the very same
+  conversation. A failed or refused resolution aborts the unfinished rebase,
+  which puts the branch back onto `reviewedCommit`, so neither the next run nor
+  a later release starts on top of a half-done replay.
 * **Visible on the card.** The card's merge state is derived
   (`core/merge.ts`): `merged`, `unmerged`, `released`, `resolving`, `failed` or
-  `no-branch`. The card carries it as a badge, and the review block names the
-  released commit, the release instant, the conflict and the error. A card whose
-  release failed keeps that merge section — the reason is what the correction is
-  written about — while the column's controls (release, start/stop) are gone with
-  the column.
+  `no-branch`. The card carries it as a badge. The review block (rendered in
+  `testing`/`tested`, and for a `failed` card that still carries the record)
+  names the released commit, the release instant, the conflict and the error. A
+  card whose release failed stands in `clarification`: the review block is not
+  rendered there, the badge still states `failed`, and the reason stays in
+  `TaskMerge.error` — the failed release's clarification prompt carries it too.
 * **Group drops are per-card.** The Host's `move-many` action still never starts
   runs (nor resolution runs), but the board no longer sends it: each card queues
   its own transition, so a group onto Done releases each card independently — a
-  merge failure parks that card in `failed` without aborting the others.
+  merge failure parks that card in `clarification` without aborting the others.
 
 
 ## Repository discovery: `repoSubpath`
