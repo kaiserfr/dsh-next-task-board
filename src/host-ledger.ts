@@ -1117,10 +1117,13 @@ export class HostTaskLedger {
    * - merge succeeds: `done`, `TaskGit.mergedAt` and {@link TaskMerge.mergedAt}
    *   stamped,
    * - merge refused (dirty worktree, moved branch, no reviewed commit) or fails:
-   *   the card goes to `failed` with the reason,
+   *   the card goes to `clarification` with the reason, and the automatic
+   *   clarification run asks how the problem should be fixed,
    * - the replay conflicts: the half-done rebase is left in the card's own
    *   worktree and the card goes to `running` on a `merge` run; one automatic
-   *   resolution run per release, whose settle retries the release.
+   *   resolution run per release, whose settle retries the release. If that
+   *   retry fails too, the card goes to `clarification` as above; an aborted
+   *   resolution run is a pause and leaves the card in `running`.
    */
   private beginRelease(task: TaskRecord, now: number, initiator?: string): ReleaseResult {
     const git = task.git
@@ -1219,8 +1222,13 @@ export class HostTaskLedger {
       return
     }
     const message = outcome.error ?? 'the release failed'
-    this.applyReleaseResult(withStatus({ ...task, merge: { ...plan.base, error: message } }, 'failed', now))
-    this.pushNotice(task.id, `release failed: ${message}`)
+    const failed = withStatus({ ...task, merge: { ...plan.base, error: message } }, 'clarification', now)
+    // Every failed release parks the card in `clarification` and opens the
+    // question round there: the human says how the problem is to be fixed, and
+    // the run that continues after the go-ahead carries it out. The card never
+    // sits in `failed` for a release any more.
+    this.applyReleaseResult(this.clarifyAfterFailedRelease(failed, now, plan.initiator))
+    this.pushNotice(task.id, `release failed: ${message}; the card moved to clarification`)
   }
 
   /** Persist one release result and keep the Done-column limit converged. */
@@ -1243,15 +1251,17 @@ export class HostTaskLedger {
    * run sees exactly that state and finishes it.
    *
    * Exactly one resolution run per release (`MERGE_RESOLVE_ATTEMPTS`): a second
-   * conflict aborts the half-done replay and fails the release, so the release
-   * can never become a loop. Aborting puts the branch back onto the commit the
-   * human reviewed, which is what a later release starts from again.
+   * conflict aborts the half-done replay and ends the release in `clarification`,
+   * so the release can never become a loop. Aborting puts the branch back onto
+   * the commit the human reviewed, which is what a later release starts from
+   * again; the question round then settles how to fix the conflict.
    */
   private resolveConflict(task: TaskRecord, merge: TaskMerge, conflict: MergeConflictError, now: number, initiator?: string): ReleaseResult {
     const conflicted: TaskMerge = { ...merge, conflict: conflict.message }
     if (merge.attempts >= MERGE_RESOLVE_ATTEMPTS) {
       this.git?.abortUnresolvedMerge(task)
-      return { task: withStatus({ ...task, merge: { ...conflicted, error: conflict.message } }, 'failed', now) }
+      const failed = withStatus({ ...task, merge: { ...conflicted, error: conflict.message } }, 'clarification', now)
+      return { task: this.clarifyAfterFailedRelease(failed, now, initiator) }
     }
     const opened = startExecution(
       { ...task, merge: { ...conflicted, attempts: merge.attempts + 1 } },
@@ -1264,24 +1274,61 @@ export class HostTaskLedger {
   }
 
   /**
+   * Park a failed release in `clarification` and open the card's question round
+   * there. The failure happened in the card's own conversation, so the round
+   * continues the newest session it can find — the agent already knows the merge
+   * it is asked about, and the run is WIP-free like every clarification run. The
+   * human answers in the chat and pulls the card on to the run column; that
+   * implementation turn carries the answer out.
+   *
+   * A card that already holds an open run is left alone: it must never carry two
+   * open executions, and an open clarification round is already the round this
+   * failure needs.
+   */
+  private clarifyAfterFailedRelease(task: TaskRecord, now: number, initiator?: string): TaskRecord {
+    if (task.archivedAt !== undefined) return task
+    let sessionId: string | undefined
+    for (let index = task.executions.length - 1; index >= 0; index -= 1) {
+      const candidate = task.executions[index]?.sessionId
+      if (candidate !== undefined) {
+        sessionId = candidate
+        break
+      }
+    }
+    const prepared: TaskRecord = sessionId === undefined
+      ? task
+      : { ...task, clarificationSessionId: sessionId }
+    if (hasOpenExecution(prepared)) return prepared
+    const opened = startExecution(prepared, now, crypto.randomUUID(), initiator, 'clarify')
+    this.pendingRuns.push({ task: opened.task, execution: opened.execution })
+    return opened.task
+  }
+
+  /**
    * What happens once a conflict-resolution run settled. A run that did not
    * succeed (or one that ended with the replay still unfinished) leaves the
    * conflict unresolved: the worktree is put back into a clean state, the card
-   * says why, and the release ends in `failed` — the second attempt the decision
-   * allows is used up. A run that did resolve it queues the release retry after
-   * that run's settle commit, which either finishes the release (`done`) or
-   * fails it.
+   * says why, and the release ends in `clarification`, where the automatic
+   * question round asks how the problem should be fixed. A run that did resolve
+   * it queues the release retry after that run's settle commit, which either
+   * finishes the release (`done`) or sends the card to `clarification` as well.
+   *
+   * A cancelled run never reaches this path: the Host turns that abort into a
+   * pause (see {@link settle}), so the card stays in `running` with the conflict
+   * still in its worktree.
    */
   private onMergeRunSettled(task: TaskRecord, outcome: 'succeeded' | 'failed' | 'cancelled', error: string | undefined, now: number): TaskRecord {
     const merge = task.merge
     if (merge === undefined || merge.mergedAt !== undefined) return task
     if (outcome !== 'succeeded') {
+      // A cancellation is a pause, not a failed release: the card keeps its
+      // column and the open run (the pause path settled nothing).
+      if (outcome === 'cancelled') return task
       this.git?.abortUnresolvedMerge(task)
-      const reason = error !== undefined && error !== '' ? error : outcome === 'cancelled'
-        ? 'the conflict-resolution run was cancelled'
-        : 'the conflict-resolution run failed'
-      this.pushNotice(task.id, `release failed: ${reason}`)
-      return { ...task, merge: { ...merge, error: reason }, updatedAt: now }
+      const reason = error !== undefined && error !== '' ? error : 'the conflict-resolution run failed'
+      this.pushNotice(task.id, `release failed: ${reason}; the card moved to clarification`)
+      const failed = withStatus({ ...task, merge: { ...merge, error: reason } }, 'clarification', now)
+      return this.clarifyAfterFailedRelease(failed, now)
     }
     // The run resolved the conflict; its settle enqueued the commit above, so
     // this job runs after it and its plan binds the new reviewed commit.
@@ -1511,6 +1558,23 @@ export class HostTaskLedger {
 
   settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void {
     const now = this.now()
+    // A cancelled conflict-resolution run is the human stopping the release, not
+    // a failed release: the conflict stays in the card's worktree, the card stays
+    // in `running`, and it is paused so "Weitermachen" continues the very same
+    // session. Nothing is aborted and no question round is opened — the release
+    // simply waits for the human to continue it.
+    if (outcome === 'cancelled') {
+      const cancelled = this.document.tasks.find(item => item.id === taskId)
+      const execution = cancelled?.executions.find(entry => entry.id === executionId)
+      if (cancelled !== undefined && execution !== undefined && execution.kind === 'merge'
+        && execution.endedAt === undefined && cancelled.status === 'running' && cancelled.pausedAt === undefined) {
+        this.document.tasks = this.document.tasks.map(item => item.id === taskId
+          ? withPause(item, true, now)
+          : item)
+        this.commit()
+        return
+      }
+    }
     let openedTest: OpenedRun | undefined
     let movedToDone = false
     this.document.tasks = this.document.tasks.map(task => {
@@ -2041,6 +2105,23 @@ export class HostTaskLedger {
       // worktree (queued on the card's work chain); a clarification round owns
       // nothing to commit.
       if (execution.kind !== 'clarify') this.enqueueCommit(settled.id)
+      // An interrupted conflict resolution never ran, so it cannot be continued
+      // like a pause: it is a failed release. Park it in `clarification` and
+      // open the question round there, exactly like any other failed release.
+      if (execution.kind === 'merge') {
+        // The interrupted run never resolved anything; a half-done replay in the
+        // worktree would confuse the next run, so put it back to a clean state.
+        this.git?.abortUnresolvedMerge(settled)
+        const failed = withStatus({
+          ...settled,
+          merge: {
+            ...(settled.merge ?? { releasedAt: now, attempts: 0 }),
+            error: 'host restarted before the conflict resolution recorded a session',
+          },
+          updatedAt: now,
+        }, 'clarification', now)
+        return this.clarifyAfterFailedRelease(failed, now)
+      }
       return settled
     })
     if (changed && persist) this.commit()

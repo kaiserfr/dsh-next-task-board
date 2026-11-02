@@ -419,12 +419,28 @@ function mergePrompt(task: TaskRecord): string {
  * {@link CLARIFICATION_ADDENDUM}, so the two can never drift apart.
  */
 function clarificationPrompt(task: TaskRecord): string {
+  // A failed release parks the card in `clarification` and opens this question
+  // round: name the failure (and the conflict) explicitly, so the agent does not
+  // have to guess what it is asked about even when the conversation does not
+  // carry that context.
+  const failure = task.merge?.error === undefined
+    ? []
+    : [
+        '',
+        'Der letzte Freigabe-Merge ist fehlgeschlagen; deshalb steht die Karte in der Klärungsspalte:',
+        task.merge.error,
+        ...(task.merge.conflict === undefined || task.merge.conflict === task.merge.error
+          ? []
+          : [`Der Konflikt: ${task.merge.conflict}`]),
+        'Kläre, wie dieses Problem behoben werden soll — der nächste Implementierungslauf setzt die Antwort um.',
+      ]
   return [
     // The full run prompt (tags, handover preamble, freeze wrap, card body):
     // the clarification is the same instruction, only stopped before the work.
     // The completion instruction is deliberately absent — this turn implements
     // nothing, so it must not report a finished task.
     implementationTurn(task, {}),
+    ...failure,
     '',
     ...CLARIFICATION_ADDENDUM,
   ].join('\n')

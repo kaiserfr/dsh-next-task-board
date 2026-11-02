@@ -289,8 +289,10 @@ route and system-prompt section).
     ("Release for merge"), and the card states the outcome either way: **merged**
     (with the instant), **not merged**, **conflict**, **merge failed**, or — for
     a card without a branch — **no branch** (released without a merge).
-  - **A failed release lands in Failed**, with the Host's reason on the card.
-    Parking the card again (Tested → To do, or Failed → To do) rebinds
+  - **A failed release lands in Clarification**, with the Host's reason on the
+    card and an automatic clarification run that asks how the problem is to be
+    fixed. Answer in that chat and pull the card on to In progress — the
+    implementation turn carries the answer out. Parking the card again rebinds
     the approval to the new head *and* clears the release record, so reviewing
     follow-up work is correction in the card's chat, next run, next park, next
     release.
@@ -301,9 +303,11 @@ route and system-prompt section).
     add`, `git rebase --continue`, change nothing else); that resolution counts as
     part of the release, so the run's settle commits it, rebinds the approval to
     the replayed head and the Host retries the merge by itself. One resolution run
-    per release: a second conflict, a failed run, or a run that left the replay
-    unfinished aborts it, puts the branch back onto the reviewed commit and parks
-    the card in Failed.
+    per release: a second conflict (or a run that failed or left the replay
+    unfinished) aborts it, puts the branch back onto the reviewed commit and parks
+    the card in **Clarification** with the question round. A **cancelled**
+    resolution run is not a failure: the card stays in In progress, paused, the
+    conflict stays in its worktree, and *Continue* resumes that same conversation.
   - **A workspace that is only a container folder** (the repository is a
     directory inside it) reaches its repository through the `repoSubpath`
     setting: the branch, the worktree and the merge then happen inside that
@@ -517,9 +521,12 @@ action from any column but the review one:
   card's feature branch onto its base branch as that stands now and merges it
   back; the card moves on to Done by itself and states the outcome (merged, with
   the instant; conflict, with the conflict text; failed, with the reason; or "no
-  branch", when there was nothing to merge). A conflict in that replay is handed
-  to the card's own agent in its worktree — one automatic resolution run — and
-  the Host retries the merge when that run resolved it.
+  branch", when there was nothing to merge). A failed release sends the card to
+  **Clarification** with an automatic question round. A conflict in that replay
+  is handed to the card's own agent in its worktree — one automatic resolution
+  run — and the Host retries the merge when that run resolved it; if the retry
+  fails too, the card goes to Clarification, while a cancelled resolution run
+  leaves it paused in In progress (*Continue* resumes the same conversation).
 
 The environment is disposable and card-scoped: leaving the review column,
 archiving or deleting the card stops it again — but **only a version the board
@@ -549,8 +556,8 @@ The full review flow in `tests/review-workflow.spec.ts`,
 - **Pause and resume in-progress runs (fork addition)**: the board header's pause button suspends **every card holding an open run in one click** (the clarification run included) — each card keeps its column and its open execution record, only the run's session is stopped (`session/cancel`), so a paused card is neither "running now" nor "queued", does not occupy a WIP slot, and is left alone by the settlement monitor (an aborted turn never parks it in `failed`). The same button turns into *Resume all* (play glyph) when only paused cards are left, every card carries the pause/play control of its own run in its top corner, and the detail view's execution button is that same control. Resuming clears the stamp and writes a short **"continue" turn into the run's own conversation**, so the agent picks the task back up with its context intact; a run paused before it ever got a session is instead started normally. A paused card stays `running` (the stamp is `pausedAt`) and survives a Host restart paused.
 - **Multi-select and group drag (fork addition)**: a click marks a card, Ctrl/Cmd-click adds or removes one, Shift-click marks the range from the anchor card to the clicked one, and dragging any marked card carries the whole marked set. Host-backed each card gets its own queued transition (a newer click replaces that card's older intent), so the batch is no longer one atomic `move-many` action; cards the state machine forbids in the target column stay behind with the reason on the card, and a drop with nothing movable changes nothing and keeps the selection. Dropping the group on the running column queues each eligible card's run transition. A click on free board space or the header chip's clear button empties the selection, an unmarked card still drags alone, and the double click (or Enter on the focused card; Space marks from the keyboard) opens the detail as before.
 - **Corrections after a test (fork addition)**: a card that did not pass the review goes back to To do on the human's own chat turn. The Host watches the conversation of every settled card waiting in Testing / Tested / Failed, sends the card back with an ordinary, machine-validated `move`, and stamps the send-back (`reworkAt`/`reworkCount`, shown in the detail view). There is no correction field: the transcript is the note. The next run is the rework round (`ExecutionRecord.rework`) — it continues that conversation even for a card that never opted into session reuse and opens with the short rework framing instead of the card body; a clarification round does not consume the marker, and a lost or busy conversation falls back to the full prompt with a Host warning. `testing → running` / `tested → running` and `failed → running` (all `run`) also let the card be pulled straight onto the run column.
-- **The approval is bound to the reviewed commit (fork addition)**: parking a card in Testing records the branch head as `reviewedCommit`. Tested → Done takes **only** that commit: a dirty worktree, a branch that moved on, or a card without the stamp is refused (the card stays in the test column and the Host names the reason), and the former safety-net commit on merge is gone. Re-parking rebinds the approval to the new head, so a re-review is Tested → To do, correction in the card's chat, next run, next park. See [Agentic-programming workflow and git integration](#agentic-programming-workflow-and-git-integration).
-- **The merge release (fork addition)**: *Tested → Done* — the drag or the card's *Release for merge* button — replays the feature branch onto its base branch as that stands now (`git rebase`, because other cards may have merged in the meantime) and then merges it back, parking the card in Done. The outcome is written on the card (`merged` / `unmerged` / `resolving` / `failed` / `no-branch`); a refused or failed release lands in Failed with the reason, and a conflict in the replay is resolved once by the card's own agent in its worktree (`git add` + `git rebase --continue`), after which the Host retries the merge by itself. See [Merge release](docs/state-machine.md#merge-release-how-a-card-reaches-done).
+- **The approval is bound to the reviewed commit (fork addition)**: parking a card in Testing records the branch head as `reviewedCommit`. Tested → Done takes **only** that commit: a dirty worktree, a branch that moved on, or a card without the stamp is refused (the card goes to Clarification with the Host's reason and an automatic question round), and the former safety-net commit on merge is gone. Re-parking rebinds the approval to the new head, so a re-review is Tested → To do, correction in the card's chat, next run, next park. See [Agentic-programming workflow and git integration](#agentic-programming-workflow-and-git-integration).
+- **The merge release (fork addition)**: *Tested → Done* — the drag or the card's *Release for merge* button — replays the feature branch onto its base branch as that stands now (`git rebase`, because other cards may have merged in the meantime) and then merges it back, parking the card in Done. The outcome is written on the card (`merged` / `unmerged` / `resolving` / `failed` / `no-branch`); a refused or failed release lands in **Clarification** with the reason and an automatic clarification round, and a conflict in the replay is resolved once by the card's own agent in its worktree (`git add` + `git rebase --continue`), after which the Host retries the merge by itself — if that retry fails too, the card goes to Clarification. A cancelled resolution run keeps the card paused in In progress; *Continue* resumes the same conversation. See [Merge release](docs/state-machine.md#merge-release-how-a-card-reaches-done).
 - **Form drafts in the task modals (fork addition)**: an accidental click next to a popup no longer throws the form away. The new-task, duplicate, edit, and label forms hand their field values to a draft seat on the `BoardController` when they unmount, so backdrop click, Escape, and *Cancel* all close the popup while the next open restores exactly what was typed — the pasted "Parse with AI" text included. Drafts are keyed per form (one per card for the edit/label forms), live in memory only, and are forgotten by the explicit *Discard draft* action, by the *+ New task* button's dot resolving (a created or saved task), and by a form nobody touched; a parse still running is cancelled when the popup closes.
 - **Continuation cards (data plane)**: a new task may paste a `<<<FREEZE ... >>>FREEZE` block from a session; it parses into a goal/progress/next snapshot persisted with the task (ledger v3). Cards carry a frozen badge, the detail view shows the full snapshot and freeze time, search covers snapshot text, and archive/restore matches plain tasks. The snapshot reuses the freeze security gate at the protocol layer: sensitive patterns become `[REDACTED]` with a marker, slash-prefixed command lines reject the whole snapshot, and each field is capped at 8 KiB.
 - **Handover bundles and the permission confirmation gate**: a continuation card may attach a handover bundle — the pinned execution triplet (workspace / agent preset / permission) plus doc/script references. The bundle's triplet overrides the plain pin fields at execution, and the references ride the prompt as a handover preamble. A binding whose effective permission is above `sessionDefaultPermission` (default `read-only`) is unconfirmed: manual run refuses, cron skips the card and rolls to the next occurrence, and the confirm button in the task detail resolves the binding; any later permission or bundle change re-arms the gate.

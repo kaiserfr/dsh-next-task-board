@@ -602,6 +602,54 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
+  it('pauses a cancelled conflict resolution instead of moving the card', async () => {
+    const repo = createRepo()
+    const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
+    try {
+      ledger.applyRequest('r-create', {
+        kind: 'create',
+        id: 'card-1',
+        input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
+      })
+      ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
+      const dir = cardDir(ledger, repo)
+      writeFileSync(join(dir, 'feature.txt'), 'branch\n')
+      git(dir, ['add', '-A'])
+      git(dir, ['commit', '-qm', 'branch work'])
+      writeFileSync(join(repo, 'feature.txt'), 'main\n')
+      git(repo, ['add', '-A'])
+      git(repo, ['commit', '-qm', 'main work'])
+      ledger.applyRequest('r-park', { kind: 'move', taskId: 'card-1', status: 'testing' })
+      await ledger.awaitCard('card-1')
+      ledger.applyRequest('r-tested', { kind: 'move', taskId: 'card-1', status: 'tested' })
+      ledger.applyRequest('r-release', { kind: 'approve-merge', taskId: 'card-1' })
+      await ledger.awaitCard('card-1')
+      const run = ledger.state().tasks[0].executions.at(-1)!
+
+      // The human aborts the resolution run (Hard-Stop/cancel-work). That is a
+      // pause, not a failed release: the card keeps its column and its run, and
+      // the conflict stays in front of the session it will continue.
+      ledger.settle('card-1', run.id, 'cancelled', 'Session hart gestoppt (offline).')
+      const paused = ledger.state().tasks[0]
+      expect(paused.status).toBe('running')
+      expect(paused.pausedAt).toBe(NOW)
+      expect(paused.merge?.error).toBeUndefined()
+      expect(paused.executions.at(-1)?.id).toBe(run.id)
+      expect(paused.executions.at(-1)?.endedAt).toBeUndefined()
+      expect(git(dir, ['diff', '--name-only', '--diff-filter=U'])).toContain('feature.txt')
+
+      // "Weitermachen" clears the pause and hands the very same run back for
+      // the continue turn; the card stays in the run column.
+      const resumed = ledger.applyRequest('r-resume', { kind: 'resume', taskIds: ['card-1'] })
+      expect(ledger.state().tasks[0].pausedAt).toBeUndefined()
+      expect(ledger.state().tasks[0].status).toBe('running')
+      expect(resumed.resumed?.[0]?.execution.id).toBe(run.id)
+    } finally {
+      ledger.dispose()
+    }
+  })
+
   it('merges and parks the card in done once the resolution run resolved the conflict', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
@@ -652,7 +700,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('fails the release when the resolution run leaves the conflict unresolved', async () => {
+  it('sends the card to clarification when the resolution run leaves the conflict unresolved', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -662,6 +710,10 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
+      // The human answered and the clarification round settled before the card
+      // was parked on its path to the merge — the normal flow.
+      ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
       await ledger.awaitCard('card-1')
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
@@ -683,9 +735,12 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       await ledger.awaitCard('card-1')
 
       const task = ledger.state().tasks[0]
-      expect(task.status).toBe('failed')
+      expect(task.status).toBe('clarification')
       expect(task.merge?.error).toMatch(/unfinished conflict/)
       expect(task.git?.mergedAt).toBeUndefined()
+      // The failed release opened the card's question round: the reason is on
+      // the card and the human is asked how the conflict should be fixed.
+      expect(task.executions.at(-1)?.kind).toBe('clarify')
       // Nothing of the conflicted work reached the base branch ...
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
       expect(readFileSync(join(repo, 'feature.txt'), 'utf8')).toBe('main\n')
@@ -697,7 +752,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('fails the release when the automatic resolution run fails', async () => {
+  it('sends the card to clarification when the automatic resolution run fails', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -707,6 +762,8 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
         input: { title: 'Fix login', description: '', prompt: 'p', workspaceId: 'ws-1' },
       })
       ledger.applyRequest('r-step-on', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      await ledger.awaitCard('card-1')
+      ledger.settle('card-1', ledger.state().tasks[0].executions.at(-1)!.id, 'succeeded')
       await ledger.awaitCard('card-1')
       const dir = cardDir(ledger, repo)
       writeFileSync(join(dir, 'feature.txt'), 'branch\n')
@@ -727,9 +784,10 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       await ledger.awaitCard('card-1')
 
       const task = ledger.state().tasks[0]
-      expect(task.status).toBe('failed')
+      expect(task.status).toBe('clarification')
       expect(task.merge?.error).toBe('the agent gave up')
       expect(task.git?.mergedAt).toBeUndefined()
+      expect(task.executions.at(-1)?.kind).toBe('clarify')
       expect(git(dir, ['diff', '--name-only', '--diff-filter=U'])).toBe('')
     } finally {
       ledger.dispose()
@@ -773,7 +831,7 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
     }
   })
 
-  it('fails the release once the reviewed commit moved, until the card is parked again', async () => {
+  it('sends the card to clarification once the reviewed commit moved, until the card is parked again', async () => {
     const repo = createRepo()
     const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
     try {
@@ -798,26 +856,27 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       await ledger.awaitCard('card-1')
       expect(ledger.state().tasks[0].status).toBe('tested')
 
-      // A commit after the park invalidates the approval: the release fails and
-      // nothing lands on main.
+      // A commit after the park invalidates the approval: the release fails, the
+      // card goes to `clarification` with the reason, and nothing lands on main.
       writeFileSync(join(dir, 'later.txt'), 'nobody reviewed this\n')
       git(dir, ['add', '-A'])
       git(dir, ['commit', '-qm', 'late work'])
       ledger.applyRequest('r-done', { kind: 'move', taskId: 'card-1', status: 'done' })
       await ledger.awaitCard('card-1')
       const failed = ledger.state().tasks[0]
-      expect(failed.status).toBe('failed')
+      expect(failed.status).toBe('clarification')
       expect(failed.merge?.error).toMatch(/moved from the reviewed commit/)
       expect(failed.git?.mergedAt).toBeUndefined()
+      expect(failed.executions.at(-1)?.kind).toBe('clarify')
       expect(git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('task/fix-login-card1')
       expect(existsSync(join(dir, 'later.txt'))).toBe(true)
       // Nothing of it reached the main checkout.
       expect(existsSync(join(repo, 'later.txt'))).toBe(false)
       expect(git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
 
-      // Re-parking rebinds the approval to the new head and drops the failed
-      // release record; the next release then goes through.
-      ledger.applyRequest('r-back', { kind: 'move', taskId: 'card-1', status: 'clarification' })
+      // Re-parking (straight from the clarification column it now stands in)
+      // rebinds the approval to the new head and drops the failed release
+      // record; the next release then goes through.
       ledger.applyRequest('r-park-again', { kind: 'move', taskId: 'card-1', status: 'testing' })
       await ledger.awaitCard('card-1')
       ledger.applyRequest('r-tested-2', { kind: 'move', taskId: 'card-1', status: 'tested' })

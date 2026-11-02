@@ -213,6 +213,25 @@ describe('the clarification session is the run conversation', () => {
     expect(prompt).not.toContain(COMPLETION_MARKER)
   })
 
+  it('names the failed release the question round is about', () => {
+    const task: TaskRecord = {
+      ...card(),
+      status: 'clarification',
+      merge: {
+        releasedAt: NOW,
+        attempts: 1,
+        error: 'merge refused: the worktree is dirty',
+        conflict: 'main could not be replayed: a.txt',
+      },
+    }
+    const prompt = promptText(task, { clarification: true })
+    expect(prompt).toContain('Der letzte Freigabe-Merge ist fehlgeschlagen')
+    expect(prompt).toContain('merge refused: the worktree is dirty')
+    expect(prompt).toContain('main could not be replayed: a.txt')
+    // The round still asks and stops; the failure is context, not a work order.
+    for (const line of CLARIFICATION_ADDENDUM) expect(prompt).toContain(line)
+  })
+
   it('sends the go-ahead plus the completion contract into the continued clarification session', () => {
     const task = { ...card(), clarificationSessionId: 'session-clarify' }
     const prompt = promptText(task, { continued: true, implement: true })

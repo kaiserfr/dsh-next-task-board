@@ -398,10 +398,13 @@ export declare class HostTaskLedger {
      * - merge succeeds: `done`, `TaskGit.mergedAt` and {@link TaskMerge.mergedAt}
      *   stamped,
      * - merge refused (dirty worktree, moved branch, no reviewed commit) or fails:
-     *   the card goes to `failed` with the reason,
+     *   the card goes to `clarification` with the reason, and the automatic
+     *   clarification run asks how the problem should be fixed,
      * - the replay conflicts: the half-done rebase is left in the card's own
      *   worktree and the card goes to `running` on a `merge` run; one automatic
-     *   resolution run per release, whose settle retries the release.
+     *   resolution run per release, whose settle retries the release. If that
+     *   retry fails too, the card goes to `clarification` as above; an aborted
+     *   resolution run is a pause and leaves the card in `running`.
      */
     private beginRelease;
     private enqueueRelease;
@@ -422,19 +425,37 @@ export declare class HostTaskLedger {
      * run sees exactly that state and finishes it.
      *
      * Exactly one resolution run per release (`MERGE_RESOLVE_ATTEMPTS`): a second
-     * conflict aborts the half-done replay and fails the release, so the release
-     * can never become a loop. Aborting puts the branch back onto the commit the
-     * human reviewed, which is what a later release starts from again.
+     * conflict aborts the half-done replay and ends the release in `clarification`,
+     * so the release can never become a loop. Aborting puts the branch back onto
+     * the commit the human reviewed, which is what a later release starts from
+     * again; the question round then settles how to fix the conflict.
      */
     private resolveConflict;
+    /**
+     * Park a failed release in `clarification` and open the card's question round
+     * there. The failure happened in the card's own conversation, so the round
+     * continues the newest session it can find — the agent already knows the merge
+     * it is asked about, and the run is WIP-free like every clarification run. The
+     * human answers in the chat and pulls the card on to the run column; that
+     * implementation turn carries the answer out.
+     *
+     * A card that already holds an open run is left alone: it must never carry two
+     * open executions, and an open clarification round is already the round this
+     * failure needs.
+     */
+    private clarifyAfterFailedRelease;
     /**
      * What happens once a conflict-resolution run settled. A run that did not
      * succeed (or one that ended with the replay still unfinished) leaves the
      * conflict unresolved: the worktree is put back into a clean state, the card
-     * says why, and the release ends in `failed` — the second attempt the decision
-     * allows is used up. A run that did resolve it queues the release retry after
-     * that run's settle commit, which either finishes the release (`done`) or
-     * fails it.
+     * says why, and the release ends in `clarification`, where the automatic
+     * question round asks how the problem should be fixed. A run that did resolve
+     * it queues the release retry after that run's settle commit, which either
+     * finishes the release (`done`) or sends the card to `clarification` as well.
+     *
+     * A cancelled run never reaches this path: the Host turns that abort into a
+     * pause (see {@link settle}), so the card stays in `running` with the conflict
+     * still in its worktree.
      */
     private onMergeRunSettled;
     dispose(): void;
