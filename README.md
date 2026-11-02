@@ -405,12 +405,23 @@ route and system-prompt section).
   and is therefore not the only carrier.
 - **The report is for the human, not the state machine.** The card reaches
   **Ready for test** only once the execution's session has come to rest:
-  `HostExecutionRunner.inspect()` returns `succeeded` only after a fresh roster
-  read reports the session as no longer running **and** the live control baseline
-  shows nothing queued and no background job in flight. A session that is still
-  working — or simply still reported as running by the runtime — keeps the
-  outcome `pending`, so the card stays in In progress with its open execution,
-  even when its chat already says `FERTIG:`.
+  `HostExecutionRunner.inspect()` returns `succeeded` only after the live agent
+  handle (status and inbox), a fresh roster read, the live control baseline and
+  the background-job list all agree that the session is no longer running and
+  has nothing queued. The live agent also keeps a stale roster row from settling
+  a session that just started another turn. A session that is still working — or
+  simply still reported as running by the runtime — keeps the outcome `pending`,
+  so the card stays in In progress with its open execution, even when its chat
+  already says `FERTIG:`.
+- **When the session ends without a turn end.** The history scan memoizes its
+  page walk per session and execution boundary, but the memo is never a
+  decision: the session-end check is repeated on every inspection. A session
+  that comes to rest without appending another event therefore still settles.
+  If the session is confirmed at rest yet this execution produced no `turn/end`
+  of its own (its prompt never got a turn), the run fails after a 60 s grace with
+  `execution session ended before the run completed a turn` instead of leaving
+  the card in In progress forever. A run that is simply slow to start stays
+  `pending` inside that grace.
 - The `FERTIG:` line therefore never races the session: it is what the human
   reads, and the settle is what the session end triggers. Both are covered:
   `tests/host-runner.spec.ts` proves the report alone cannot settle a running
@@ -426,6 +437,33 @@ route and system-prompt section).
   the card in Clarification until the human pulls it on. Since the report no longer settles
   anything, the distinction needs no flag — the round simply never settles into
   Ready for test.
+
+### Card and session stay in step
+
+The board is authoritative about columns and the session about whether work is
+happening; both directions are reconciled, not just the happy path:
+
+- **Session → card.** A 5 s pass (`syncOpenExecutions`) reads the roster and
+  settles any open run whose session is at rest — no `agent/status` or
+  `session/disposed` event is required. The pass shares one lane with the 60 s
+  safety-net poll, so neither can inspect or settle the same run concurrently.
+- **Card → session.** A paused, archived or done card's running conversation is
+  stopped; a human turn written into a settled review/failed card is a rework,
+  which moves the card instead.
+- **Finished → running.** A card that was parked while its conversation keeps
+  working is the reverse mismatch. When the session wrote an event *after* the
+  settle (`updatedAt > settledAt`), the 2 s quiet window has passed, no release
+  is in flight and the human has not written since the settle, the Host re-opens
+  a run on the **same conversation** (`adoptRunningSession`): no new session, no
+  prompt, no new lane slot. A clarification stays in its column; an
+  implementation run moves back to In progress. The ordinary inspection settles
+  that run when the session comes to rest again. A human turn instead of a
+  wake-up is left to the rework path, and an unreadable history is retried
+  rather than guessed.
+- **No false syncs.** The settle itself is idempotent, pauses are re-checked at
+  write time, adoption refuses a card that already owns an open run, and the
+  roster `updatedAt` memo keeps an unchanged conversation from costing a history
+  RPC on every 5 s tick.
 
 ### Review environment: everything the manual check needs
 

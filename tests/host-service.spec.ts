@@ -250,7 +250,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     service.dispose()
   })
 
-  it('starts its three Host timers only once', async () => {
+  it('starts its four Host timers only once', async () => {
     const interval = vi.spyOn(globalThis, 'setInterval')
     const { gateway } = makeGateway(() => ({ items: [] }))
     const service = new TaskBoardHostService(gateway, {
@@ -259,7 +259,7 @@ describe('TaskBoardHostService scheduling without a browser', () => {
     })
     service.start()
     service.start()
-    expect(interval).toHaveBeenCalledTimes(3)
+    expect(interval).toHaveBeenCalledTimes(4)
     service.dispose()
     interval.mockRestore()
   })
@@ -678,13 +678,16 @@ describe('TaskBoardHostService poll heartbeat', () => {
     const runtimeView = vi.spyOn(ledger, 'runtimeView')
 
     await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
-    expect(runtimeView).not.toHaveBeenCalled()
+    // `runtimeView` is the cheap identifier/timestamp projection the poll needs
+    // for its due check; the full-ledger clone (`state`) is what this test
+    // protects. The failed roster read returns right after the projection.
+    expect(state).not.toHaveBeenCalled()
     sessionStateAvailable = true
     await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
     await (service as unknown as { tickSchedule(first: boolean): Promise<void> }).tickSchedule(false)
 
     expect(state).not.toHaveBeenCalled()
-    expect(runtimeView).toHaveBeenCalledOnce()
+    expect(runtimeView).toHaveBeenCalled()
     // The 2,000-entry fixture is trimmed to the retention limit on append and
     // import, keeping snapshot and ledger size bounded.
     const snapshotValue = service.snapshot()
@@ -1064,6 +1067,137 @@ describe('TaskBoardHostService rework watch (a human turn in the settled chat)',
 
     expect(stream).not.toHaveBeenCalled()
     expect(ledger.state().tasks[0].reworkAt).toBe(now)
+    instance.dispose()
+  })
+})
+
+describe('TaskBoardHostService session/card synchronization', () => {
+  /** A card that settled into the review column with `session-card`. */
+  function parked(settledAt: number): HostTaskLedger {
+    const ledger = new HostTaskLedger(root(), () => settledAt)
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    const run = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
+    ledger.attachSession('card', run!.execution.id, 'session-card')
+    ledger.settle('card', run!.execution.id, 'succeeded', undefined)
+    return ledger
+  }
+
+  /** A service with one roster row and a `session/follow` history. */
+  function service(
+    ledger: HostTaskLedger,
+    now: number,
+    roster: () => { sessionId: string; running: boolean; updatedAt?: number },
+    follow: () => AsyncIterable<unknown>,
+  ): TaskBoardHostService {
+    const { gateway } = makeGateway(request => {
+      if (request.namespace !== 'session') throw new Error('unexpected namespace')
+      if (request.method === 'list') return { items: [roster()] }
+      if (request.method === 'projections') return { values: {} }
+      throw new Error('unexpected gateway call: ' + request.method)
+    }, sessionStream({ follow }))
+    return new TaskBoardHostService(gateway, {
+      ledger,
+      power: new PowerInhibitor({ platform: 'linux' }),
+      now: () => now,
+    })
+  }
+
+  const sync = (instance: TaskBoardHostService): Promise<void> =>
+    (instance as unknown as { syncOpenExecutions(): Promise<void> }).syncOpenExecutions()
+
+  const empty = (): AsyncIterable<unknown> => ({
+    async *[Symbol.asyncIterator]() {
+      yield snapshot([], 0, false)
+    },
+  })
+
+  it('settles a running card without waiting for an event when the session is at rest', async () => {
+    const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
+    const ledger = new HostTaskLedger(root(), () => now)
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    const run = ledger.applyRequest('run', { kind: 'run', taskId: 'card' }).run
+    ledger.attachSession('card', run!.execution.id, 'session-card')
+    const instance = service(
+      ledger,
+      now,
+      () => ({ sessionId: 'session-card', running: false, updatedAt: now - 1_000 }),
+      () => ({
+        async *[Symbol.asyncIterator]() {
+          yield snapshot([sessionEvent('turn/end', 10, now + 1, { reason: { kind: 'completed' } })], 10, false)
+        },
+      }),
+    )
+
+    await sync(instance)
+
+    const card = ledger.state().tasks[0]!
+    expect(card.status).toBe('ready_for_test')
+    expect(card.executions[0]?.result).toBe('succeeded')
+    instance.dispose()
+  })
+
+  it('re-opens a settled card when its conversation really resumed', async () => {
+    const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
+    const settledAt = now - 10_000
+    const ledger = parked(settledAt)
+    const instance = service(
+      ledger,
+      now,
+      () => ({ sessionId: 'session-card', running: true, updatedAt: now - 5_000 }),
+      empty,
+    )
+    instance.handleSessionEvent('session-card', { type: 'assistant/message', time: now - 4_000, data: {} })
+
+    await sync(instance)
+
+    const card = ledger.state().tasks[0]!
+    expect(card.status).toBe('running')
+    expect(card.executions).toHaveLength(2)
+    expect(card.executions[0]?.result).toBe('succeeded')
+    expect(card.executions[1]?.sessionId).toBe('session-card')
+    expect(card.executions[1]?.endedAt).toBeUndefined()
+    instance.dispose()
+  })
+
+  it('treats a human turn after the park as rework, not as a resumed run', async () => {
+    const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
+    const settledAt = now - 10_000
+    const ledger = parked(settledAt)
+    const instance = service(
+      ledger,
+      now,
+      () => ({ sessionId: 'session-card', running: true, updatedAt: now - 5_000 }),
+      empty,
+    )
+    // The history head is empty on purpose: the live event feed alone must
+    // protect the human's rework from being mistaken for a resume.
+    instance.handleSessionEvent('session-card', { type: 'user/message', time: now - 4_000, data: {} })
+
+    await sync(instance)
+
+    const card = ledger.state().tasks[0]!
+    expect(card.status).toBe('ready_for_test')
+    expect(card.executions).toHaveLength(1)
+    instance.dispose()
+  })
+
+  it('does not re-open a card on a bare status flip without post-settle activity', async () => {
+    const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
+    const settledAt = now - 10_000
+    const ledger = parked(settledAt)
+    const instance = service(
+      ledger,
+      now,
+      () => ({ sessionId: 'session-card', running: true, updatedAt: settledAt }),
+      empty,
+    )
+    instance.handleSessionEvent('session-card', { type: 'assistant/message', time: now - 4_000, data: {} })
+
+    await sync(instance)
+
+    const card = ledger.state().tasks[0]!
+    expect(card.status).toBe('ready_for_test')
+    expect(card.executions).toHaveLength(1)
     instance.dispose()
   })
 })

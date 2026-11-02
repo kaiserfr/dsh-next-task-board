@@ -23,7 +23,12 @@ export declare class TaskBoardHostService {
     private timers;
     private lastScheduleTick;
     private disposed;
-    private pollInFlight;
+    /**
+     * One session reconciliation at a time: the event feed, the 5 s execution
+     * sync and the 60 s safety-net poll all settle the same ledger, so they share
+     * this lane instead of inspecting (and settling) a run twice concurrently.
+     */
+    private sessionSyncInFlight;
     private tickInFlight;
     private active;
     /**
@@ -57,6 +62,19 @@ export declare class TaskBoardHostService {
      * watched columns. See {@link watchReworkChats}.
      */
     private readonly reworkScans;
+    /**
+     * Per settled conversation, the roster `updatedAt` whose resume was already
+     * classified. An unchanged chat costs no history RPC; the entry is dropped as
+     * soon as the session stops.
+     */
+    private readonly sessionAdoptScans;
+    /**
+     * Newest live `user/message` per conversation. The adoption check normally
+     * reads the short history head, which a long agent answer can push the human
+     * turn out of; this map keeps the "the human wrote after the park" guard
+     * exact for events this Host observed itself.
+     */
+    private readonly lastUserMessages;
     /**
      * Card id → the conversation waiting for the human's answer. Derived from the
      * conversations on every poll and never written to the ledger: the question is
@@ -489,6 +507,18 @@ export declare class TaskBoardHostService {
      * is gone — a locked worktree is never unlocked behind the human's back.
      */
     private reconcileArchivedWorktrees;
+    /**
+     * Event-independent session/card reconciliation.
+     *
+     * The event feed is the fast path, but it is not guaranteed: a session can
+     * come to rest without an `agent/status`/`session/disposed` event (a lost
+     * event, an older runtime, a tab that was hidden while the turn ended), and a
+     * settled card's conversation can start working again after a job notice. This
+     * pass runs every {@link EXECUTION_SYNC_MS}, reads the roster once, settles
+     * runs whose session is at rest, and re-opens cards whose conversation really
+     * resumed. It never performs the full poll's environment/rework/answer work.
+     */
+    private syncOpenExecutions;
     private pollSessions;
     /**
      * Recompute which cards wait for the human's answer and publish the change.
@@ -554,6 +584,30 @@ export declare class TaskBoardHostService {
      */
     private stopRunningSession;
     /**
+     * Bring a settled card back in line with a conversation that is working again.
+     *
+     * This is the reverse of {@link settleExecution}: `running -> finished` is the
+     * normal settle, `finished -> running` is a card whose session resumed after it
+     * was parked (a job notice that woke the agent, or a wake-up the event feed did
+     * not attribute). The card is re-opened on the *running* conversation — no new
+     * prompt, no new session, no queue slot — and the ordinary inspection settles
+     * it when the session comes to rest again.
+     *
+     * Guards, all fail-safe:
+     * - only a card in a settled column that owns no open run is eligible;
+     *   paused/archived/done cards are corrected by stopping the session instead;
+     * - the session must have written an event **after** the settle (a mere status
+     *   flip is not evidence of work), and the quiet window must have passed;
+     * - a human turn since the settle is a rework, not a resume: the rework watch
+     *   moves that card, and this pass leaves it alone;
+     * - an unreadable history is no evidence and is retried, never guessed.
+     *
+     * The roster `updatedAt` memo makes an unchanged conversation cost no history
+     * RPC on the 5 s pass.
+     * @param sessions - the roster the poll already fetched.
+     */
+    private adoptRunningSessions;
+    /**
      * Stop conversations that run without a run of their own.
      *
      * A settled run's session is the card's conversation and must stay usable for
@@ -571,6 +625,9 @@ export declare class TaskBoardHostService {
      * Fail-safe: an unreadable history is no evidence and leaves the session
      * alone; the next poll retries.
      * @param sessions - the roster the poll already fetched.
+     * @param options.settled - whether a plain settled card may be stopped. The
+     *   5 s pass disables this so it cannot pre-empt the adoption quiet window;
+     *   paused/archived/done cards are stopped either way.
      */
     private stopOrphanedSessions;
     private tickSchedule;
@@ -589,6 +646,11 @@ export declare class TaskBoardHostService {
      */
     private pumpLaunchQueue;
     private schedulePoll;
+    /**
+     * Event-independent execution pass; shares the session lane with the full
+     * poll so the two can never inspect or settle the same run concurrently.
+     */
+    private scheduleExecutionSync;
     private scheduleTick;
     private syncPowerReasons;
     private emit;
