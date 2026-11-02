@@ -530,6 +530,8 @@ export class HostTaskLedger {
     paused: boolean
     pausedAt?: number
     settledAt?: number
+    /** What the newest settled run on that conversation was. */
+    kind?: ExecutionRecord['kind']
     status: TaskRecord['status']
     archived: boolean
   }> {
@@ -540,19 +542,24 @@ export class HostTaskLedger {
       paused: boolean
       pausedAt?: number
       settledAt?: number
+      kind?: ExecutionRecord['kind']
       status: TaskRecord['status']
       archived: boolean
     }> = []
     for (const task of this.document.tasks) {
+      // "open" describes the card, not only its newest session-bearing run: a
+      // queued run that has no session yet must still keep the watchdog from
+      // stopping the conversation the card already owned.
+      const open = task.executions.some(execution => execution.endedAt === undefined)
       let sessionId: string | undefined
-      let open = false
       let settledAt: number | undefined
+      let kind: ExecutionRecord['kind']
       for (let index = task.executions.length - 1; index >= 0; index -= 1) {
         const execution = task.executions[index]
         if (execution.sessionId === undefined) continue
         sessionId = execution.sessionId
-        open = execution.endedAt === undefined
         settledAt = execution.endedAt
+        kind = execution.kind
         break
       }
       if (sessionId === undefined) sessionId = task.clarificationSessionId
@@ -564,6 +571,7 @@ export class HostTaskLedger {
         paused: task.pausedAt !== undefined,
         ...(task.pausedAt === undefined ? {} : { pausedAt: task.pausedAt }),
         ...(settledAt === undefined ? {} : { settledAt }),
+        ...(kind === undefined ? {} : { kind }),
         status: task.status,
         archived: task.archivedAt !== undefined,
       })
@@ -1406,6 +1414,53 @@ export class HostTaskLedger {
       }
     })
     this.commit()
+  }
+
+  /**
+   * Re-open a settled card for a conversation that is working again.
+   *
+   * The board is authoritative about columns, the session about whether work is
+   * happening. Normally the session ends first and the settle follows; when a
+   * job notice (or another wake-up) starts a new turn only after the card was
+   * parked, the card would claim "finished" while its session keeps working.
+   * This is the reverse direction of {@link HostTaskLedger.settle}: it opens a
+   * new execution on the *running* conversation instead of launching anything —
+   * no prompt, no queue slot, no git step. The ordinary inspection then settles
+   * that execution when the session comes to rest again.
+   *
+   * Only cards in a settled column that does not already own a run are eligible;
+   * paused, archived, done and open-run cards are refused, and the service
+   * decides *when* the conditions hold.
+   * @param taskId - the card whose conversation runs again.
+   * @param sessionId - the running conversation.
+   * @param kind - the kind of the settled run (so a clarification stays in its
+   *   column and a merge run keeps its conflict-resolution semantics).
+   * @returns whether the card was re-opened.
+   */
+  adoptRunningSession(taskId: string, sessionId: string, kind: ExecutionRecord['kind']): boolean {
+    const now = this.now()
+    const task = this.document.tasks.find(item => item.id === taskId)
+    if (task === undefined || task.archivedAt !== undefined || task.pausedAt !== undefined) return false
+    if (task.status !== 'ready_for_test' && task.status !== 'failed' && task.status !== 'clarification') return false
+    if (hasOpenExecution(task)) return false
+    // The re-opened run covers the activity *since the card was parked*, not
+    // only since this call: the turn end that ended the resumed work may land
+    // between the settle and this adoption. Anchoring at the settle keeps that
+    // turn inside the inspected window instead of failing a run that did finish.
+    const resumedAt = task.executions[task.executions.length - 1]?.endedAt ?? now
+    // A clarification or merge run keeps its own semantics; a normal
+    // implementation run moves the card back to the runner-owned column.
+    const opened = startExecution(task, now, crypto.randomUUID(), undefined, kind === 'clarify' || kind === 'merge' ? kind : undefined)
+    const next = {
+      ...opened.task,
+      executions: opened.task.executions.map(execution => execution.id === opened.execution.id
+        ? { ...execution, sessionId, startedAt: Math.min(now, resumedAt) }
+        : execution),
+      ...(kind === 'clarify' ? { clarificationSessionId: sessionId } : {}),
+    }
+    this.document.tasks = this.document.tasks.map(item => item.id === taskId ? next : item)
+    this.commit()
+    return true
   }
 
   /**

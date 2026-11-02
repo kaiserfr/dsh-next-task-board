@@ -182,6 +182,8 @@ export declare class HostTaskLedger {
         paused: boolean;
         pausedAt?: number;
         settledAt?: number;
+        /** What the newest settled run on that conversation was. */
+        kind?: ExecutionRecord['kind'];
         status: TaskRecord['status'];
         archived: boolean;
     }>;
@@ -449,6 +451,28 @@ export declare class HostTaskLedger {
     skipMissed(now: number): void;
     setScheduler(patch: Partial<TaskBoardSchedulerSnapshot>): void;
     attachSession(taskId: string, executionId: string, sessionId: string): void;
+    /**
+     * Re-open a settled card for a conversation that is working again.
+     *
+     * The board is authoritative about columns, the session about whether work is
+     * happening. Normally the session ends first and the settle follows; when a
+     * job notice (or another wake-up) starts a new turn only after the card was
+     * parked, the card would claim "finished" while its session keeps working.
+     * This is the reverse direction of {@link HostTaskLedger.settle}: it opens a
+     * new execution on the *running* conversation instead of launching anything —
+     * no prompt, no queue slot, no git step. The ordinary inspection then settles
+     * that execution when the session comes to rest again.
+     *
+     * Only cards in a settled column that does not already own a run are eligible;
+     * paused, archived, done and open-run cards are refused, and the service
+     * decides *when* the conditions hold.
+     * @param taskId - the card whose conversation runs again.
+     * @param sessionId - the running conversation.
+     * @param kind - the kind of the settled run (so a clarification stays in its
+     *   column and a merge run keeps its conflict-resolution semantics).
+     * @returns whether the card was re-opened.
+     */
+    adoptRunningSession(taskId: string, sessionId: string, kind: ExecutionRecord['kind']): boolean;
     /**
      * Record the card's Docker Compose environment (or clear it with `undefined`).
      * Like {@link HostTaskLedger.attachSession} this is a Host-side write, not a

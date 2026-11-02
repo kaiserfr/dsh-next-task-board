@@ -32,12 +32,27 @@ import {
 } from './protocol.ts'
 import type { TaskPermission } from './core/handover.ts'
 
-const SESSION_POLL_MS = 5_000
 /** Event-driven mode: if a session/agent event arrived within this window, the
  * board trusts the event feed and skips the full roster poll entirely. */
 const SESSION_EVENT_ALIVE_MS = 30_000
 /** Safety-net poll when the event feed went quiet (missed events, older runtime). */
 const SESSION_FALLBACK_POLL_MS = 60_000
+/**
+ * Event-independent execution reconciliation. The event feed is an
+ * optimisation, not the only source of truth: a session can come to rest
+ * without a matching `agent/status`/`session/disposed` event (a lost event, an
+ * older runtime, a turn that ended while the tab was hidden). This pass only
+ * inspects the open executions and the cards whose conversation may have
+ * resumed, so it is far cheaper than the full 60 s safety-net poll.
+ */
+const EXECUTION_SYNC_MS = 5_000
+/**
+ * How long a card must have been parked before a running conversation re-opens
+ * it. The settle itself is written synchronously; the quiet window keeps a
+ * race where the roster flips immediately after the park from re-opening a card
+ * the settle has just corrected.
+ */
+const SESSION_ADOPT_QUIET_MS = 2_000
 const SCHEDULE_TICK_MS = 30_000
 const RESUME_GAP_MS = SCHEDULE_TICK_MS + 15_000
 /**
@@ -127,7 +142,12 @@ export class TaskBoardHostService {
   private timers: Array<ReturnType<typeof setInterval>> = []
   private lastScheduleTick: number | undefined
   private disposed = false
-  private pollInFlight = false
+  /**
+   * One session reconciliation at a time: the event feed, the 5 s execution
+   * sync and the 60 s safety-net poll all settle the same ledger, so they share
+   * this lane instead of inspecting (and settling) a run twice concurrently.
+   */
+  private sessionSyncInFlight = false
   private tickInFlight = false
   private active = true
   /**
@@ -161,6 +181,19 @@ export class TaskBoardHostService {
    * watched columns. See {@link watchReworkChats}.
    */
   private readonly reworkScans = new Map<string, number>()
+  /**
+   * Per settled conversation, the roster `updatedAt` whose resume was already
+   * classified. An unchanged chat costs no history RPC; the entry is dropped as
+   * soon as the session stops.
+   */
+  private readonly sessionAdoptScans = new Map<string, number>()
+  /**
+   * Newest live `user/message` per conversation. The adoption check normally
+   * reads the short history head, which a long agent answer can push the human
+   * turn out of; this map keeps the "the human wrote after the park" guard
+   * exact for events this Host observed itself.
+   */
+  private readonly lastUserMessages = new Map<string, number>()
   /**
    * Card id → the conversation waiting for the human's answer. Derived from the
    * conversations on every poll and never written to the ledger: the question is
@@ -419,6 +452,9 @@ export class TaskBoardHostService {
     if (this.disposed || this.timers.length > 0) return
     this.syncPowerReasons()
     this.timers.push(setInterval(() => { this.schedulePoll() }, SESSION_FALLBACK_POLL_MS))
+    // The event feed is an optimisation: this pass keeps the card's run state
+    // honest even when no event ever arrives (the stale-`running` case).
+    this.timers.push(setInterval(() => { this.scheduleExecutionSync() }, EXECUTION_SYNC_MS))
     this.timers.push(setInterval(() => { this.scheduleTick(false) }, SCHEDULE_TICK_MS))
     // Pressure is sampled on its own timer, not only on the 5 s poll: the board
     // must know how loaded the machine is even while no tab is open (the health
@@ -547,7 +583,11 @@ export class TaskBoardHostService {
    */
   handleSessionEvent(sessionId: string, event: { type: string; time: number; data: unknown }): void {
     this.touchSession(sessionId, undefined, true, event.time)
-    if (event.type === 'user/message') this.queueConversationRefresh()
+    if (event.type === 'user/message') {
+      const newest = this.lastUserMessages.get(sessionId)
+      if (newest === undefined || event.time > newest) this.lastUserMessages.set(sessionId, event.time)
+      this.queueConversationRefresh()
+    }
     if (event.type === 'assistant/message' || event.type === 'turn/end') {
       const data = (event.data ?? {}) as { interrupted?: boolean }
       if (data.interrupted === true) {
@@ -1538,6 +1578,65 @@ export class TaskBoardHostService {
     for (const id of [...this.worktreeWarnings]) if (!pending.has(id)) this.worktreeWarnings.delete(id)
   }
 
+  /**
+   * Event-independent session/card reconciliation.
+   *
+   * The event feed is the fast path, but it is not guaranteed: a session can
+   * come to rest without an `agent/status`/`session/disposed` event (a lost
+   * event, an older runtime, a tab that was hidden while the turn ended), and a
+   * settled card's conversation can start working again after a job notice. This
+   * pass runs every {@link EXECUTION_SYNC_MS}, reads the roster once, settles
+   * runs whose session is at rest, and re-opens cards whose conversation really
+   * resumed. It never performs the full poll's environment/rework/answer work.
+   */
+  private async syncOpenExecutions(): Promise<void> {
+    if (this.disposed) return
+    const open = this.ledger.runtimeView().openExecutions
+    // Every open run that owns a session is reconciled; a queued run without a
+    // session has nothing to inspect yet.
+    const openWithSession = open.some(execution => execution.sessionId !== undefined)
+    const watched = this.ledger.sessionWatch()
+    // The event feed is the hint that a settled conversation may have resumed
+    // or an orphan may have woken: while it is alive, the reverse sync reads the
+    // roster too. A lost event never hides an open execution (handled above) and
+    // the 60 s full poll remains the fallback for the silent cases, so an idle
+    // board does not list sessions every 5 s for nothing.
+    const feedAlive = Date.now() - this.lastSessionEventAt < SESSION_EVENT_ALIVE_MS
+    const resumable = this.active && feedAlive && watched.some(row =>
+      !row.open && !row.paused && !row.archived && row.status !== 'done')
+    // Paused/done/archived cards whose conversation was woken again are the
+    // hard cases; only the roster can say whether that is still true.
+    const stopPending = feedAlive && watched.some(row =>
+      row.paused || row.archived || row.status === 'done')
+    if (!openWithSession && !resumable && !stopPending) return
+    const running = await this.runner.listRunning()
+    const previous = this.power.snapshot()
+    if (!running.known) {
+      this.idleSessionIds = undefined
+      this.power.updateReasons({
+        runningSessions: previous.runningSessions,
+        armedSchedules: this.ledger.armedScheduleCount(),
+        sessionStateKnown: false,
+      })
+      return
+    }
+    this.idleSessionIds = new Set(running.items.filter(item => !item.running).map(item => item.sessionId))
+    const runtime = this.ledger.runtimeView()
+    this.power.updateReasons({
+      runningSessions: running.count,
+      armedSchedules: runtime.armedSchedules,
+      sessionStateKnown: true,
+    })
+    await this.reconcileExecutions(running.items, runtime.openExecutions)
+    this.refreshRunningSessions(running.items)
+    if (this.active) await this.adoptRunningSessions(running.items)
+    // Paused/done/archived cards are the hard cases: their session may never
+    // run. Settled-but-not-adopted cards are left to the full safety-net poll so
+    // the quiet/adoption window cannot be pre-empted by a stop.
+    await this.stopOrphanedSessions(running.items, { settled: false })
+    this.pumpLaunchQueue()
+  }
+
   private async pollSessions(): Promise<void> {
     if (this.disposed) return
     // Environments are reconciled on every poll, whether or not the board is
@@ -1581,6 +1680,11 @@ export class TaskBoardHostService {
     // ledger subscription (settles) and the gated power listener above.
     await this.reconcileExecutions(running.items, runtime.openExecutions)
     this.refreshRunningSessions(running.items)
+    // A settled card whose conversation really resumed is the reverse mismatch:
+    // re-open the run before the orphan safety net gets a chance to stop what is
+    // honest work (a job wake-up after a premature park, or a conversation the
+    // human has not touched).
+    await this.adoptRunningSessions(running.items)
     // Safety net for conversations that outlived their run: a settlement that
     // happened before the job gate existed, a paused run that a late notice woke
     // again, or a card that left the board while its session kept working.
@@ -1758,9 +1862,13 @@ export class TaskBoardHostService {
   private refreshRunningSessions(sessions: readonly SessionSummary[]): void {
     const running = new Map(sessions.map(item => [item.sessionId as string, item.running === true]))
     const next: Record<string, true> = {}
-    for (const row of this.ledger.sessionWatch()) {
+    const watched = this.ledger.sessionWatch()
+    for (const row of watched) {
       if (running.get(row.sessionId) === true) next[row.taskId] = true
     }
+    // A conversation the board no longer follows keeps no live-event memo.
+    const known = new Set(watched.map(row => row.sessionId))
+    for (const sessionId of [...this.lastUserMessages.keys()]) if (!known.has(sessionId)) this.lastUserMessages.delete(sessionId)
     if (JSON.stringify(next) === JSON.stringify(this.runningSessions)) return
     this.runningSessions = next
     this.emit()
@@ -1794,6 +1902,71 @@ export class TaskBoardHostService {
   }
 
   /**
+   * Bring a settled card back in line with a conversation that is working again.
+   *
+   * This is the reverse of {@link settleExecution}: `running -> finished` is the
+   * normal settle, `finished -> running` is a card whose session resumed after it
+   * was parked (a job notice that woke the agent, or a wake-up the event feed did
+   * not attribute). The card is re-opened on the *running* conversation — no new
+   * prompt, no new session, no queue slot — and the ordinary inspection settles
+   * it when the session comes to rest again.
+   *
+   * Guards, all fail-safe:
+   * - only a card in a settled column that owns no open run is eligible;
+   *   paused/archived/done cards are corrected by stopping the session instead;
+   * - the session must have written an event **after** the settle (a mere status
+   *   flip is not evidence of work), and the quiet window must have passed;
+   * - a human turn since the settle is a rework, not a resume: the rework watch
+   *   moves that card, and this pass leaves it alone;
+   * - an unreadable history is no evidence and is retried, never guessed.
+   *
+   * The roster `updatedAt` memo makes an unchanged conversation cost no history
+   * RPC on the 5 s pass.
+   * @param sessions - the roster the poll already fetched.
+   */
+  private async adoptRunningSessions(sessions: readonly SessionSummary[]): Promise<void> {
+    if (this.disposed || !this.active) return
+    const byId = new Map(sessions.map(item => [item.sessionId as string, item]))
+    // A release is already the human's "this is reviewed" decision; a late
+    // wake-up must not drag the card back into the run column and race it.
+    const releasing = this.ledger.pendingReleases()
+    const watching = new Set<string>()
+    for (const row of this.ledger.sessionWatch()) {
+      if (row.open || row.paused || row.archived || row.status === 'done') continue
+      if (releasing[row.taskId] !== undefined) continue
+      if (row.status !== 'ready_for_test' && row.status !== 'failed' && row.status !== 'clarification') continue
+      if (row.settledAt === undefined) continue
+      const summary = byId.get(row.sessionId)
+      if (summary === undefined || summary.running !== true) continue
+      watching.add(row.sessionId)
+      const scannedAt = summary.updatedAt
+      // Only post-settle activity proves the conversation is working again.
+      if (scannedAt === undefined || scannedAt <= row.settledAt) continue
+      if (this.sessionAdoptScans.get(row.sessionId) === scannedAt) continue
+      // The live event feed is exact even when a long agent answer pushed the
+      // human turn out of the short history head.
+      const liveHuman = this.lastUserMessages.get(row.sessionId)
+      if (liveHuman !== undefined && liveHuman >= row.settledAt) {
+        this.sessionAdoptScans.set(row.sessionId, scannedAt)
+        continue
+      }
+      if (this.now() - row.settledAt < SESSION_ADOPT_QUIET_MS) continue
+      const human = await this.runner.newestHumanTurn(row.sessionId, row.settledAt)
+      if (!human.known) continue
+      if (human.at !== undefined) {
+        // The human wrote after the park: that card belongs to the rework path.
+        this.sessionAdoptScans.set(row.sessionId, scannedAt)
+        continue
+      }
+      if (this.ledger.adoptRunningSession(row.taskId, row.sessionId, row.kind)) {
+        this.sessionAdoptScans.set(row.sessionId, scannedAt)
+        this.ledger.note(row.taskId, 'Die Session arbeitet nach dem Parken weiter; die Karte wurde wieder als laufend übernommen.')
+      }
+    }
+    for (const sessionId of [...this.sessionAdoptScans.keys()]) if (!watching.has(sessionId)) this.sessionAdoptScans.delete(sessionId)
+  }
+
+  /**
    * Stop conversations that run without a run of their own.
    *
    * A settled run's session is the card's conversation and must stay usable for
@@ -1811,8 +1984,14 @@ export class TaskBoardHostService {
    * Fail-safe: an unreadable history is no evidence and leaves the session
    * alone; the next poll retries.
    * @param sessions - the roster the poll already fetched.
+   * @param options.settled - whether a plain settled card may be stopped. The
+   *   5 s pass disables this so it cannot pre-empt the adoption quiet window;
+   *   paused/archived/done cards are stopped either way.
    */
-  private async stopOrphanedSessions(sessions: readonly SessionSummary[]): Promise<void> {
+  private async stopOrphanedSessions(
+    sessions: readonly SessionSummary[],
+    options: { settled?: boolean } = {},
+  ): Promise<void> {
     if (this.disposed || !this.active) return
     const byId = new Map(sessions.map(item => [item.sessionId as string, item]))
     for (const row of this.ledger.sessionWatch()) {
@@ -1837,7 +2016,7 @@ export class TaskBoardHostService {
         continue
       } else if (row.archived || row.status === 'done') {
         stop = true
-      } else if (row.settledAt !== undefined) {
+      } else if (row.settledAt !== undefined && options.settled !== false) {
         const scannedAt = summary.updatedAt
         if (scannedAt !== undefined && this.orphanScans.get(row.sessionId) === scannedAt) continue
         const human = await this.runner.newestHumanTurn(row.sessionId, row.settledAt)
@@ -1984,11 +2163,23 @@ export class TaskBoardHostService {
   }
 
   private schedulePoll(): void {
-    if (this.pollInFlight || this.disposed) return
-    this.pollInFlight = true
+    if (this.sessionSyncInFlight || this.disposed) return
+    this.sessionSyncInFlight = true
     void this.pollSessions().catch(error => {
       safeConsoleError('[dsh-task-board] session polling failed', error)
-    }).finally(() => { this.pollInFlight = false })
+    }).finally(() => { this.sessionSyncInFlight = false })
+  }
+
+  /**
+   * Event-independent execution pass; shares the session lane with the full
+   * poll so the two can never inspect or settle the same run concurrently.
+   */
+  private scheduleExecutionSync(): void {
+    if (this.sessionSyncInFlight || this.disposed) return
+    this.sessionSyncInFlight = true
+    void this.syncOpenExecutions().catch(error => {
+      safeConsoleError('[dsh-task-board] execution synchronization failed', error)
+    }).finally(() => { this.sessionSyncInFlight = false })
   }
 
   private scheduleTick(first: boolean): void {

@@ -66,6 +66,32 @@ const SERVICE_UNAVAILABLE_BACKOFF_MS = 2_000
  * already the newest message.
  */
 const OPENING_MESSAGES = 4
+/**
+ * Grace after an execution opened before an idle session without any
+ * `turn/end` is treated as a broken start instead of "still pending".
+ *
+ * A freshly queued prompt is not yet visible in the history while the agent
+ * accepts it, and a busy runtime may take a moment to start the turn. Once the
+ * grace has passed, however, a session this Host has confirmed at rest with
+ * nothing queued and no live job cannot still be that execution: the run
+ * never started, and keeping the card in `running` forever is the stale state
+ * this inspection exists to correct.
+ */
+const NO_TURN_SETTLE_MS = 60_000
+
+/** One scanned run's newest turn end, remembered for its execution boundary. */
+interface TurnEndRecord {
+  seq: number
+  time: number
+  data: unknown
+}
+
+/** Memoized history scan for one session, keyed by its newest sequence. */
+interface ScanMemo {
+  newestSeq: number
+  startedAt: number
+  turnEnd: TurnEndRecord | undefined
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => { setTimeout(resolve, ms) })
@@ -590,8 +616,13 @@ function invokeWireArgs(namespace: string, method: string, request: Record<strin
 }
 
 export class HostExecutionRunner {
-  /** Newest scanned event sequence per session with no matching execution end. */
-  private readonly scanMemos = new Map<string, number>()
+  /**
+   * Newest history scan per session, keyed by sequence and execution boundary.
+   * A memo only saves the page walk; the session-end check is repeated on every
+   * inspection, because the roster/agent can go idle without appending a new
+   * event (the stale-`running` case).
+   */
+  private readonly scanMemos = new Map<string, ScanMemo>()
   private readonly unavailableAttempts: number
   private readonly unavailableBackoffMs: number
   private unsupportedSessionListWarned = false
@@ -759,6 +790,55 @@ export class HostExecutionRunner {
     if (jobs === undefined) return false
     try {
       return jobs.list(sessionId).some(job => job.status === 'running' || job.status === 'stopping')
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * The session's live agent, if this Host exposes one. A missing handle is no
+   * evidence either way (a cold persisted session has none, and a test harness
+   * may have no agent registry), so callers fall back to the RPC sources.
+   * @param sessionId - the execution session.
+   */
+  private liveAgent(sessionId: string): LiveSessionAgent | undefined {
+    try {
+      return this.control?.agent?.(sessionId)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Whether the live agent is working right now. This is the cheapest and
+   * freshest source: the roster's `running` derives from the same status, so a
+   * stale roster row can never keep a finished session pending — and a turn
+   * that started again after the roster read still blocks the settle.
+   * @param sessionId - the execution session.
+   */
+  private liveAgentRunning(sessionId: string): boolean {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return false
+    try {
+      return agent.status === 'running'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Queued prompts a live agent still owes, including the ones the 0.1.7
+   * `session/control` baseline no longer exposes (it dropped the queue/job
+   * maps). Without this read a turn boundary in the history could be mistaken
+   * for the end of the run while another queued turn is already waiting.
+   * @param sessionId - the execution session.
+   */
+  private liveAgentHasQueuedWork(sessionId: string): boolean {
+    const agent = this.liveAgent(sessionId)
+    if (agent === undefined) return false
+    try {
+      const inbox = agent.inbox
+      return (inbox?.nextTurn?.length ?? 0) > 0 || (inbox?.nextStep?.length ?? 0) > 0
     } catch {
       return false
     }
@@ -938,12 +1018,67 @@ export class HostExecutionRunner {
     }
     // A live turn blocks the settle outright — including the agent's own
     // "FERTIG:" line, which reports the work in the chat but never ends the
-    // session. The session's own end is the only evidence that counts.
-    if (summary.running) return { outcome: 'pending' }
+    // session. The session's own end is the only evidence that counts. The
+    // live agent handle is read too, so a roster row fetched a moment earlier
+    // cannot hide a turn that already started again.
+    if (summary.running || this.liveAgentRunning(sessionId)) return { outcome: 'pending' }
 
+    const scan = await this.scanExecutionHistory(sessionId, startedAt, opening)
+    if (!scan.complete) return { outcome: 'pending' }
+    // Nothing is settled while the session is still working: neither the park
+    // nor a failure is an honest statement about the run before the session
+    // has ended. A `turn/end` bounds ONE turn, not the session (the agent runs
+    // every queued prompt and every job wake-up as its own turn), and the
+    // roster row inspected above was fetched before this history scan.
+    if (!await this.sessionEnded(sessionId)) return { outcome: 'pending' }
+    // A settled turn is not a session at rest: a background job outlives it and
+    // its completion notice starts the next turn. Settling here would park or
+    // fail the card while the session keeps working, and the card would then no
+    // longer own the run that is still running (exactly the orphaned session the
+    // watchdog exists to prevent). Keep the run open until the jobs are gone.
+    if (await this.hasLiveJobs(sessionId)) return { outcome: 'pending' }
+    if (scan.turnEnd === undefined) {
+      // The session is at rest, but this execution has no turn end of its own.
+      // A just-queued prompt is not visible in history yet, so give the run its
+      // grace; after that the start is broken, and leaving the card in
+      // `running` forever would be the stale state this check removes.
+      if (Date.now() - startedAt < NO_TURN_SETTLE_MS) return { outcome: 'pending' }
+      this.scanMemos.delete(sessionId)
+      return { outcome: 'failed', error: 'execution session ended before the run completed a turn' }
+    }
+    this.scanMemos.delete(sessionId)
+    const stop = turnStopError(scan.turnEnd.data)
+    return stop === undefined
+      ? { outcome: 'succeeded' }
+      : { outcome: 'failed', error: stop }
+  }
+
+  /**
+   * Find the newest `turn/end` that belongs to this execution by walking the
+   * bounded history window, reusing an earlier scan when the session's newest
+   * sequence and the execution boundary did not change.
+   *
+   * The memo is deliberately *not* a decision: the caller re-checks whether the
+   * session has ended on every call. A session can come to rest without
+   * appending another event, and an early return on the memo was exactly what
+   * kept such cards in `running` forever.
+   * @param sessionId - the run's session.
+   * @param startedAt - the execution's opening instant.
+   * @param opening - the already-read history head.
+   * @returns the run's newest turn end (if any), plus whether the page walk
+   *   reached the execution boundary; `complete: false` means "try again".
+   */
+  private async scanExecutionHistory(
+    sessionId: string,
+    startedAt: number,
+    opening: { cursor: number; records: readonly SessionHistoryRecord[]; hasMore: boolean },
+  ): Promise<{ complete: boolean; newestSeq?: number; turnEnd?: TurnEndRecord }> {
     const openingEvents = opening.records.map(record => ({ event: recordEvent(record) }))
     const newestSeq = openingEvents.reduce<number | undefined>((newest, entry) => newest === undefined ? entry.event.seq : Math.max(newest, entry.event.seq), undefined)
-    if (newestSeq !== undefined && this.scanMemos.get(sessionId) === newestSeq) return { outcome: 'pending' }
+    const memo = newestSeq === undefined ? undefined : this.scanMemos.get(sessionId)
+    if (memo !== undefined && memo.newestSeq === newestSeq && memo.startedAt === startedAt) {
+      return { complete: true, newestSeq, ...(memo.turnEnd === undefined ? {} : { turnEnd: memo.turnEnd }) }
+    }
     const events: Array<{ event: { type: string; seq: number; time: number; data: unknown } }> = [...openingEvents]
     let beforeSeq: number | undefined
     let reachedExecutionBoundary = !opening.hasMore
@@ -958,7 +1093,7 @@ export class HostExecutionRunner {
         }) as SessionPage
       } catch (error) {
         console.warn('[dsh-task-board] session/page failed during execution inspection; keeping the outcome pending', error)
-        return { outcome: 'pending' }
+        return { complete: false }
       }
       const pageEntries = pageEvents(history)
       events.push(...pageEntries)
@@ -968,10 +1103,10 @@ export class HostExecutionRunner {
         break
       }
       const oldestSeq = pageEntries.reduce<number | undefined>((oldest, entry) => oldest === undefined ? entry.event.seq : Math.min(oldest, entry.event.seq), undefined)
-      if (oldestSeq === undefined || oldestSeq === beforeSeq) return { outcome: 'pending' }
+      if (oldestSeq === undefined || oldestSeq === beforeSeq) return { complete: false }
       beforeSeq = oldestSeq
     }
-    if (!reachedExecutionBoundary) return { outcome: 'pending' }
+    if (!reachedExecutionBoundary) return { complete: false }
     // The NEWEST turn end of the run decides its outcome, never the first one:
     // an aborted turn is routinely continued seconds later (the user switched
     // the model, a queued prompt, a job wake-up), and an earlier completed turn
@@ -979,27 +1114,12 @@ export class HostExecutionRunner {
     const turnEnd = events
       .filter(entry => entry.event.type === 'turn/end' && (startedAt <= 0 || entry.event.time >= startedAt))
       .sort((a, b) => b.event.seq - a.event.seq)[0]
-    if (turnEnd === undefined) {
-      if (newestSeq !== undefined) this.scanMemos.set(sessionId, newestSeq)
-      return { outcome: 'pending' }
+    if (newestSeq !== undefined) {
+      this.scanMemos.set(sessionId, { newestSeq, startedAt, turnEnd: turnEnd === undefined ? undefined : { seq: turnEnd.event.seq, time: turnEnd.event.time, data: turnEnd.event.data } })
+    } else {
+      this.scanMemos.delete(sessionId)
     }
-    this.scanMemos.delete(sessionId)
-    // Nothing is settled while the session is still working: neither the park
-    // nor a failure is an honest statement about the run before the session
-    // has ended. A `turn/end` bounds ONE turn, not the session (the agent runs
-    // every queued prompt and every job wake-up as its own turn), and the
-    // roster row inspected above was fetched before this history scan.
-    if (!await this.sessionEnded(sessionId)) return { outcome: 'pending' }
-    // A settled turn is not a session at rest: a background job outlives it and
-    // its completion notice starts the next turn. Settling here would park or
-    // fail the card while the session keeps working, and the card would then no
-    // longer own the run that is still running (exactly the orphaned session the
-    // watchdog exists to prevent). Keep the run open until the jobs are gone.
-    if (await this.hasLiveJobs(sessionId)) return { outcome: 'pending' }
-    const stop = turnStopError(turnEnd.event.data)
-    return stop === undefined
-      ? { outcome: 'succeeded' }
-      : { outcome: 'failed', error: stop }
+    return { complete: true, ...(newestSeq === undefined ? {} : { newestSeq }), ...(turnEnd === undefined ? {} : { turnEnd: { seq: turnEnd.event.seq, time: turnEnd.event.time, data: turnEnd.event.data } }) }
   }
 
   /**
@@ -1121,6 +1241,10 @@ export class HostExecutionRunner {
    * @returns true only on confirmed silence.
    */
   private async sessionEnded(sessionId: string): Promise<boolean> {
+    // The live agent is the freshest source and works on runtimes whose
+    // `session/control` baseline no longer carries queues/jobs. A running turn
+    // or a queued prompt blocks the settle before any RPC is spent.
+    if (this.liveAgentRunning(sessionId) || this.liveAgentHasQueuedWork(sessionId)) return false
     const work = await this.pendingWork(sessionId)
     if (work === 'some' || work === 'unknown') return false
     // 'unsupported' means an older runtime without the control endpoint; the

@@ -252,7 +252,12 @@ export declare class HostExecutionRunner {
     private readonly peer?;
     /** Live agent/job handles for the escalating hard stop (Host only). */
     private readonly control?;
-    /** Newest scanned event sequence per session with no matching execution end. */
+    /**
+     * Newest history scan per session, keyed by sequence and execution boundary.
+     * A memo only saves the page walk; the session-end check is repeated on every
+     * inspection, because the roster/agent can go idle without appending a new
+     * event (the stale-`running` case).
+     */
     private readonly scanMemos;
     private readonly unavailableAttempts;
     private readonly unavailableBackoffMs;
@@ -321,6 +326,29 @@ export declare class HostExecutionRunner {
      */
     hasLiveJobs(sessionId: string): Promise<boolean>;
     /**
+     * The session's live agent, if this Host exposes one. A missing handle is no
+     * evidence either way (a cold persisted session has none, and a test harness
+     * may have no agent registry), so callers fall back to the RPC sources.
+     * @param sessionId - the execution session.
+     */
+    private liveAgent;
+    /**
+     * Whether the live agent is working right now. This is the cheapest and
+     * freshest source: the roster's `running` derives from the same status, so a
+     * stale roster row can never keep a finished session pending — and a turn
+     * that started again after the roster read still blocks the settle.
+     * @param sessionId - the execution session.
+     */
+    private liveAgentRunning;
+    /**
+     * Queued prompts a live agent still owes, including the ones the 0.1.7
+     * `session/control` baseline no longer exposes (it dropped the queue/job
+     * maps). Without this read a turn boundary in the history could be mistaken
+     * for the end of the run while another queued turn is already waiting.
+     * @param sessionId - the execution session.
+     */
+    private liveAgentHasQueuedWork;
+    /**
      * Stop one session for good: cancel the turn, kill the jobs that would wake it
      * again, drop what is queued, and verify that the agent really came to rest.
      *
@@ -365,6 +393,22 @@ export declare class HostExecutionRunner {
      * @param sessions - the roster the caller already fetched; a fresh read otherwise.
      */
     inspect(sessionId: string, startedAt?: number, sessions?: readonly SessionSummary[]): Promise<ExecutionInspection>;
+    /**
+     * Find the newest `turn/end` that belongs to this execution by walking the
+     * bounded history window, reusing an earlier scan when the session's newest
+     * sequence and the execution boundary did not change.
+     *
+     * The memo is deliberately *not* a decision: the caller re-checks whether the
+     * session has ended on every call. A session can come to rest without
+     * appending another event, and an early return on the memo was exactly what
+     * kept such cards in `running` forever.
+     * @param sessionId - the run's session.
+     * @param startedAt - the execution's opening instant.
+     * @param opening - the already-read history head.
+     * @returns the run's newest turn end (if any), plus whether the page walk
+     *   reached the execution boundary; `complete: false` means "try again".
+     */
+    private scanExecutionHistory;
     /**
      * Whether the human has written in a card's conversation since `since`, and
      * when. This is how the board notices a rework: the reviewed card sits in

@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { Workspace } from '@deepseek-ai/dsh-workspace/types'
 import type { SessionSummary } from '@deepseek-ai/dsh-api-session-controller/types'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
-import { COMPLETION_INSTRUCTION, HostExecutionRunner, SessionLaunchError } from '../src/host-runner.ts'
+import { COMPLETION_INSTRUCTION, HostExecutionRunner, SessionLaunchError, type LiveSessionAgent } from '../src/host-runner.ts'
 
 type GatewayRequest = {
   namespace: string
@@ -795,8 +795,11 @@ describe('HostExecutionRunner', () => {
   it('drops the scan memo once the execution settles or the session vanishes', async () => {
     let headSeq = 40
     let found = false
+    const eventTime = Date.now()
+    // Inside the broken-start grace: a missing turn end is not an outcome yet.
+    const startedAt = eventTime - 1_000
     const page = vi.fn(async (_request: GatewayRequest) => ({
-      records: [found ? sessionEvent('turn/end', headSeq, 4_000, { reason: { kind: 'completed' } }) : sessionEvent('assistant/message', headSeq, 4_000, {})],
+      records: [found ? sessionEvent('turn/end', headSeq, eventTime, { reason: { kind: 'completed' } }) : sessionEvent('assistant/message', headSeq, eventTime, {})],
       hasMore: false,
     }))
     const gateway = {
@@ -804,20 +807,122 @@ describe('HostExecutionRunner', () => {
       stream: routedStream({
         follow: () => ({
           async *[Symbol.asyncIterator]() {
-            yield snapshot([sessionEvent('assistant/message', headSeq, 4_000, {})], headSeq, true)
+            yield snapshot([sessionEvent('assistant/message', headSeq, eventTime, {})], headSeq, true)
           },
         }),
       }),
     }
     const runner = new HostExecutionRunner(gateway)
-    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })
+    await expect(runner.inspect('session-a', startedAt)).resolves.toEqual({ outcome: 'pending' })
     found = true
     headSeq = 41
-    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'succeeded' })
+    await expect(runner.inspect('session-a', startedAt)).resolves.toEqual({ outcome: 'succeeded' })
     const callsBefore = page.mock.calls.length
     gateway.invoke.mockImplementation(async (request: GatewayRequest) => request.method === 'list' ? { items: [] } : page(request))
-    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'cancelled', error: 'execution session no longer exists' })
+    await expect(runner.inspect('session-a', startedAt)).resolves.toEqual({ outcome: 'cancelled', error: 'execution session no longer exists' })
     expect(page.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('fails a stale run whose session came to rest without any turn end', async () => {
+    // The event feed never announced an end and the history has no turn/end for
+    // this execution: the live sources all confirm a quiet session, so keeping
+    // the card in `running` forever is the stale state. The grace is long past.
+    const page = vi.fn(async () => ({
+      records: [sessionEvent('assistant/message', 10, 4_000, {})],
+      hasMore: false,
+    }))
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : page()),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([sessionEvent('assistant/message', 10, 4_000, {})], 10, true)
+          },
+        }),
+      }),
+    }
+    await expect(new HostExecutionRunner(gateway).inspect('session-a', Date.now() - 120_000))
+      .resolves.toEqual({ outcome: 'failed', error: 'execution session ended before the run completed a turn' })
+  })
+
+  it('leaves a just-started run pending while its first turn has not begun', async () => {
+    const page = vi.fn(async () => ({
+      records: [sessionEvent('assistant/message', 10, 4_000, {})],
+      hasMore: false,
+    }))
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : page()),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([sessionEvent('assistant/message', 10, 4_000, {})], 10, true)
+          },
+        }),
+      }),
+    }
+    await expect(new HostExecutionRunner(gateway).inspect('session-a', Date.now()))
+      .resolves.toEqual({ outcome: 'pending' })
+  })
+
+  it('reads queued work from the live agent when session/control has no queue maps', async () => {
+    // dsh 0.1.7's control baseline carries projections only. The live inbox is
+    // then the only source that still knows a queued prompt is waiting.
+    const agent: LiveSessionAgent = {
+      status: 'idle',
+      cancel: () => {},
+      inbox: { nextTurn: [{ source: { kind: 'user' }, content: 'queued follow-up' }] },
+    }
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : {
+            records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'completed' } })],
+            hasMore: false,
+          }),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+        control: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield { type: 'baseline', value: { projections: {} } }
+          },
+        }),
+      }),
+    }
+    const runner = new HostExecutionRunner(gateway, undefined, undefined, undefined, undefined, { agent: () => agent })
+    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })
+    agent.inbox = { nextTurn: [], nextStep: [] }
+    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'succeeded' })
+  })
+
+  it('never settles while the live agent is running even when the roster says idle', async () => {
+    const agent: LiveSessionAgent = { status: 'running', cancel: () => {} }
+    const gateway = {
+      invoke: fakeInvoke(async (request: GatewayRequest) => request.method === 'list'
+        ? { items: [{ sessionId: 'session-a', running: false }] }
+        : {
+            records: [sessionEvent('turn/end', 10, 1_100, { reason: { kind: 'completed' } })],
+            hasMore: false,
+          }),
+      stream: routedStream({
+        follow: () => ({
+          async *[Symbol.asyncIterator]() {
+            yield snapshot([], 10, true)
+          },
+        }),
+      }),
+    }
+    const runner = new HostExecutionRunner(gateway, undefined, undefined, undefined, undefined, { agent: () => agent })
+    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'pending' })
+    agent.status = 'idle'
+    await expect(runner.inspect('session-a', 1_000)).resolves.toEqual({ outcome: 'succeeded' })
   })
 
   // Regression: the agent's own "FERTIG:" report is a note for the human, not
