@@ -6,7 +6,7 @@ import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
 import type { TaskCompose, TaskFollowUp, TaskGit, TaskMerge, TaskReview } from './core/tasks.ts'
-import { DEFAULT_MAX_DONE_TASKS, FOLLOW_UP_SOURCE_STATUSES, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, implementationParkStatus, isReworkReturn, latestSessionIdOf, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, FOLLOW_UP_SOURCE_STATUSES, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, implementationParkStatus, isReworkReturn, latestSessionIdOf, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, withStopMarker, withoutStopMarker, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -520,8 +520,9 @@ export class HostTaskLedger {
   /**
    * The card conversations the orphan watchdog follows, one row per card:
    * whether that conversation still backs an open run, whether the card is
-   * paused, and when the run settled (the human-turn check anchors there).
-   * Deliberately a cheap projection — it runs on every poll.
+   * paused, whether it was explicitly stopped, and when the run settled (the
+   * human-turn check anchors there). Deliberately a cheap projection — it runs
+   * on every poll.
    */
   sessionWatch(): Array<{
     taskId: string
@@ -532,6 +533,8 @@ export class HostTaskLedger {
     settledAt?: number
     /** What the newest settled run on that conversation was. */
     kind?: ExecutionRecord['kind']
+    /** The conversation was stopped from the card and must not be adopted. */
+    stopped: boolean
     status: TaskRecord['status']
     archived: boolean
   }> {
@@ -543,6 +546,7 @@ export class HostTaskLedger {
       pausedAt?: number
       settledAt?: number
       kind?: ExecutionRecord['kind']
+      stopped: boolean
       status: TaskRecord['status']
       archived: boolean
     }> = []
@@ -578,6 +582,7 @@ export class HostTaskLedger {
         ...(task.pausedAt === undefined ? {} : { pausedAt: task.pausedAt }),
         ...(settledAt === undefined ? {} : { settledAt }),
         ...(kind === undefined ? {} : { kind }),
+        stopped: task.stoppedAt !== undefined && task.stoppedSessionId === sessionId,
         status: task.status,
         archived: task.archivedAt !== undefined,
       })
@@ -1634,8 +1639,9 @@ export class HostTaskLedger {
    * that execution when the session comes to rest again.
    *
    * Only cards in a settled column that does not already own a run are eligible;
-   * paused, archived, done and open-run cards are refused, and the service
-   * decides *when* the conditions hold.
+   * paused, archived, done and open-run cards are refused, the session the human
+   * stopped from the card is refused by its stop marker, and the service decides
+   * *when* the conditions hold.
    * @param taskId - the card whose conversation runs again.
    * @param sessionId - the running conversation.
    * @param kind - the kind of the settled run (so a clarification stays in its
@@ -1646,6 +1652,11 @@ export class HostTaskLedger {
     const now = this.now()
     const task = this.document.tasks.find(item => item.id === taskId)
     if (task === undefined || task.archivedAt !== undefined || task.pausedAt !== undefined) return false
+    // The conversation was stopped from the card on purpose: a late turn end or
+    // job notice is the wake-up the stop removed, not evidence of resumed work.
+    // Only a new run or a deliberate resume (which clear the marker) may look at
+    // this session again.
+    if (task.stoppedAt !== undefined && task.stoppedSessionId === sessionId) return false
     if (task.status !== 'testing' && task.status !== 'tested' && task.status !== 'failed' && task.status !== 'clarification') return false
     if (hasOpenExecution(task)) return false
     // The re-opened run covers the activity *since the card was parked*, not
@@ -1772,6 +1783,65 @@ export class HostTaskLedger {
     // notification.
     if (openedTest !== undefined) this.pendingRuns.push(openedTest)
     this.commit()
+  }
+
+  /**
+   * End the card's conversation from the card: stamp the explicit stop and
+   * settle every open run as cancelled in the very same Host step.
+   *
+   * The settle is deliberately immediate. A stop is a human decision about the
+   * run, and a session that was killed (or no longer answers) can never produce
+   * the `turn/end` + `sessionEnded()` evidence `inspect()` waits for. Deferring
+   * the settle to that evidence is exactly what left a deliberately stopped card
+   * claiming `running` with an execution nothing would ever close.
+   *
+   * A conflict-resolution run keeps its exception: {@link settle} pauses it, so
+   * the conflict stays in the worktree and the card remains resumable. The stop
+   * marker is kept in either case; it refuses the adoption pass on exactly this
+   * session until the card starts (or resumes) again.
+   *
+   * The marker is written even when the card owns no open run: a late
+   * conversation of a settled card is still the session the human just stopped,
+   * and adoption must not revive it.
+   * @param taskId - the card.
+   * @param sessionId - the conversation the human stopped, when it had one.
+   * @param reason - the execution error shown in the card's history.
+   */
+  stopCard(taskId: string, sessionId: string | undefined, reason: string): void {
+    const now = this.now()
+    const task = this.document.tasks.find(item => item.id === taskId)
+    if (task === undefined) return
+    const open = task.executions
+      .filter(execution => execution.endedAt === undefined)
+      .map(execution => execution.id)
+    this.document.tasks = this.document.tasks.map(item => {
+      if (item.id !== taskId) return item
+      const stopped = withStopMarker(withPause(item, false, now), sessionId, now)
+      // A `running` column without an open run is the stale shape a stop must
+      // remove as well (a torn/legacy record, not a run). There is nothing to
+      // settle, so park it like the cancelled run it should have been.
+      return open.length === 0 && stopped.status === 'running'
+        ? withStatus(stopped, 'clarification', now)
+        : stopped
+    })
+    this.commit()
+    for (const executionId of open) this.settle(taskId, executionId, 'cancelled', reason)
+  }
+
+  /**
+   * Clear an explicit stop marker after the human took the conversation back
+   * (a message in a paused stopped card resumes it). A new run clears the
+   * marker in {@link startExecution} instead.
+   */
+  clearStopMarker(taskId: string): void {
+    const now = this.now()
+    let changed = false
+    this.document.tasks = this.document.tasks.map(task => {
+      if (task.id !== taskId || (task.stoppedAt === undefined && task.stoppedSessionId === undefined)) return task
+      changed = true
+      return { ...withoutStopMarker(task), updatedAt: now }
+    })
+    if (changed) this.commit()
   }
 
   private apply(action: TaskBoardAction, initiator?: string): { state: LedgerState; run?: OpenedRun; clarification?: OpenedRun; paused?: PausedRun[]; resumed?: ResumedRun[]; stopped?: PausedRun[]; review?: ReviewIntent[] } {
@@ -2177,7 +2247,7 @@ export class HostTaskLedger {
         const released: ResumedRun[] = []
         this.document.tasks = this.document.tasks.map(task => {
           if (!ids.has(task.id) || task.pausedAt === undefined) return task
-          const resumedTask = withPause(task, false, now)
+          const resumedTask = withoutStopMarker(withPause(task, false, now))
           const execution = openExecution(task)
           if (execution !== undefined) released.push({ task: resumedTask, execution })
           return resumedTask
@@ -2208,7 +2278,7 @@ export class HostTaskLedger {
         const released: ResumedRun[] = []
         this.document.tasks = this.document.tasks.map(task => {
           if (task.archivedAt !== undefined || task.pausedAt === undefined) return task
-          const resumedTask = withPause(task, false, now)
+          const resumedTask = withoutStopMarker(withPause(task, false, now))
           const execution = openExecution(task)
           if (execution !== undefined) released.push({ task: resumedTask, execution })
           return resumedTask

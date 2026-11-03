@@ -1073,13 +1073,21 @@ export class TaskBoardHostService {
 
   /**
    * Stop the card's conversation for good, with the human's confirmation behind
-   * the button: cancel the turn, kill the jobs, drop the queued input (this is
-   * the destructive level — the pause preserves human messages, the hard stop
-   * does not), force the agent to rest if the runtime disagrees, and settle the
-   * open run as cancelled so the card leaves the run column instead of waiting
-   * for a session that no longer works. A conflict-resolution run is the
-   * exception: it is paused instead, keeping the card in `running` because its
-   * conflict stays in the worktree and the human continues the same conversation.
+   * the button: settle every open run as cancelled right away, then cancel the
+   * turn, kill the jobs, drop the queued input (this is the destructive level —
+   * the pause preserves human messages, the hard stop does not), and force the
+   * agent to rest if the runtime disagrees.
+   *
+   * The settlement deliberately does **not** wait for the session to confirm
+   * its end: a hard kill (or a runtime that keeps reporting the agent as
+   * running) can never send the clean `turn/end` the normal monitor waits for,
+   * and a card that stays `running` after an explicit stop is the bug this path
+   * exists to prevent. The stop marker written with the settlement keeps the
+   * adoption pass from reviving exactly this session.
+   *
+   * A conflict-resolution run is the exception: it is paused instead, keeping
+   * the card in `running` because its conflict stays in the worktree and the
+   * human continues the same conversation.
    */
   hardStop(taskId: string): void {
     const task = this.ledger.task(taskId)
@@ -1090,24 +1098,33 @@ export class TaskBoardHostService {
       this.ledger.note(taskId, 'Diese Karte ist die Quelle eines Follow-ups; ihre Session gehört dem Follow-up.')
       return
     }
-    const open = task.executions.filter(execution => execution.endedAt === undefined)
     const sessionId = latestSessionId(task)
-    void (async () => {
-      if (sessionId !== undefined) {
-        const report = await this.runner.stopSession(sessionId, { preserveUserMessages: false })
-        if (report.attached && !report.stopped) {
-          this.ledger.note(taskId, 'Die Session ließ sich auch mit erzwungenem Reset nicht anhalten.')
-          return
-        }
-      }
-      for (const execution of open) this.ledger.settle(taskId, execution.id, 'cancelled', 'Session hart gestoppt (offline).')
-      // A cancelled conflict-resolution run was paused instead of settled (its
-      // conflict stays in the worktree); say that instead of claiming the run
-      // was accounted as cancelled.
-      this.ledger.note(taskId, this.ledger.task(taskId)?.pausedAt === undefined
+    const hadOpenRun = task.executions.some(execution => execution.endedAt === undefined)
+    // The card leaves the run column before the (bounded) session stop starts,
+    // so not even a stop that hangs can keep it `running`.
+    this.ledger.stopCard(taskId, sessionId, 'Session hart gestoppt (offline).')
+    // A stop is final for this run: a message collected by an earlier pause
+    // must not resurface in a later, unrelated resume.
+    this.preservedMessages.delete(taskId)
+    const paused = this.ledger.task(taskId)?.pausedAt !== undefined
+    this.ledger.note(taskId, paused
+      ? 'Session hart gestoppt; der Lösungslauf bleibt pausiert und kann mit „Weitermachen" fortgesetzt werden.'
+      : hadOpenRun
         ? 'Session hart gestoppt; der Lauf wurde als abgebrochen abgerechnet.'
-        : 'Session hart gestoppt; der Lösungslauf bleibt pausiert und kann mit „Weitermachen" fortgesetzt werden.')
-    })().catch(error => { safeConsoleError(`[dsh-task-board] hard stop of task ${taskId} failed`, error) })
+        : 'Session hart gestoppt; die Karte hatte keinen offenen Lauf mehr.')
+    if (sessionId === undefined) return
+    void this.runner.stopSession(sessionId, { preserveUserMessages: false }).then(report => {
+      if (report.attached && !report.stopped) {
+        this.ledger.note(taskId, 'Die Session ließ sich auch mit erzwungenem Reset nicht anhalten; der Lauf bleibt abgerechnet, das Board versucht es erneut.')
+        return
+      }
+      if (report.phaseReset) {
+        this.ledger.note(taskId, 'Die Session ließ sich nur mit einem erzwungenen Phasen-Reset anhalten.')
+      }
+    }).catch(error => {
+      safeConsoleError(`[dsh-task-board] hard stop of task ${taskId} failed`, error)
+      this.ledger.note(taskId, 'Der Stopp der Session ist fehlgeschlagen; der Lauf bleibt abgerechnet, das Board versucht es erneut.')
+    })
   }
 
   /**
@@ -1929,10 +1946,14 @@ export class TaskBoardHostService {
   }
 
   /**
-   * Stop the card's conversation right now, without touching its column or its
-   * execution record: the immediate stop behind the card's control. Jobs die, so
-   * their completion notices cannot wake it again; human messages are kept for a
-   * later resume.
+   * Stop the card's conversation right now. The open run is settled cancelled
+   * in the same Host step, before the session is asked to stop: the card must
+   * leave the run column even when the session is killed and can no longer
+   * report a turn end (or answers slowly). Jobs die, so their completion notices
+   * cannot wake the session again; the queued input is dropped with the run.
+   *
+   * A conflict-resolution run keeps its exception and is paused instead, so its
+   * conflict stays in the worktree and can be continued.
    */
   private stopRunningSession(taskId: string): void {
     const task = this.ledger.task(taskId)
@@ -1944,21 +1965,39 @@ export class TaskBoardHostService {
       return
     }
     const sessionId = latestSessionId(task)
-    if (sessionId === undefined) return
-    void this.runner.stopSession(sessionId, { preserveUserMessages: true }).then(report => {
-      if (report.preserved.length > 0) this.preservedMessages.set(taskId, report.preserved)
+    const hadOpenRun = task.executions.some(execution => execution.endedAt === undefined)
+    // Settle first, stop second: the status must not depend on a session that
+    // may already be dead. `stopCard` also stamps the stop marker so the
+    // adoption pass cannot turn this very session back into `running`.
+    this.ledger.stopCard(taskId, sessionId, 'Session von der Karte gestoppt.')
+    // The stop drops the queue with the run; a message collected by an earlier
+    // pause must not resurface in a later, unrelated resume either.
+    this.preservedMessages.delete(taskId)
+    if (sessionId === undefined) {
+      this.ledger.note(taskId, hadOpenRun
+        ? 'Die Karte hatte noch keine Session; der offene Lauf wurde als abgebrochen abgerechnet.'
+        : 'Zu dieser Karte lief keine Session.')
+      return
+    }
+    if (this.ledger.task(taskId)?.pausedAt !== undefined) {
+      this.ledger.note(taskId, 'Der Lösungslauf bleibt pausiert und kann mit „Weitermachen" fortgesetzt werden.')
+    }
+    void this.runner.stopSession(sessionId, { preserveUserMessages: false }).then(report => {
       if (!report.attached) {
-        this.ledger.note(taskId, 'Zu dieser Karte läuft gerade keine Session mehr.')
+        this.ledger.note(taskId, 'Zu dieser Karte lief keine Session mehr.')
         return
       }
       if (!report.stopped) {
-        this.ledger.note(taskId, 'Die Session ließ sich nicht anhalten; das Board versucht es beim nächsten Durchlauf erneut.')
+        this.ledger.note(taskId, 'Die Session ließ sich nicht bestätigen; der Lauf bleibt abgerechnet, das Board versucht es erneut.')
         return
       }
       this.ledger.note(taskId, report.phaseReset
         ? 'Die Session wurde mit einem erzwungenen Phasen-Reset angehalten.'
         : 'Die Session wurde angehalten.')
-    }).catch(error => { safeConsoleError(`[dsh-task-board] stopping the session of task ${taskId} failed`, error) })
+    }).catch(error => {
+      safeConsoleError(`[dsh-task-board] stopping the session of task ${taskId} failed`, error)
+      this.ledger.note(taskId, 'Der Stopp der Session ist fehlgeschlagen; der Lauf bleibt abgerechnet, das Board versucht es erneut.')
+    })
   }
 
   /**
@@ -1974,6 +2013,8 @@ export class TaskBoardHostService {
    * Guards, all fail-safe:
    * - only a card in a settled column that owns no open run is eligible;
    *   paused/archived/done cards are corrected by stopping the session instead;
+   * - a conversation the human stopped from the card is never adopted: its stop
+   *   marker says the wake-up is unwanted, and the watchdog stops it;
    * - the session must have written an event **after** the settle (a mere status
    *   flip is not evidence of work), and the quiet window must have passed;
    * - a human turn since the settle is a rework, not a resume: the rework watch
@@ -1992,6 +2033,10 @@ export class TaskBoardHostService {
     const releasing = this.ledger.pendingReleases()
     const watching = new Set<string>()
     for (const row of this.ledger.sessionWatch()) {
+      // A conversation stopped from the card is not adopted back: the turn end
+      // or job notice that woke it is exactly what the stop removed. The
+      // watchdog stops it instead; the marker is cleared by a new run/resume.
+      if (row.stopped) continue
       if (row.open || row.paused || row.archived || row.status === 'done') continue
       if (releasing[row.taskId] !== undefined) continue
       if (row.status !== 'testing' && row.status !== 'tested' && row.status !== 'failed' && row.status !== 'clarification') continue
@@ -2036,6 +2081,9 @@ export class TaskBoardHostService {
    * - a **paused** card's session must never run: the pause is the human's
    *   "stop", and a late job notice that woke the agent again is exactly what
    *   must not survive it;
+   * - a card **stopped from the card** (`stop-session`/`hard-stop`) is stopped
+   *   right away and never adopted back; the 5 s pass handles it too, because
+   *   there is no adoption quiet window left to protect;
    * - a **done/archived** card has no work left to do;
    * - any other settled card is stopped only if the human has **not** written in
    *   its chat since the run settled — a conversation the human just used is
@@ -2046,7 +2094,7 @@ export class TaskBoardHostService {
    * @param sessions - the roster the poll already fetched.
    * @param options.settled - whether a plain settled card may be stopped. The
    *   5 s pass disables this so it cannot pre-empt the adoption quiet window;
-   *   paused/archived/done cards are stopped either way.
+   *   paused/stopped/archived/done cards are stopped either way.
    */
   private async stopOrphanedSessions(
     sessions: readonly SessionSummary[],
@@ -2066,11 +2114,19 @@ export class TaskBoardHostService {
         const human = await this.runner.newestHumanTurn(row.sessionId, row.pausedAt ?? 0)
         if (human.known && human.at !== undefined) {
           this.ledger.clearPause(row.taskId)
+          // Taking the conversation back on purpose also releases the explicit
+          // stop marker: the human wants this conversation to live again.
+          this.ledger.clearStopMarker(row.taskId)
           this.ledger.note(row.taskId, 'Neue Nachricht im Chat einer pausierten Karte: die Pause wurde aufgehoben.')
           continue
         }
         // Unknown history does not save the session: a paused card is an
         // explicit human instruction, and the stop is retried next poll anyway.
+        stop = true
+      } else if (row.stopped) {
+        // The card was stopped from the board; a conversation that still
+        // reports running is the wake-up the stop removed. No human-turn check
+        // here: the message would land in a session that is supposed to be dead.
         stop = true
       } else if (row.open) {
         continue
@@ -2089,7 +2145,9 @@ export class TaskBoardHostService {
       if (report.preserved.length > 0) this.preservedMessages.set(row.taskId, report.preserved)
       if (!this.orphanNoticed.has(row.sessionId)) {
         this.orphanNoticed.add(row.sessionId)
-        this.ledger.note(row.taskId, 'Eine Session lief ohne offenen Lauf; das Board hat sie gestoppt.')
+        this.ledger.note(row.taskId, row.stopped
+          ? 'Eine gestoppte Session lief weiter; das Board hat sie erneut gestoppt.'
+          : 'Eine Session lief ohne offenen Lauf; das Board hat sie gestoppt.')
       }
     }
     for (const sessionId of [...this.orphanNoticed]) {

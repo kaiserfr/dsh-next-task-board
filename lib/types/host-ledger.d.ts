@@ -172,8 +172,9 @@ export declare class HostTaskLedger {
     /**
      * The card conversations the orphan watchdog follows, one row per card:
      * whether that conversation still backs an open run, whether the card is
-     * paused, and when the run settled (the human-turn check anchors there).
-     * Deliberately a cheap projection — it runs on every poll.
+     * paused, whether it was explicitly stopped, and when the run settled (the
+     * human-turn check anchors there). Deliberately a cheap projection — it runs
+     * on every poll.
      */
     sessionWatch(): Array<{
         taskId: string;
@@ -184,6 +185,8 @@ export declare class HostTaskLedger {
         settledAt?: number;
         /** What the newest settled run on that conversation was. */
         kind?: ExecutionRecord['kind'];
+        /** The conversation was stopped from the card and must not be adopted. */
+        stopped: boolean;
         status: TaskRecord['status'];
         archived: boolean;
     }>;
@@ -536,8 +539,9 @@ export declare class HostTaskLedger {
      * that execution when the session comes to rest again.
      *
      * Only cards in a settled column that does not already own a run are eligible;
-     * paused, archived, done and open-run cards are refused, and the service
-     * decides *when* the conditions hold.
+     * paused, archived, done and open-run cards are refused, the session the human
+     * stopped from the card is refused by its stop marker, and the service decides
+     * *when* the conditions hold.
      * @param taskId - the card whose conversation runs again.
      * @param sessionId - the running conversation.
      * @param kind - the kind of the settled run (so a clarification stays in its
@@ -561,6 +565,35 @@ export declare class HostTaskLedger {
      */
     noteReview(taskId: string, review: TaskReview | undefined): void;
     settle(taskId: string, executionId: string, outcome: 'succeeded' | 'failed' | 'cancelled', error?: string): void;
+    /**
+     * End the card's conversation from the card: stamp the explicit stop and
+     * settle every open run as cancelled in the very same Host step.
+     *
+     * The settle is deliberately immediate. A stop is a human decision about the
+     * run, and a session that was killed (or no longer answers) can never produce
+     * the `turn/end` + `sessionEnded()` evidence `inspect()` waits for. Deferring
+     * the settle to that evidence is exactly what left a deliberately stopped card
+     * claiming `running` with an execution nothing would ever close.
+     *
+     * A conflict-resolution run keeps its exception: {@link settle} pauses it, so
+     * the conflict stays in the worktree and the card remains resumable. The stop
+     * marker is kept in either case; it refuses the adoption pass on exactly this
+     * session until the card starts (or resumes) again.
+     *
+     * The marker is written even when the card owns no open run: a late
+     * conversation of a settled card is still the session the human just stopped,
+     * and adoption must not revive it.
+     * @param taskId - the card.
+     * @param sessionId - the conversation the human stopped, when it had one.
+     * @param reason - the execution error shown in the card's history.
+     */
+    stopCard(taskId: string, sessionId: string | undefined, reason: string): void;
+    /**
+     * Clear an explicit stop marker after the human took the conversation back
+     * (a message in a paused stopped card resumes it). A new run clears the
+     * marker in {@link startExecution} instead.
+     */
+    clearStopMarker(taskId: string): void;
     private apply;
     private repairSchedules;
     private reconcileInterruptedStarts;

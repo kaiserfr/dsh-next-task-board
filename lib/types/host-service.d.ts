@@ -406,13 +406,21 @@ export declare class TaskBoardHostService {
     cancelWork(taskId: string): void;
     /**
      * Stop the card's conversation for good, with the human's confirmation behind
-     * the button: cancel the turn, kill the jobs, drop the queued input (this is
-     * the destructive level — the pause preserves human messages, the hard stop
-     * does not), force the agent to rest if the runtime disagrees, and settle the
-     * open run as cancelled so the card leaves the run column instead of waiting
-     * for a session that no longer works. A conflict-resolution run is the
-     * exception: it is paused instead, keeping the card in `running` because its
-     * conflict stays in the worktree and the human continues the same conversation.
+     * the button: settle every open run as cancelled right away, then cancel the
+     * turn, kill the jobs, drop the queued input (this is the destructive level —
+     * the pause preserves human messages, the hard stop does not), and force the
+     * agent to rest if the runtime disagrees.
+     *
+     * The settlement deliberately does **not** wait for the session to confirm
+     * its end: a hard kill (or a runtime that keeps reporting the agent as
+     * running) can never send the clean `turn/end` the normal monitor waits for,
+     * and a card that stays `running` after an explicit stop is the bug this path
+     * exists to prevent. The stop marker written with the settlement keeps the
+     * adoption pass from reviving exactly this session.
+     *
+     * A conflict-resolution run is the exception: it is paused instead, keeping
+     * the card in `running` because its conflict stays in the worktree and the
+     * human continues the same conversation.
      */
     hardStop(taskId: string): void;
     /**
@@ -580,10 +588,14 @@ export declare class TaskBoardHostService {
      */
     private refreshRunningSessions;
     /**
-     * Stop the card's conversation right now, without touching its column or its
-     * execution record: the immediate stop behind the card's control. Jobs die, so
-     * their completion notices cannot wake it again; human messages are kept for a
-     * later resume.
+     * Stop the card's conversation right now. The open run is settled cancelled
+     * in the same Host step, before the session is asked to stop: the card must
+     * leave the run column even when the session is killed and can no longer
+     * report a turn end (or answers slowly). Jobs die, so their completion notices
+     * cannot wake the session again; the queued input is dropped with the run.
+     *
+     * A conflict-resolution run keeps its exception and is paused instead, so its
+     * conflict stays in the worktree and can be continued.
      */
     private stopRunningSession;
     /**
@@ -599,6 +611,8 @@ export declare class TaskBoardHostService {
      * Guards, all fail-safe:
      * - only a card in a settled column that owns no open run is eligible;
      *   paused/archived/done cards are corrected by stopping the session instead;
+     * - a conversation the human stopped from the card is never adopted: its stop
+     *   marker says the wake-up is unwanted, and the watchdog stops it;
      * - the session must have written an event **after** the settle (a mere status
      *   flip is not evidence of work), and the quiet window must have passed;
      * - a human turn since the settle is a rework, not a resume: the rework watch
@@ -620,6 +634,9 @@ export declare class TaskBoardHostService {
      * - a **paused** card's session must never run: the pause is the human's
      *   "stop", and a late job notice that woke the agent again is exactly what
      *   must not survive it;
+     * - a card **stopped from the card** (`stop-session`/`hard-stop`) is stopped
+     *   right away and never adopted back; the 5 s pass handles it too, because
+     *   there is no adoption quiet window left to protect;
      * - a **done/archived** card has no work left to do;
      * - any other settled card is stopped only if the human has **not** written in
      *   its chat since the run settled — a conversation the human just used is
@@ -630,7 +647,7 @@ export declare class TaskBoardHostService {
      * @param sessions - the roster the poll already fetched.
      * @param options.settled - whether a plain settled card may be stopped. The
      *   5 s pass disables this so it cannot pre-empt the adoption quiet window;
-     *   paused/archived/done cards are stopped either way.
+     *   paused/stopped/archived/done cards are stopped either way.
      */
     private stopOrphanedSessions;
     private tickSchedule;

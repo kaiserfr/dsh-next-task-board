@@ -192,17 +192,65 @@ describe('board side of the hard stop', () => {
 })
 
 describe('immediate session stop and the paused card', () => {
-  it('stops the running conversation on demand without moving the card', async () => {
+  it('settles the running conversation on the spot instead of leaving the card running', async () => {
     const { ledger } = openLedgerForTest()
     const agent = liveAgent()
     const { service } = serviceWith(ledger, { agent: () => agent })
     await service.apply('stop-now', { kind: 'stop-session', taskId: 'card' })
     await new Promise(resolve => { setTimeout(resolve, 0) })
     expect(agent.cancel).toHaveBeenCalledOnce()
-    // The card keeps its column and its open execution: this is a stop, not a
-    // settlement.
-    expect(ledger.state().tasks[0]!.status).toBe('clarification')
-    expect(ledger.state().tasks[0]!.executions[0]!.endedAt).toBeUndefined()
+    // The clarification run keeps its column, but it is settled at once: the
+    // card can no longer read as Running/Queued. The marker refuses adoption of
+    // the very session that was stopped.
+    const task = ledger.state().tasks[0]!
+    expect(task.status).toBe('clarification')
+    expect(task.executions[0]!.endedAt).toBe(0)
+    expect(task.executions[0]!.result).toBe('cancelled')
+    expect(task.stoppedAt).toBe(0)
+    expect(task.stoppedSessionId).toBe('session-a')
+    service.dispose()
+  })
+
+  it('settles a running implementation card as cancelled on a regular stop', async () => {
+    const { ledger } = runningLedger()
+    const agent = liveAgent()
+    const { service } = serviceWith(ledger, { agent: () => agent })
+    await service.apply('stop-running', { kind: 'stop-session', taskId: 'card' })
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    const task = ledger.state().tasks[0]!
+    expect(task.status).toBe('clarification')
+    expect(task.executions.at(-1)!.endedAt).toBe(0)
+    expect(task.executions.at(-1)!.result).toBe('cancelled')
+    expect(task.pausedAt).toBeUndefined()
+    service.dispose()
+  })
+
+  it('settles the run even when the killed session can no longer confirm its end', async () => {
+    const { ledger } = runningLedger()
+    const { service } = serviceWith(ledger, { agent: () => liveAgent() })
+    // The stop RPC never answers (the session was killed): neither a turn end
+    // nor a confirmation can arrive. The card must leave `running` nonetheless.
+    vi.spyOn(service.runner, 'stopSession').mockReturnValue(new Promise(() => {}))
+    await service.apply('hard-stop-killed', { kind: 'hard-stop', taskId: 'card' })
+    const task = ledger.state().tasks[0]!
+    expect(task.status).toBe('clarification')
+    expect(task.executions.at(-1)!.result).toBe('cancelled')
+    expect(task.stoppedAt).toBe(0)
+    expect(task.stoppedSessionId).toBe('session-a')
+    service.dispose()
+  })
+
+  it('releases a pause and settles the run when the paused card is stopped', async () => {
+    const { ledger } = runningLedger()
+    ledger.applyRequest('pause-card', { kind: 'pause', taskIds: ['card'] })
+    expect(ledger.state().tasks[0]!.pausedAt).toBe(0)
+    const { service } = serviceWith(ledger, { agent: () => liveAgent() })
+    await service.apply('stop-paused', { kind: 'stop-session', taskId: 'card' })
+    await new Promise(resolve => { setTimeout(resolve, 0) })
+    const task = ledger.state().tasks[0]!
+    expect(task.status).toBe('clarification')
+    expect(task.pausedAt).toBeUndefined()
+    expect(task.executions.at(-1)!.result).toBe('cancelled')
     service.dispose()
   })
 
@@ -237,6 +285,26 @@ describe('immediate session stop and the paused card', () => {
       service.dispose()
     }
   })
+
+  it('stops a conversation that keeps running after the stop without waiting for the adoption window', async () => {
+    const { ledger } = openLedgerForTest()
+    ledger.stopCard('card', 'session-a', 'Session von der Karte gestoppt.')
+    const agent = liveAgent()
+    const { service } = serviceWith(ledger, { agent: () => agent })
+    vi.useFakeTimers()
+    try {
+      await service.start()
+      // The 5 s pass already stops a stopped session (the adopted card would
+      // otherwise wait for the 60 s safety-net poll while claiming no run).
+      await vi.advanceTimersByTimeAsync(5_100)
+      expect(agent.cancel).toHaveBeenCalled()
+      // The card stays settled; a late stop does not revive it.
+      expect(ledger.state().tasks[0]!.status).toBe('clarification')
+    } finally {
+      vi.useRealTimers()
+      service.dispose()
+    }
+  })
 })
 
 /** A card in clarification with one open run on `session-a`. */
@@ -248,6 +316,55 @@ function openLedgerForTest(): { ledger: HostTaskLedger } {
   ledger.attachSession('card', execution.id, 'session-a')
   return { ledger }
 }
+
+/** A card in `running` whose open implementation run holds `session-a`. */
+function runningLedger(): { ledger: HostTaskLedger } {
+  const ledger = new HostTaskLedger(root(), () => 0)
+  ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+  ledger.applyRequest('to-clarification', { kind: 'move', taskId: 'card', status: 'clarification' })
+  const opened = ledger.applyRequest('run-card', { kind: 'run', taskId: 'card' })
+  ledger.attachSession('card', opened.run!.execution.id, 'session-a')
+  return { ledger }
+}
+
+describe('the stop marker keeps a stopped card out of the running column', () => {
+  it('refuses to adopt the conversation that was stopped, and the next run clears the marker', () => {
+    const { ledger } = openLedgerForTest()
+    ledger.settle('card', ledger.state().tasks[0]!.executions[0]!.id, 'succeeded')
+    ledger.stopCard('card', 'session-a', 'Session von der Karte gestoppt.')
+    expect(ledger.state().tasks[0]!.stoppedAt).toBe(0)
+    expect(ledger.sessionWatch()[0]!.stopped).toBe(true)
+    // The late event of the stopped conversation is exactly the wake-up the
+    // stop removed: no adoption, no return to `running`.
+    expect(ledger.adoptRunningSession('card', 'session-a', 'clarify')).toBe(false)
+    expect(ledger.state().tasks[0]!.status).toBe('clarification')
+    // A deliberate new run is allowed to look at the session again.
+    const opened = ledger.applyRequest('run-again', { kind: 'run', taskId: 'card' })
+    expect(opened.run).toBeDefined()
+    expect(ledger.state().tasks[0]!.stoppedAt).toBeUndefined()
+    expect(ledger.state().tasks[0]!.stoppedSessionId).toBeUndefined()
+    ledger.dispose()
+  })
+
+  it('keeps a conflict-resolution run paused in running, its conflict still in the worktree', () => {
+    const { ledger } = openLedgerForTest()
+    ledger.settle('card', ledger.state().tasks[0]!.executions[0]!.id, 'succeeded')
+    // The release path re-opens the settled card on its conversation for the
+    // conflict resolution; stopping it is the merge exception.
+    expect(ledger.adoptRunningSession('card', 'session-a', 'merge')).toBe(true)
+    expect(ledger.state().tasks[0]!.status).toBe('running')
+    ledger.stopCard('card', 'session-a', 'Session hart gestoppt (offline).')
+    const task = ledger.state().tasks[0]!
+    expect(task.status).toBe('running')
+    expect(task.pausedAt).toBe(0)
+    // A cancelled merge run is paused, not settled: its conflict stays in the
+    // worktree and "Weitermachen" continues this very execution.
+    expect(task.executions.at(-1)!.endedAt).toBeUndefined()
+    expect(task.executions.at(-1)!.result).toBeUndefined()
+    expect(task.stoppedSessionId).toBe('session-a')
+    ledger.dispose()
+  })
+})
 
 describe('TaskBoardHostService.acceptAction', () => {
   it('applies asynchronously, reports the result as an event and sends only the changed card afterwards', async () => {
