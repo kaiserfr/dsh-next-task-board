@@ -9,7 +9,7 @@ import { useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
 import { isValidCron } from '../../core/schedule.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
-import { TASK_PERMISSIONS, isTaskPaused, openExecution, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
+import { FOLLOW_UP_SOURCE_STATUSES, TASK_PERMISSIONS, canStartFollowUp, followUpsOf, hasFollowUpLock, isTaskPaused, openExecution, tagTone, type ExecutionRecord, type TaskPermission, type TaskRecord } from '../../core/tasks.ts'
 import { transitionBlockerOf, transitionStartsExecution } from '../../core/transitions.ts'
 import { canEditTaskContent } from '../../core/use-cases/task-update.ts'
 import { requiresPermissionConfirmation } from '../../core/handover.ts'
@@ -22,7 +22,7 @@ import { NewTaskModal } from './NewTaskModal.tsx'
 import { ReviewSection } from './ReviewSection.tsx'
 import { formatHostTimestamp, formatTime } from './TaskCard.tsx'
 import { STATUS_KEY } from './status-key.ts'
-import { blockerText, moveLabel, queuedTransitionText, transitionErrorText } from './transition-text.ts'
+import { blockerText, moveLabel, queuedTransitionText, statusLabel, transitionErrorText } from './transition-text.ts'
 
 /** Execution outcome → locale key. */
 const RESULT_KEY: Record<NonNullable<ExecutionRecord['result']>, TaskBoardKey> = {
@@ -288,6 +288,7 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
   const [showEdit, setShowEdit] = useState(false)
   const [showEditTags, setShowEditTags] = useState(false)
   const [showDuplicate, setShowDuplicate] = useState(false)
+  const [showFollowUp, setShowFollowUp] = useState(false)
 
   // Keep the overlay in sync if the task record changes underneath.
   const [latest, setLatest] = useState(task)
@@ -297,6 +298,7 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
     setShowEdit(false)
     setShowEditTags(false)
     setShowDuplicate(false)
+    setShowFollowUp(false)
   }, [task.id])
   const current = latest
   const snapshot = controller.getSnapshot()
@@ -323,10 +325,24 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
   // bypass the clarification step from backlog/done.
   const machine = resolveStateMachine(snapshot.host?.stateMachine).machine
   const moveTargets = machine.targets(current.status)
+  // Follow-up bookkeeping of this card, both directions: the follow-ups it is
+  // the source of (and the resulting lock) and, for a follow-up card, its
+  // frozen source. Derived from the board's task list, never stored on the
+  // source.
+  const followUps = followUpsOf(current, snapshot.tasks)
+  const followUpLocked = hasFollowUpLock(current, snapshot.tasks)
+  const liveFollowUps = followUps.filter(followUp => followUp.archivedAt === undefined)
+  const followUpSourceStatus = (FOLLOW_UP_SOURCE_STATUSES as readonly string[]).includes(current.status)
+  const followUpAvailable = !archived && canStartFollowUp(current, snapshot.tasks)
+  const followUpBlockedReason = (): string | undefined => {
+    if (openExecution(current) !== undefined) return t('detail.followUp.blocked.openRun')
+    if (followUps.some(followUp => followUp.archivedAt === undefined && followUp.status !== 'done')) return t('detail.followUp.blocked.active')
+    return undefined
+  }
   const queuedTransition = (snapshot.pendingTransitions ?? []).find(entry => entry.taskId === current.id)
   const transitionError = snapshot.transitionErrors?.[current.id]
   const blockerFor = (status: typeof moveTargets[number]) =>
-    transitionBlockerOf(current, machine, status, snapshot.host?.sessionDefaultPermission)
+    transitionBlockerOf(current, machine, status, snapshot.host?.sessionDefaultPermission, followUpLocked)
   const startsExecution = (status: typeof moveTargets[number]) =>
     transitionStartsExecution(machine, current.status, status)
   const reasonFor = (status: typeof moveTargets[number]): string | undefined => {
@@ -393,6 +409,70 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
             <h4>{t('detail.description')}</h4>
             <p className={css.detailText}>{current.description !== '' ? current.description : '—'}</p>
           </section>
+
+          {current.followUp !== undefined && (
+            // The previous task this card continues: frozen at creation time, so
+            // it stays readable after the source is archived, edited or deleted.
+            <section className={css.detailSection} data-dsh-part="detail-follow-up">
+              <h4>{t('detail.followUp')}</h4>
+              <p className={css.detailText}>{t('detail.followUpFrom', { title: current.followUp.title })}</p>
+              {(() => {
+                const source = snapshot.tasks.find(item => item.id === current.followUp?.sourceTaskId)
+                if (source === undefined) return <p className={css.detailMeta}>{t('detail.followUp.sourceMissing')}</p>
+                if (source.archivedAt !== undefined) return <p className={css.detailMeta}>{t('detail.followUp.sourceArchived')}</p>
+                return (
+                  <button
+                    type="button"
+                    className={css.linkButton}
+                    data-dsh-part="detail-follow-up-source-link"
+                    onClick={() => { controller.openTask(source.id) }}
+                  >
+                    {t('detail.followUpOpenSource')}
+                  </button>
+                )
+              })()}
+              <p className={css.detailMeta}>{t('detail.followUpCreated', { time: formatHostTimestamp(current.followUp.createdAt, timeZone) })}</p>
+              <details data-dsh-part="detail-follow-up-previous">
+                <summary className={css.detailText}>{t('detail.followUpPrevious')}</summary>
+                <p className={css.detailText}><strong>{t('detail.followUpPreviousTitle')}</strong></p>
+                <pre className={css.promptBlock}>{current.followUp.title}</pre>
+                <p className={css.detailText}><strong>{t('detail.followUpPreviousDescription')}</strong></p>
+                <pre className={css.promptBlock}>{current.followUp.description !== '' ? current.followUp.description : '—'}</pre>
+                <p className={css.detailText}><strong>{t('detail.followUpPreviousPrompt')}</strong></p>
+                <pre className={css.promptBlock}>{current.followUp.prompt}</pre>
+              </details>
+            </section>
+          )}
+
+          {followUps.length > 0 && (
+            // The reverse reference: this card is the source of these follow-ups.
+            // While one exists, the card neither runs nor releases its branch.
+            <section className={css.detailSection} data-dsh-part="detail-follow-ups">
+              <h4>{t('detail.followUps')}</h4>
+              <ul className={css.executionList}>
+                {followUps.map(followUp => (
+                  <li key={followUp.id} className={css.executionRow}>
+                    <button
+                      type="button"
+                      className={css.linkButton}
+                      data-dsh-part="detail-follow-up-link"
+                      disabled={followUp.archivedAt !== undefined}
+                      onClick={() => { controller.openTask(followUp.id) }}
+                    >
+                      {followUp.title}
+                    </button>
+                    <span className={css.executionTimes}>
+                      {statusLabel(followUp.status)}
+                      {followUp.archivedAt !== undefined && ` · ${t('board.archive')}`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {followUpLocked && (
+                <p className={css.detailMeta} data-dsh-part="detail-follow-up-lock">{t('detail.followUpLockHint')}</p>
+              )}
+            </section>
+          )}
 
           {!archived && (
             <section className={css.detailSection} data-dsh-part="detail-transitions">
@@ -622,6 +702,21 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
               {canEditTaskContent(current) ? t('detail.duplicate') : t('detail.duplicateAndEdit')}
             </button>
           )}
+          {!archived && followUpSourceStatus && (
+            // Start the new task on the previous task's conversation. The
+            // source must be settled (no open run) and have no unfinished
+            // follow-up; the reason sits in the button's title.
+            <button
+              type="button"
+              className={css.ghostButton}
+              data-dsh-part="detail-follow-up-button"
+              disabled={pending || !followUpAvailable}
+              title={followUpAvailable ? t('detail.followUpHint') : followUpBlockedReason()}
+              onClick={() => { setShowFollowUp(true) }}
+            >
+              {t('detail.followUp')}
+            </button>
+          )}
           {!archived && (paused || openRun) && !(paused && snapshot.host?.runningSessions?.[current.id] === true) && (
             // The execution button doubles as the run's pause/play control:
             // while the run is open it shows the pause glyph, a paused run shows
@@ -711,7 +806,8 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
           <button
             type="button"
             className={css.dangerButton}
-            disabled={pending}
+            disabled={pending || liveFollowUps.length > 0}
+            title={liveFollowUps.length > 0 ? t('detail.followUp.deleteBlocked') : undefined}
             onClick={() => { setConfirmDelete(true) }}
           >
             {t('detail.delete')}
@@ -754,6 +850,14 @@ export function TaskDetail({ controller, task, waitingReason }: { controller: Bo
             await controller.archiveTask(sourceId)
             controller.closeTask()
           }}
+        />
+      )}
+
+      {showFollowUp && !archived && followUpSourceStatus && (
+        <NewTaskModal
+          controller={controller}
+          followUpSource={current}
+          onClose={() => { setShowFollowUp(false) }}
         />
       )}
     </div>

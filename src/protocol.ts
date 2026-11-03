@@ -557,10 +557,15 @@ function handoverPayload(value: unknown): TaskHandoverInput | undefined {
 
 function createInput(value: unknown): value is NewTaskInput {
   const input = record(value)
-  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'skipTests', 'tags'])) return false
+  if (input === undefined || !exactKeys(input, ['title', 'description', 'prompt', 'parseText', 'workspaceId', 'mode', 'permission', 'schedule', 'freeze', 'handover', 'model', 'reuseSession', 'skipTests', 'tags', 'followUpOf'])) return false
   if (typeof input.title !== 'string' || typeof input.description !== 'string' || typeof input.prompt !== 'string') return false
   if (!optionalString(input.parseText)) return false
   if (!optionalString(input.workspaceId) || !optionalString(input.mode) || !optionalString(input.model)) return false
+  // The follow-up source is only an id here; the Host resolves the snapshot,
+  // the conversation and the inherited branch from its own ledger. A blank id
+  // is not a source and is refused here instead of failing later.
+  if (!optionalString(input.followUpOf)
+    || (input.followUpOf !== undefined && (input.followUpOf as string).trim() === '')) return false
   if (input.reuseSession !== undefined && typeof input.reuseSession !== 'boolean') return false
   if (input.skipTests !== undefined && typeof input.skipTests !== 'boolean') return false
   if (input.permission !== undefined && !isTaskPermission(input.permission)) return false

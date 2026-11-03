@@ -134,7 +134,7 @@ function CardStepButton({ taskId, direction, target, blocker, disabled, queued, 
   )
 }
 
-function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
+function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** A merge release of this card runs in the Host's background. */
@@ -146,6 +146,10 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
   timeZone?: string
   selected: boolean
   dragging: boolean
+  /** The card is the source of at least one follow-up card. */
+  hasFollowUpSource?: boolean
+  /** Titles of this card's follow-ups, for the source badge's tooltip. */
+  followUpSourceHint?: string
   /**
    * Why the card waits for its lane's WIP slot (undefined when it waits for
    * nothing). The reason itself is not rendered; the tooltip carries the text.
@@ -328,6 +332,29 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
         {!archived && pending && <span className={css.cardRunningLabel}>{t('board.pending')}…</span>}
         {!archived && releasePending === true && (
           <span className={css.cardRunningLabel} data-dsh-part="card-release-pending">{t('card.releasePending')}</span>
+        )}
+        {task.followUp !== undefined && (
+          // This card continues another card: the frozen source title says which
+          // one, the detail holds its full text.
+          <span
+            className={css.cardMerge}
+            data-merge="follow-up"
+            data-dsh-part="card-follow-up"
+            title={t('card.followUpOf', { title: task.followUp.title })}
+          >
+            {t('card.followUp')}
+          </span>
+        )}
+        {hasFollowUpSource === true && (
+          // The reverse reference: follow-up cards were started from this one.
+          <span
+            className={css.cardMerge}
+            data-merge="follow-up-source"
+            data-dsh-part="card-follow-up-source"
+            title={followUpSourceHint ?? t('card.followUpSourceHint', { titles: '' })}
+          >
+            {t('card.followUpSource')}
+          </span>
         )}
         {task.skipTests === true && (
           <span

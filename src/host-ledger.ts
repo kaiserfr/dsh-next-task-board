@@ -5,8 +5,8 @@ import { dirname, join } from 'node:path'
 import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
-import type { TaskCompose, TaskGit, TaskMerge, TaskReview } from './core/tasks.ts'
-import { DEFAULT_MAX_DONE_TASKS, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, implementationParkStatus, isReworkReturn, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import type { TaskCompose, TaskFollowUp, TaskGit, TaskMerge, TaskReview } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, FOLLOW_UP_SOURCE_STATUSES, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, implementationParkStatus, isReworkReturn, latestSessionIdOf, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -546,7 +546,13 @@ export class HostTaskLedger {
       status: TaskRecord['status']
       archived: boolean
     }> = []
+    // A card whose conversation a follow-up owns must never be watched: the
+    // session's work now belongs to the follow-up card, so adopting/stopping it
+    // (or reading a human turn as a rework of the source) would fight the
+    // follow-up's own run.
+    const sources = this.followUpSourceIds()
     for (const task of this.document.tasks) {
+      if (sources.has(task.id)) continue
       // "open" describes the card, not only its newest session-bearing run: a
       // queued run that has no session yet must still keep the watchdog from
       // stopping the conversation the card already owned.
@@ -795,8 +801,11 @@ export class HostTaskLedger {
    */
   reworkWatch(): ReworkWatchEntry[] {
     const entries: ReworkWatchEntry[] = []
+    // A source card's conversation is the follow-up's: a human turn written
+    // there is that card's rework, not the source's.
+    const sources = this.followUpSourceIds()
     for (const task of this.document.tasks) {
-      if (task.archivedAt !== undefined) continue
+      if (task.archivedAt !== undefined || sources.has(task.id)) continue
       if (task.status !== 'testing' && task.status !== 'tested' && task.status !== 'failed') continue
       // Only settled cards: while the test run still owns the card, a human
       // message is not (yet) a review correction — the test run continues, and
@@ -831,8 +840,11 @@ export class HostTaskLedger {
    */
   awaitingAnswerWatch(): AnswerWatchEntry[] {
     const entries: AnswerWatchEntry[] = []
+    // The source card's question symbol would point at the follow-up's
+    // conversation; only the card that owns it may show the marker.
+    const sources = this.followUpSourceIds()
     for (const task of this.document.tasks) {
-      if (task.archivedAt !== undefined || task.pausedAt !== undefined) continue
+      if (task.archivedAt !== undefined || task.pausedAt !== undefined || sources.has(task.id)) continue
       const latest = task.executions[task.executions.length - 1]
       const open = latest !== undefined && latest.endedAt === undefined
       const clarifying = task.status === 'clarification' && task.clarificationSessionId !== undefined
@@ -1079,6 +1091,11 @@ export class HostTaskLedger {
     for (const id of ids) {
       const task = this.document.tasks.find(item => item.id === id)
       if (task?.git === undefined) continue
+      // A follow-up shares the source card's checkout: while another live card
+      // still names that path, archiving one card must not yank the directory
+      // out from under it. The last owner releases it (the archived card's own
+      // retry in `archivedWorktrees` picks the job up once nobody shares it).
+      if (task.git.worktreePath !== undefined && this.worktreeSharedByOther(task.id, task.git.worktreePath)) continue
       // The removal runs on the card's work chain, never in the action path. A
       // refusal is not fatal: the Host poll's reconcileArchivedWorktrees retries
       // it and logs it once (a locked worktree is never unlocked behind the
@@ -1093,12 +1110,109 @@ export class HostTaskLedger {
    * Archived cards whose own worktree directory still exists, so the Host poll
    * can retry releasing it: git may have refused at archive time, or the card
    * was archived before archiving released the worktree. A runtime projection on
-   * the hot poll path — it never clones the document.
+   * the hot poll path — it never clones the document. Cards whose checkout is
+   * still named by a live card (a follow-up on the source's worktree) are left
+   * out: their removal is not this card's to do.
    */
   archivedWorktrees(): TaskRecord[] {
+    const livePaths = new Set<string>()
+    for (const task of this.document.tasks) {
+      if (task.archivedAt === undefined && task.git?.worktreePath !== undefined) livePaths.add(task.git.worktreePath)
+    }
     return this.document.tasks.filter(task => task.archivedAt !== undefined
       && task.git?.worktreePath !== undefined
+      && !livePaths.has(task.git.worktreePath)
       && existsSync(task.git.worktreePath))
+  }
+
+  /** Follow-up cards started from this card (archived ones included). */
+  private followUpsOfTask(taskId: string): TaskRecord[] {
+    return this.document.tasks.filter(task => task.followUp?.sourceTaskId === taskId)
+  }
+
+  /**
+   * Ids of cards whose conversation a follow-up owns. These cards are excluded
+   * from every conversation watch (session adopt/stop, rework, awaiting answer):
+   * the session's activity belongs to the follow-up now, and treating it as the
+   * source's would stop or move the source while the follow-up works.
+   */
+  private followUpSourceIds(): Set<string> {
+    const ids = new Set<string>()
+    for (const task of this.document.tasks) {
+      const sourceId = task.followUp?.sourceTaskId
+      if (sourceId !== undefined) ids.add(sourceId)
+    }
+    return ids
+  }
+
+  /**
+   * The card is the source of a follow-up, so its conversation and branch are
+   * the follow-up's now: it neither runs again nor releases that branch while
+   * any follow-up card exists. The reverse direction is derived (no stamp on the
+   * source), so deleting the follow-up card releases the source again.
+   */
+  private followUpLocked(taskId: string): boolean {
+    return this.document.tasks.some(task => task.followUp?.sourceTaskId === taskId)
+  }
+
+  /** Whether another live card still uses this checkout (source and follow-up share one). */
+  private worktreeSharedByOther(taskId: string, worktreePath: string): boolean {
+    return this.document.tasks.some(task => task.id !== taskId
+      && task.archivedAt === undefined
+      && task.git?.worktreePath === worktreePath)
+  }
+
+  /**
+   * Resolve and validate the source card of a follow-up create. The checks are
+   * the Host's answer to a stale browser dialog: the card must still be a
+   * settled source with a free conversation, and it must not already have an
+   * unfinished follow-up (one at a time; a follow-up that reached `done` or was
+   * archived frees the source again).
+   */
+  private followUpSource(sourceId: string): TaskRecord {
+    const source = this.document.tasks.find(task => task.id === sourceId)
+    if (source === undefined) throw new Error('follow-up source not found')
+    if (source.archivedAt !== undefined) throw new Error('follow-up source is archived')
+    if (!(FOLLOW_UP_SOURCE_STATUSES as readonly string[]).includes(source.status)) {
+      throw new Error('a follow-up can only be started from a done, tested or failed card')
+    }
+    if (openExecution(source) !== undefined) throw new Error('follow-up source still has an open run')
+    const active = this.followUpsOfTask(sourceId).some(task => task.archivedAt === undefined && task.status !== 'done')
+    if (active) throw new Error('this card already has an unfinished follow-up')
+    return source
+  }
+
+  /**
+   * Turn a freshly created card into a follow-up of `source`: freeze the
+   * source's readable text, inherit the conversation and the branch/worktree
+   * the follow-up continues, and force session reuse (a follow-up is a
+   * continuation by definition). The review stamps of the source are
+   * deliberately not copied — this card is reviewed on its own.
+   */
+  private withFollowUpLink(task: TaskRecord, source: TaskRecord, now: number): TaskRecord {
+    const sessionId = latestSessionIdOf(source)
+    const followUp: TaskFollowUp = {
+      sourceTaskId: source.id,
+      ...(sessionId === undefined ? {} : { sessionId }),
+      title: source.title,
+      description: source.description,
+      prompt: source.prompt,
+      createdAt: now,
+    }
+    const git = source.git === undefined
+      ? undefined
+      : {
+          branch: source.git.branch,
+          base: source.git.base,
+          repoPath: source.git.repoPath,
+          ...(source.git.worktreePath === undefined ? {} : { worktreePath: source.git.worktreePath }),
+        }
+    return {
+      ...task,
+      followUp,
+      reuseSession: true,
+      ...(git === undefined ? {} : { git }),
+    }
   }
 
   /**
@@ -1126,6 +1240,11 @@ export class HostTaskLedger {
    *   resolution run is a pause and leaves the card in `running`.
    */
   private beginRelease(task: TaskRecord, now: number, initiator?: string): ReleaseResult {
+    // Defense in depth: the call sites already refuse a source card, but a
+    // release must never queue a merge of a branch a follow-up owns.
+    if (this.followUpLocked(task.id)) {
+      throw new Error('this card is the source of a follow-up; it cannot release its branch while the follow-up exists')
+    }
     const git = task.git
     if (git === undefined) {
       const merge: TaskMerge = { releasedAt: now, attempts: 0, skipped: true }
@@ -1411,6 +1530,14 @@ export class HostTaskLedger {
       this.commit()
       return undefined
     }
+    // A source card is never started unattended: its conversation belongs to the
+    // follow-up. The trigger is skipped and the rule rolls to its next point,
+    // exactly like the already-running refusal.
+    if (this.followUpLocked(taskId)) {
+      this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, task.schedule?.lastTriggeredAt, triggeredAt)]
+      this.commit()
+      return undefined
+    }
     const opened = startExecution(this.ensureFeatureBranchLater(task), triggeredAt, crypto.randomUUID())
     this.document.tasks = this.document.tasks.map(item => item.id === taskId ? opened.task : item)
     this.document.tasks = [...applyScheduleNextRun(this.document.tasks, taskId, nextRunAt, triggeredAt, triggeredAt)]
@@ -1467,6 +1594,31 @@ export class HostTaskLedger {
       }
     })
     this.commit()
+  }
+
+  /**
+   * Whether a follow-up owns this card's conversation. The board's stop
+   * controls and the pause path consult this so a stale click on the source
+   * card can never stop the follow-up's session.
+   */
+  isFollowUpSource(taskId: string): boolean {
+    return this.followUpLocked(taskId)
+  }
+
+  /**
+   * Record that the follow-up framing was written into the source conversation.
+   * Stamped by the Host service only after a launch actually prompted the card,
+   * so a failed launch keeps the framing pending (the next run sends it again).
+   * The reverse is deliberately not stamped: every run that has to start a fresh
+   * conversation re-sends the frame together with the frozen source text, so the
+   * link to the previous task can never be lost silently.
+   */
+  markFollowUpInjected(taskId: string): void {
+    const now = this.now()
+    this.patchTask(taskId, task => {
+      if (task.followUp === undefined || task.followUp.injectedAt !== undefined) return task
+      return { ...task, updatedAt: now, followUp: { ...task.followUp, injectedAt: now } }
+    })
   }
 
   /**
@@ -1657,9 +1809,16 @@ export class HostTaskLedger {
         const input = action.input.freeze === undefined || initiator === undefined || initiator === ''
           ? action.input
           : { ...action.input, freeze: { ...action.input.freeze, frozenBy: initiator } }
+        // A follow-up is resolved against the Host's own ledger: the source is
+        // validated here (column, open run, existing follow-up) and the frozen
+        // source text, its conversation and its branch are taken from the source
+        // card, never from the browser payload.
+        const source = action.input.followUpOf === undefined ? undefined : this.followUpSource(action.input.followUpOf)
         const result = applyCreateTask(this.document.tasks, input, now, action.id, this.machine.initialStatus)
         if (result.task === undefined) throw new Error('invalid task')
-        this.document.tasks = [...result.tasks]
+        this.document.tasks = source === undefined
+          ? [...result.tasks]
+          : result.tasks.map(task => task.id === action.id ? this.withFollowUpLink(task, source, now) : task)
         break
       }
       case 'update': {
@@ -1689,13 +1848,24 @@ export class HostTaskLedger {
           const task = this.document.tasks.find(task => task.id === action.taskId)
           if (task === undefined) throw new Error('task not found')
           if (task.status === 'running' || hasOpenExecution(task)) throw new Error('running task cannot be deleted')
-          // The card's worktree is only ever referenced by this card, so deleting
+          // The source card anchors the shared checkout: deleting it while a
+          // live follow-up still works in that directory would leave the
+          // follow-up without a worktree and nothing to retry the release on.
+          // Delete the follow-up first; its own deletion then leaves the source
+          // as the last owner.
+          if (this.followUpsOfTask(task.id).some(other => other.archivedAt === undefined)) {
+            throw new Error('this card is the source of a live follow-up; delete the follow-up first')
+          }
+          // The card's worktree is only ever referenced by this card (or by a
+          // follow-up, whose checkout is the very same directory), so deleting
           // the card releases it (the branch and its commits stay in the repo).
-          // The removal runs on the card's work chain: a slow filesystem never
-          // keeps the browser waiting for the delete. Deleting is final, so a
-          // refusal is logged here (there is no archived card for the poll to
-          // retry on).
-          if (task.git !== undefined) {
+          // While another live card still names the path, the deletion leaves it
+          // alone. The removal runs on the card's work chain: a slow filesystem
+          // never keeps the browser waiting for the delete. Deleting is final,
+          // so a refusal is logged here (there is no archived card for the poll
+          // to retry on).
+          if (task.git !== undefined
+            && (task.git.worktreePath === undefined || !this.worktreeSharedByOther(task.id, task.git.worktreePath))) {
             void this.enqueueCardWork(task.id, async () => {
               const failure = await this.git?.releaseWorktree(task)
               if (failure !== undefined) console.warn(`task board: could not remove the worktree of deleted task ${task.id} (${failure})`)
@@ -1735,6 +1905,12 @@ export class HostTaskLedger {
         // `failed` — so a drag onto "Done" and the card's release button can
         // never behave differently. Every other move keeps the plain git hooks.
         const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch') && !forcingDone
+        // A source card's conversation and branch belong to its follow-up: it
+        // neither starts another run (that would share the session/worktree
+        // with the follow-up) nor releases the branch while a follow-up exists.
+        if ((actions.includes('run') || actions.includes('clarify') || merges) && this.followUpLocked(task.id)) {
+          throw new Error('this card is the source of a follow-up; it cannot run or release its branch while the follow-up exists')
+        }
         const released = merges ? this.beginRelease(task, now, initiator) : undefined
         const gitted = merges ? task : this.transitionGit(task, transition, now)
         // The target state over the transition's git hooks: the base the
@@ -1843,6 +2019,9 @@ export class HostTaskLedger {
         for (const { task, transition, forcingDone } of batch) {
           const actions = transition.actions ?? []
           const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch') && !forcingDone
+          if (merges && this.followUpLocked(task.id)) {
+            throw new Error('this card is the source of a follow-up; it cannot release its branch while the follow-up exists')
+          }
           // A group drop onto Done releases every card that carries the merge
           // hook; each release runs on its own card's work chain and writes its
           // own outcome (done/failed/conflict run), exactly like a single drop.
@@ -1915,6 +2094,9 @@ export class HostTaskLedger {
         if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task.status === 'running' || hasOpenRun(task)) throw new Error('running task cannot be moved')
         if (task.status !== 'tested') throw new Error('merge-requires-tested')
+        if (this.followUpLocked(task.id)) {
+          throw new Error('this card is the source of a follow-up; it cannot release its branch while the follow-up exists')
+        }
         const transition = this.machine.transition(task.status, 'done', 'manual')
         if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → done`)
         const released = (transition.git === false || !(transition.actions ?? []).includes('git.mergeBranch'))
@@ -1951,6 +2133,7 @@ export class HostTaskLedger {
         // automatic run may have been cancelled or the card was parked there by
         // hand. The card must not already own an open run.
         if (task.status !== 'testing') throw new Error('test-requires-testing')
+        if (this.followUpLocked(task.id)) throw new Error('this card is the source of a follow-up; it cannot start a run while the follow-up exists')
         if (task.pausedAt !== undefined || hasOpenExecution(task)) throw new Error('task already has an open run')
         const opened = startExecution(task, now, crypto.randomUUID(), initiator, 'test')
         this.document.tasks = this.document.tasks.map(item => item.id === task.id ? opened.task : item)
@@ -2038,6 +2221,7 @@ export class HostTaskLedger {
         const task = this.document.tasks.find(item => item.id === action.taskId)
         if (task?.archivedAt !== undefined) throw new Error('archived task is read-only')
         if (task === undefined || task.status === 'running' || hasOpenRun(task)) throw new Error('task is already running or missing')
+        if (this.followUpLocked(task.id)) throw new Error('this card is the source of a follow-up; it cannot run while the follow-up exists')
         if (requiresPermissionConfirmation(task, this.sessionDefaultPermission)) {
           throw new Error(`confirmation-required: the effective permission is above the session default (${this.sessionDefaultPermission}); confirm the card's permission binding first`)
         }

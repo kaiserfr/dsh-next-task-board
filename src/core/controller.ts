@@ -13,7 +13,7 @@
  */
 import type { TaskStore } from './store.ts'
 import { resolveStateMachine } from './state-machine.ts'
-import { withStatus, type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts'
+import { hasFollowUpLock, withStatus, type NewTaskInput, type TaskRecord, type TaskStatus } from './tasks.ts'
 import {
   transitionBlockerOf,
   type QueuedTransition,
@@ -1120,7 +1120,7 @@ export class BoardController {
     const pendingMove = this.outbox.some(candidate =>
       candidate.taskId === taskId && candidate.action.kind === 'move')
     if (!pendingMove) {
-      const blocker = transitionBlockerOf(task, this.transitionMachine(), to, this.hostState?.sessionDefaultPermission)
+      const blocker = transitionBlockerOf(task, this.transitionMachine(), to, this.hostState?.sessionDefaultPermission, hasFollowUpLock(task, this.tasks))
       if (blocker !== undefined) {
         this.noteTransitionBlocked(taskId, blocker, to)
         return false
@@ -1219,6 +1219,7 @@ export class BoardController {
           this.transitionMachine(),
           entry.to,
           this.hostState?.sessionDefaultPermission,
+          hasFollowUpLock(task, this.tasks),
         )
         if (blocker !== undefined) {
           this.transitionQueue.delete(taskId)

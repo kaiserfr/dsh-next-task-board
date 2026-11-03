@@ -379,9 +379,45 @@ export declare class HostTaskLedger {
      * Archived cards whose own worktree directory still exists, so the Host poll
      * can retry releasing it: git may have refused at archive time, or the card
      * was archived before archiving released the worktree. A runtime projection on
-     * the hot poll path — it never clones the document.
+     * the hot poll path — it never clones the document. Cards whose checkout is
+     * still named by a live card (a follow-up on the source's worktree) are left
+     * out: their removal is not this card's to do.
      */
     archivedWorktrees(): TaskRecord[];
+    /** Follow-up cards started from this card (archived ones included). */
+    private followUpsOfTask;
+    /**
+     * Ids of cards whose conversation a follow-up owns. These cards are excluded
+     * from every conversation watch (session adopt/stop, rework, awaiting answer):
+     * the session's activity belongs to the follow-up now, and treating it as the
+     * source's would stop or move the source while the follow-up works.
+     */
+    private followUpSourceIds;
+    /**
+     * The card is the source of a follow-up, so its conversation and branch are
+     * the follow-up's now: it neither runs again nor releases that branch while
+     * any follow-up card exists. The reverse direction is derived (no stamp on the
+     * source), so deleting the follow-up card releases the source again.
+     */
+    private followUpLocked;
+    /** Whether another live card still uses this checkout (source and follow-up share one). */
+    private worktreeSharedByOther;
+    /**
+     * Resolve and validate the source card of a follow-up create. The checks are
+     * the Host's answer to a stale browser dialog: the card must still be a
+     * settled source with a free conversation, and it must not already have an
+     * unfinished follow-up (one at a time; a follow-up that reached `done` or was
+     * archived frees the source again).
+     */
+    private followUpSource;
+    /**
+     * Turn a freshly created card into a follow-up of `source`: freeze the
+     * source's readable text, inherit the conversation and the branch/worktree
+     * the follow-up continues, and force session reuse (a follow-up is a
+     * continuation by definition). The review stamps of the source are
+     * deliberately not copied — this card is reviewed on its own.
+     */
+    private withFollowUpLink;
     /**
      * The merge release of one card: replay its feature branch onto the base
      * branch as that stands now and merge it back. The git work is queued on the
@@ -472,6 +508,21 @@ export declare class HostTaskLedger {
     skipMissed(now: number): void;
     setScheduler(patch: Partial<TaskBoardSchedulerSnapshot>): void;
     attachSession(taskId: string, executionId: string, sessionId: string): void;
+    /**
+     * Whether a follow-up owns this card's conversation. The board's stop
+     * controls and the pause path consult this so a stale click on the source
+     * card can never stop the follow-up's session.
+     */
+    isFollowUpSource(taskId: string): boolean;
+    /**
+     * Record that the follow-up framing was written into the source conversation.
+     * Stamped by the Host service only after a launch actually prompted the card,
+     * so a failed launch keeps the framing pending (the next run sends it again).
+     * The reverse is deliberately not stamped: every run that has to start a fresh
+     * conversation re-sends the frame together with the frozen source text, so the
+     * link to the previous task can never be lost silently.
+     */
+    markFollowUpInjected(taskId: string): void;
     /**
      * Re-open a settled card for a conversation that is working again.
      *

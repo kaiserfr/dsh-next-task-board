@@ -10,7 +10,7 @@
  * localStorage backend.
  */
 import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskCompose, type TaskFreeze, type TaskGit, type TaskMerge, type TaskRecord, type TaskPermission, type TaskReview, type TaskStatus } from './tasks.ts'
+import { isTaskPermission, isTaskStatus, normalizeParseText, normalizeTags, normalizeTargetId, type ScheduleRule, type TaskCompose, type TaskFollowUp, type TaskFreeze, type TaskGit, type TaskMerge, type TaskRecord, type TaskPermission, type TaskReview, type TaskStatus } from './tasks.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
@@ -226,6 +226,34 @@ function normalizeMerge(value: unknown): TaskMerge | undefined {
 }
 
 /**
+ * Repair a persisted follow-up link: without the source id and the frozen
+ * source text there is no follow-up to show, so the field drops (mirroring the
+ * git/merge repair policy) and the card reads as an ordinary task instead of
+ * claiming a source it cannot name. The session and the framing stamp are
+ * optional (a source without a conversation still yields a usable follow-up).
+ */
+function normalizeFollowUp(value: unknown): TaskFollowUp | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const row = value as Record<string, unknown>
+  const sourceTaskId = typeof row.sourceTaskId === 'string' ? row.sourceTaskId.trim() : ''
+  if (sourceTaskId === '') return undefined
+  if (typeof row.title !== 'string' || typeof row.description !== 'string' || typeof row.prompt !== 'string') return undefined
+  const createdAt = typeof row.createdAt === 'number' && Number.isFinite(row.createdAt) ? row.createdAt : undefined
+  if (createdAt === undefined) return undefined
+  const sessionId = typeof row.sessionId === 'string' ? row.sessionId.trim() : ''
+  const injectedAt = typeof row.injectedAt === 'number' && Number.isFinite(row.injectedAt) ? row.injectedAt : undefined
+  return {
+    sourceTaskId,
+    ...(sessionId === '' ? {} : { sessionId }),
+    title: row.title,
+    description: row.description,
+    prompt: row.prompt,
+    createdAt,
+    ...(injectedAt === undefined ? {} : { injectedAt }),
+  }
+}
+
+/**
  * Repair a persisted compose state: without a project and a file there is
  * nothing to tear down, so the field drops (mirroring the git repair policy).
  * Ports and the error are sanitized but never required.
@@ -344,6 +372,7 @@ function normalizeReview(value: unknown): TaskReview | undefined {
     task.skipTests = row.skipTests === true ? true : undefined
     task.freeze = normalizeFreeze(row.freeze)
     task.handover = normalizeHandover(row.handover)
+    task.followUp = normalizeFollowUp(row.followUp)
     task.git = normalizeGit(row.git)
     task.compose = normalizeCompose(row.compose)
     task.review = normalizeReview(row.review)

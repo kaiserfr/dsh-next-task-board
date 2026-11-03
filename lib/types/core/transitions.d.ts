@@ -20,9 +20,12 @@ import { type TaskRecord, type TaskStatus } from './tasks.ts';
  * - `paused`    — the open run is paused; it has to be resumed first
  * - `permission`— the transition starts a run whose permission binding is not
  *                 confirmed yet
+ * - `followup`  — the card is the source of a follow-up: its conversation and
+ *                 branch belong to that follow-up, so it neither runs nor
+ *                 releases its branch any more
  * - `invalid`   — the machine has no such manual transition from this column
  */
-export type TransitionBlocker = 'archived' | 'running' | 'paused' | 'permission' | 'invalid';
+export type TransitionBlocker = 'archived' | 'running' | 'paused' | 'permission' | 'followup' | 'invalid';
 /** A queued intent that did not go through (or was dropped later). */
 export type TransitionErrorCode = TransitionBlocker | 'source-changed' | 'rejected';
 /**
@@ -51,8 +54,11 @@ export interface TransitionError {
  * The blocker that currently prevents `to`, or undefined when the transition is
  * ready. `to === task.status` is not a transition: callers handle "already
  * there" as a successful no-op before asking.
+ * @param followUpLocked - the card is the source of a follow-up: starting a run
+ *   or releasing the branch is refused (the follow-up owns both). The caller
+ *   derives this from the board (see `hasFollowUpLock`).
  */
-export declare function transitionBlockerOf(task: TaskRecord, machine: StateMachine, to: TaskStatus, sessionDefaultPermission?: TaskPermission): TransitionBlocker | undefined;
+export declare function transitionBlockerOf(task: TaskRecord, machine: StateMachine, to: TaskStatus, sessionDefaultPermission?: TaskPermission, followUpLocked?: boolean): TransitionBlocker | undefined;
 /** Whether firing this transition starts an execution (clarify or run). */
 export declare function transitionStartsExecution(machine: StateMachine, from: TaskStatus, to: TaskStatus): boolean;
 /** Direction of a card's one-column step on the board. */
@@ -81,5 +87,7 @@ export interface ColumnStepInfo {
  * @param direction - one column left or right in board order.
  * @param sessionDefaultPermission - the session's default permission for the
  *   run-start confirmation gate.
+ * @param followUpLocked - the card is the source of a follow-up (see
+ *   {@link transitionBlockerOf}).
  */
-export declare function columnStepOf(task: TaskRecord, machine: StateMachine, direction: ColumnStep, sessionDefaultPermission?: TaskPermission): ColumnStepInfo;
+export declare function columnStepOf(task: TaskRecord, machine: StateMachine, direction: ColumnStep, sessionDefaultPermission?: TaskPermission, followUpLocked?: boolean): ColumnStepInfo;

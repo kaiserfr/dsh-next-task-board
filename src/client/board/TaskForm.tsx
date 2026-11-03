@@ -22,6 +22,7 @@ const TAG_NAME_LIST_ID = 'dsh-task-board-tag-names'
  */
 export const NEW_TASK_DRAFT_KEY = 'new'
 export const duplicateDraftKey = (sourceTaskId: string): string => `duplicate:${sourceTaskId}`
+export const followUpDraftKey = (sourceTaskId: string): string => `followup:${sourceTaskId}`
 export const editDraftKey = (taskId: string): string => `edit:${taskId}`
 export const tagsDraftKey = (taskId: string): string => `tags:${taskId}`
 
