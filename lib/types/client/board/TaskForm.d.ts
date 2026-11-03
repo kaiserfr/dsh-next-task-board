@@ -17,6 +17,7 @@ import { type TaskBoardKey } from '../locales.ts';
  */
 export declare const NEW_TASK_DRAFT_KEY = "new";
 export declare const duplicateDraftKey: (sourceTaskId: string) => string;
+export declare const followUpDraftKey: (sourceTaskId: string) => string;
 export declare const editDraftKey: (taskId: string) => string;
 export declare const tagsDraftKey: (taskId: string) => string;
 /**

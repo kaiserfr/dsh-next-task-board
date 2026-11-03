@@ -551,14 +551,47 @@ function implementPrompt(): string {
  *   phase of the `testing` column.
  */
 export function promptText(task: TaskRecord, options: PromptTextOptions = {}): string {
-  if (options.clarification === true) return clarificationPrompt(task)
-  if (options.test === true) return testPrompt(task, options)
-  const environment = environmentNote(task)
-  const base = environment === undefined
-    ? implementationTurn(task, options)
-    : `${implementationTurn(task, options)}\n\n${environment}`
-  if (options.merge === true) return `${base}\n\n${COMPLETION_INSTRUCTION}`
-  return `${base}\n\n${IMPLEMENTATION_PHASE_INSTRUCTION}\n\n${COMPLETION_INSTRUCTION}`
+  const turn = options.clarification === true
+    ? clarificationPrompt(task)
+    : options.test === true
+      ? testPrompt(task, options)
+      : (() => {
+          const environment = environmentNote(task)
+          const base = environment === undefined
+            ? implementationTurn(task, options)
+            : `${implementationTurn(task, options)}\n\n${environment}`
+          if (options.merge === true) return `${base}\n\n${COMPLETION_INSTRUCTION}`
+          return `${base}\n\n${IMPLEMENTATION_PHASE_INSTRUCTION}\n\n${COMPLETION_INSTRUCTION}`
+        })()
+  const followUp = followUpPreamble(task, options)
+  return followUp === undefined ? turn : `${followUp}\n\n${turn}`
+}
+
+/**
+ * The follow-up frame of a card started from another card, or undefined for an
+ * ordinary card and for a run that already continues the framed conversation.
+ *
+ * The frame is owed while it was never written (`followUp.injectedAt` absent),
+ * and again whenever this turn has to open a fresh conversation
+ * (`options.continued` absent): the source conversation — and with it the whole
+ * previous task — is then not in context, so the frozen source text rides
+ * along. A fresh fallback is announced explicitly instead of silently starting
+ * over.
+ */
+function followUpPreamble(task: TaskRecord, options: PromptTextOptions): string | undefined {
+  const followUp = task.followUp
+  if (followUp === undefined) return undefined
+  const fresh = options.continued !== true
+  if (!fresh && followUp.injectedAt !== undefined) return undefined
+  const frame = `FOLLOW-UP: Dies ist ein Follow-up zum vorherigen Task „${followUp.title}". Alles, was in diesem Chat davor passiert ist, war der vorherige Task; dieser ist abgeschlossen. Diese Karte ist ein neuer, eigener Task im selben Thema und baut auf dem vorherigen Ergebnis auf.`
+  if (!fresh) return frame
+  const context = [
+    'Hinweis: Die vorherige Session ist nicht mehr verfügbar (gelöscht oder beschäftigt); der Kontext des vorherigen Tasks ist deshalb hier zusammengefasst:',
+    `Titel: ${followUp.title}`,
+    ...(followUp.description.trim() === '' ? [] : [`Beschreibung:\n${followUp.description}`]),
+    ...(followUp.prompt.trim() === '' ? [] : [`Prompt:\n${followUp.prompt}`]),
+  ]
+  return `${frame}\n\n${context.join('\n')}`
 }
 
 /**

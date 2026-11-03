@@ -1084,6 +1084,12 @@ export class TaskBoardHostService {
   hardStop(taskId: string): void {
     const task = this.ledger.task(taskId)
     if (task === undefined) return
+    // Same ownership rule as the ordinary stop: the follow-up card is the one
+    // that may stop this conversation.
+    if (this.ledger.isFollowUpSource(taskId)) {
+      this.ledger.note(taskId, 'Diese Karte ist die Quelle eines Follow-ups; ihre Session gehört dem Follow-up.')
+      return
+    }
     const open = task.executions.filter(execution => execution.endedAt === undefined)
     const sessionId = latestSessionId(task)
     void (async () => {
@@ -1310,16 +1316,35 @@ export class TaskBoardHostService {
       if (rework && reuseSessionId === undefined) {
         console.warn(`[dsh-task-board] rework for task ${opened.task.id} starts a fresh session: the corrected conversation is gone or busy, so its remarks are not in context`)
       }
+      // A follow-up's first run must land in the source conversation: no other
+      // source can name it (the card has no execution history yet), and a
+      // clarification run would otherwise only know the card's own clarification
+      // chat. The generic reuse rule already yields it for implementation runs;
+      // the clarification run below gets it from here.
+      const followUpReuseId = opened.task.followUp !== undefined && opened.task.followUp.injectedAt === undefined
+        ? reusableSessionId(opened.task, this.idleSessionIds)
+        : undefined
+      const clarificationSessionId = opened.task.clarificationSessionId
+      // The conversation this launch actually continues (undefined = fresh).
+      const clarifyReuseId = followUpReuseId ?? clarificationSessionId
+      const continuedSessionId = clarification ? clarifyReuseId : reuseSessionId
+      // The follow-up frame is due while it was never written, and again whenever
+      // this launch has to start a fresh conversation: the frozen source text
+      // then rides along, so the previous task is never lost.
+      const followUpFrame = launched.followUp !== undefined
+        && (launched.followUp.injectedAt === undefined || continuedSessionId === undefined)
+      if (followUpFrame && continuedSessionId === undefined) {
+        console.warn(`[dsh-task-board] follow-up for task ${opened.task.id} starts a fresh session: the previous conversation is gone or busy, so the frozen source text is sent as context`)
+      }
       // Continuing the card's clarification conversation means the agent already
       // holds the card's instruction, its questions and their answers:
       // the run only has to be told to implement now. Any other session (a
       // fresh one, or a previous run's conversation) still needs the full prompt.
       const implement = !clarification && !mergeRun && !testRun && reuseSessionId !== undefined && reuseSessionId === opened.task.clarificationSessionId
-      const clarificationSessionId = opened.task.clarificationSessionId
       const sessionId = await this.runner.launch(launched, clarification
         ? {
             clarification: true,
-            ...(clarificationSessionId === undefined ? {} : { reuseSessionId: clarificationSessionId }),
+            ...(clarifyReuseId === undefined ? {} : { reuseSessionId: clarifyReuseId }),
           }
         : {
             ...(reuseSessionId === undefined ? {} : { reuseSessionId }),
@@ -1355,6 +1380,10 @@ export class TaskBoardHostService {
         return
       }
       this.ledger.attachSession(opened.task.id, opened.execution.id, sessionId)
+      // The prompt went out: the follow-up framing is now part of the
+      // conversation (or of the fresh session that replaced it). Stamped only
+      // after a successful launch, so a failed attempt keeps it pending.
+      if (followUpFrame) this.ledger.markFollowUpInjected(opened.task.id)
     } catch (error) {
       // A session created before the prompt failed is still the card's
       // conversation (for a clarification: the chat the human answers in);
@@ -1426,6 +1455,9 @@ export class TaskBoardHostService {
   private stopOrphanSession(taskId: string): void {
     const task = this.ledger.task(taskId)
     if (task === undefined) return
+    // A source card has no conversation of its own any more; its session is the
+    // follow-up's and must survive a stale pause of the source.
+    if (this.ledger.isFollowUpSource(taskId)) return
     if (task.executions.some(execution => execution.endedAt === undefined)) return
     const sessionId = latestSessionId(task)
     if (sessionId === undefined) return
@@ -1905,6 +1937,12 @@ export class TaskBoardHostService {
   private stopRunningSession(taskId: string): void {
     const task = this.ledger.task(taskId)
     if (task === undefined) return
+    // The source card's conversation belongs to its follow-up: stopping it from
+    // a stale control on the source would kill the follow-up's run.
+    if (this.ledger.isFollowUpSource(taskId)) {
+      this.ledger.note(taskId, 'Diese Karte ist die Quelle eines Follow-ups; ihre Session gehört dem Follow-up.')
+      return
+    }
     const sessionId = latestSessionId(task)
     if (sessionId === undefined) return
     void this.runner.stopSession(sessionId, { preserveUserMessages: true }).then(report => {

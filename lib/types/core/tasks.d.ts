@@ -198,6 +198,47 @@ export interface TaskMerge {
 /** How many automatic conflict-resolution runs one release may start. */
 export declare const MERGE_RESOLVE_ATTEMPTS = 1;
 /**
+ * One follow-up card's link back to the card it continues. The source's title,
+ * description and prompt are frozen at creation time, so the previous task
+ * stays readable on the new card even after the source is edited, archived or
+ * deleted; the source conversation id is what the first run continues, and
+ * `injectedAt` records that the follow-up framing has been written into it.
+ */
+export interface TaskFollowUp {
+    /** Id of the card this follow-up was started from. */
+    sourceTaskId: string;
+    /**
+     * The source card's conversation at creation time (its newest settled
+     * execution's session, else its clarification conversation). Absent when the
+     * source never had one: the first run then starts a fresh conversation and
+     * carries the frozen source text as context.
+     */
+    sessionId?: string;
+    /** Source title at creation time (frozen; also names the task in the prompt frame). */
+    title: string;
+    /** Source description at creation time. */
+    description: string;
+    /** Source prompt at creation time. */
+    prompt: string;
+    /** When the follow-up was created (ms epoch). */
+    createdAt: number;
+    /**
+     * When the follow-up framing was first written into the source conversation
+     * (ms epoch). Absent until the first launch prompted it. A run that has to
+     * start a fresh conversation (the source session was lost or busy) re-sends
+     * the frame together with the frozen source text, so the connection to the
+     * previous task is never silently dropped.
+     */
+    injectedAt?: number;
+}
+/**
+ * Columns a follow-up may be started from: the card has been worked on and its
+ * result can be inspected, so a new task can build on it. `done` and `tested`
+ * name a finished/awaited result; `failed` is the off-ramp whose solution the
+ * human wants to correct in a new task instead.
+ */
+export declare const FOLLOW_UP_SOURCE_STATUSES: readonly TaskStatus[];
+/**
  * Docker Compose environment of a card: the task-scoped project the board
  * brought up in the card's worktree, its published ports, and the last failure
  * so the reason stays visible on the card. Absent on cards whose worktree holds
@@ -428,6 +469,14 @@ export interface TaskRecord {
      */
     handover?: TaskHandover;
     /**
+     * Follow-up link of a card that was started from another card (see
+     * {@link TaskFollowUp}): the frozen source text, the source conversation the
+     * first run continues, and the framing stamp. Absent on ordinary cards. The
+     * reverse direction (which follow-ups a source has) is derived by scanning
+     * the board for this field, so it cannot drift out of sync.
+     */
+    followUp?: TaskFollowUp;
+    /**
      * Task labels (issue #1521): optional, additive, and absent on every task
      * created before the field existed. A tag whose `promptPrefix` is set is
      * prepended to the execution prompt; a bare name is display and filter only.
@@ -550,6 +599,13 @@ export interface NewTaskInput {
      * sanitized by the protocol gate) attached at creation.
      */
     handover?: TaskHandoverInput;
+    /**
+     * Source card of a follow-up: the Host resolves it against its own ledger
+     * (status, open run, existing follow-up) and freezes the source's text and
+     * conversation into {@link TaskRecord.followUp}. The browser only names the
+     * id; it never supplies the snapshot, the session or the inherited branch.
+     */
+    followUpOf?: string;
     /**
      * Optional task labels. A tag with a non-blank `promptPrefix` is injected
      * ahead of the execution prompt; a bare name changes nothing at run time.
@@ -734,6 +790,39 @@ export declare function openExecution(task: TaskRecord): ExecutionRecord | undef
  * the run column without waiting for it to come to rest.
  */
 export declare function hasOpenRun(task: TaskRecord): boolean;
+/**
+ * All follow-up cards started from `task`, archived ones included: the source
+ * card's back-reference and its lock are both derived from this list, so they
+ * can never disagree with the follow-up cards themselves.
+ */
+export declare function followUpsOf(task: TaskRecord, allTasks: readonly TaskRecord[]): TaskRecord[];
+/**
+ * Whether the card is the source of a follow-up and therefore locked: it owns
+ * no run of its own any more, because its conversation and branch now belong to
+ * the follow-up. The lock applies while any follow-up card exists (an archived
+ * follow-up still names the branch); deleting the follow-up releases it.
+ */
+export declare function hasFollowUpLock(task: TaskRecord, allTasks: readonly TaskRecord[]): boolean;
+/**
+ * Whether a new follow-up may be started from this card right now:
+ *
+ * - the card must be a settled source column ({@link FOLLOW_UP_SOURCE_STATUSES})
+ *   and not archived,
+ * - it must have no open run: the source conversation has to be free, or the
+ *   follow-up would have to fall back to a fresh session,
+ * - no unfinished follow-up may already own it (one at a time; a follow-up that
+ *   reached `done`, or was archived, frees the source again).
+ *
+ * A source without a session is allowed: the first run then starts a fresh
+ * conversation and carries the frozen source text, which the prompt does.
+ */
+export declare function canStartFollowUp(task: TaskRecord, allTasks: readonly TaskRecord[]): boolean;
+/**
+ * The most recent conversation a card ever ran in, open or settled: the source
+ * conversation a follow-up inherits, and the same answer the Host's orphan
+ * guard reads (newest execution with a session, else the clarification chat).
+ */
+export declare function latestSessionIdOf(task: TaskRecord): string | undefined;
 /**
  * Pause or resume the card's open run: stamp {@link TaskRecord.pausedAt} or
  * clear it. The status column is deliberately not touched — a paused card stays

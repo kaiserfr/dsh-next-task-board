@@ -9,7 +9,7 @@ import { parseFreezeRequest } from '../../core/freeze-snapshot.ts'
 import { collectKnownTags, TASK_PERMISSIONS, type TaskPermission, type TaskRecord, type TaskTag } from '../../core/tasks.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import { SCHEDULE_PRESETS } from '../schedule-presets.ts'
-import { ModalShell, TaskContentFields, TaskTagFields, AiParseSection, useAiParse, cleanTags, DraftNotice, NEW_TASK_DRAFT_KEY, duplicateDraftKey, useFormDraftSeat, useStoredFormDraft } from './TaskForm.tsx'
+import { ModalShell, TaskContentFields, TaskTagFields, AiParseSection, useAiParse, cleanTags, DraftNotice, NEW_TASK_DRAFT_KEY, duplicateDraftKey, followUpDraftKey, useFormDraftSeat, useStoredFormDraft } from './TaskForm.tsx'
 import css from '../board.module.css'
 
 export interface NewTaskModalProps {
@@ -18,12 +18,24 @@ export interface NewTaskModalProps {
   /** Optional task template to clone/duplicate from. */
   initialTask?: TaskRecord
   /**
+   * Source card of a follow-up: the form is prefilled from it like a duplicate,
+   * but the new card stays linked to the source (and the source card stays in
+   * place) and continues its conversation on the first run. The Host resolves
+   * the source again from its own ledger; this is only the id it names.
+   */
+  followUpSource?: TaskRecord
+  /**
    * Workspace the board's project filter has selected (#1536): a task created
    * while a project is open belongs to that project unless the user changes it.
    */
   defaultWorkspaceId?: string
   /** Optional callback after successful duplication (e.g. to archive source). */
   onDuplicateSuccess?: (sourceTaskId: string) => Promise<void>
+}
+
+/** "Follow-up: …" title, without stacking the prefix on a chained follow-up. */
+function followUpTitle(title: string): string {
+  return /^follow-up\b/i.test(title.trim()) ? title : `Follow-up: ${title}`
 }
 
 /**
@@ -51,31 +63,43 @@ interface NewTaskForm {
 }
 
 /** New-task form overlay. */
-export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspaceId, onDuplicateSuccess }: NewTaskModalProps) {
+export function NewTaskModal({ controller, onClose, initialTask, followUpSource, defaultWorkspaceId, onDuplicateSuccess }: NewTaskModalProps) {
+  const isFollowUp = followUpSource !== undefined
   const isDuplicate = initialTask !== undefined
-  // A duplicate popup keeps its own draft per source card: what was typed while
-  // duplicating card A must not appear when duplicating card B.
-  const draftKey = isDuplicate ? duplicateDraftKey(initialTask.id) : NEW_TASK_DRAFT_KEY
+  // The card the form is prefilled from: a duplicate's source or the
+  // follow-up's source. Both open on the same text and execution targets; only
+  // the consequence differs (a duplicate may archive the source, a follow-up
+  // keeps it and links the new card to it).
+  const template = followUpSource ?? initialTask
+  // A duplicate/follow-up popup keeps its own draft per source card: what was
+  // typed while duplicating card A must not appear when duplicating card B.
+  const draftKey = followUpSource !== undefined
+    ? followUpDraftKey(followUpSource.id)
+    : initialTask !== undefined
+      ? duplicateDraftKey(initialTask.id)
+      : NEW_TASK_DRAFT_KEY
   const { stored, restored, discard: forgetDraft } = useStoredFormDraft<NewTaskForm>(controller, draftKey)
   // The untouched form: what "discard draft" falls back to, and the yardstick
-  // that keeps a form nobody worked in from becoming a draft.
+  // that keeps a form nobody worked in from becoming a draft. A follow-up
+  // inherits the source's text and execution targets (like a duplicate) but not
+  // its schedule: a follow-up must not silently become a recurring copy.
   const [pristine] = useState<NewTaskForm>(() => ({
-    title: initialTask?.title ?? '',
-    description: initialTask?.description ?? '',
-    prompt: initialTask?.prompt ?? '',
-    workspaceId: initialTask?.workspaceId ?? defaultWorkspaceId ?? '',
-    mode: initialTask?.mode ?? '',
-    permission: initialTask?.permission ?? '',
-    model: initialTask?.model ?? '',
-    reuseSession: initialTask?.reuseSession ?? false,
-    skipTests: initialTask?.skipTests === true,
-    scheduleEnabled: initialTask?.schedule?.enabled ?? false,
-    scheduleCron: initialTask?.schedule?.cron ?? '',
+    title: followUpSource !== undefined ? followUpTitle(followUpSource.title) : template?.title ?? '',
+    description: template?.description ?? '',
+    prompt: template?.prompt ?? '',
+    workspaceId: template?.workspaceId ?? defaultWorkspaceId ?? '',
+    mode: template?.mode ?? '',
+    permission: template?.permission ?? '',
+    model: template?.model ?? '',
+    reuseSession: isFollowUp ? false : template?.reuseSession ?? false,
+    skipTests: template?.skipTests === true,
+    scheduleEnabled: isFollowUp ? false : template?.schedule?.enabled ?? false,
+    scheduleCron: isFollowUp ? '' : template?.schedule?.cron ?? '',
     freezeText: '',
-    handoverText: initialTask?.handover?.references !== undefined ? initialTask.handover.references.join('\n') : '',
-    tags: initialTask?.tags ?? [],
+    handoverText: template?.handover?.references !== undefined ? template.handover.references.join('\n') : '',
+    tags: template?.tags ?? [],
     archiveOriginal: true,
-    parseText: initialTask?.parseText ?? '',
+    parseText: template?.parseText ?? '',
   }))
   const [title, setTitle] = useState(stored?.title ?? pristine.title)
   const [description, setDescription] = useState(stored?.description ?? pristine.description)
@@ -225,6 +249,9 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
       ...(skipTests ? { skipTests: true } : {}),
       ...(tagList.length > 0 ? { tags: tagList } : {}),
       schedule: scheduleEnabled ? { enabled: true, cron: scheduleCron.trim() } : undefined,
+      // Only the id: the Host resolves the source's text, conversation and
+      // branch from its own ledger (a stale dialog cannot forge them).
+      ...(followUpSource === undefined ? {} : { followUpOf: followUpSource.id }),
     }
     // The form became a card: its draft is spent and the popup closes right away.
     // The Host confirms in the background; a rejection puts the draft back so no
@@ -257,7 +284,7 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
     ? nextRunAtMs(scheduleCron, Date.now())
     : undefined
 
-  const modalTitle = isDuplicate ? t('new.duplicateTitle') : t('board.new')
+  const modalTitle = isFollowUp ? t('new.followUpTitle') : isDuplicate ? t('new.duplicateTitle') : t('board.new')
 
   return (
     <ModalShell
@@ -270,6 +297,14 @@ export function NewTaskModal({ controller, onClose, initialTask, defaultWorkspac
       onClose={onClose}
     >
       {restored && <DraftNotice onDiscard={discardDraft} />}
+
+      {followUpSource !== undefined && (
+        // Say what the new card is and what stays: the source keeps its column
+        // and the new card continues its conversation on the first run.
+        <p className={css.detailMeta} data-dsh-part="new-follow-up">
+          {t('new.followUpHint', { title: followUpSource.title })}
+        </p>
+      )}
 
       {canParse && <AiParseSection parse={parse} />}
 

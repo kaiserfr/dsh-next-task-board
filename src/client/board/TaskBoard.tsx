@@ -6,7 +6,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
-import { collectKnownTags, compareWipOrder, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason } from '../../core/tasks.ts'
+import { collectKnownTags, compareWipOrder, hasFollowUpLock, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason } from '../../core/tasks.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
 import { columnStepOf, transitionBlockerOf, type QueuedTransition, type StepBlocker, type TransitionBlocker, type TransitionError } from '../../core/transitions.ts'
 import { t } from '../locales.ts'
@@ -171,7 +171,7 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** The Host is merging this card in the background. */
@@ -181,6 +181,10 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   timeZone?: string
   selected: boolean
   dragging: boolean
+  /** The card is the source of at least one follow-up card. */
+  hasFollowUpSource?: boolean
+  /** Titles of this card's follow-ups, for the source badge's tooltip. */
+  followUpSourceHint?: string
   /** Why the card waits for its lane's WIP slot; undefined when it holds or needs none. */
   waitingReason?: WaitingReason
   /** The reason as ready-to-show text (stable per blocker, so memo stays effective). */
@@ -225,6 +229,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       waitingReason={waitingReason}
       waitingTooltip={waitingTooltip}
       awaitingAnswerSessionId={awaitingAnswerSessionId}
+      hasFollowUpSource={hasFollowUpSource}
+      followUpSourceHint={followUpSourceHint}
       leftTarget={leftTarget}
       leftBlocker={leftBlocker}
       rightTarget={rightTarget}
@@ -378,6 +384,21 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     () => snapshot.host?.awaitingAnswer ?? {},
     [snapshot.host?.awaitingAnswer],
   )
+  // Source card id → titles of the follow-ups started from it. Derived from the
+  // board's own task list (the ledger stores no reverse field), so the card
+  // badge and the detail's back-reference always agree with the follow-up
+  // cards themselves.
+  const followUpTitlesBySource = useMemo(() => {
+    const hints = new Map<string, string[]>()
+    for (const task of snapshot.tasks) {
+      const sourceId = task.followUp?.sourceTaskId
+      if (sourceId === undefined) continue
+      const titles = hints.get(sourceId) ?? []
+      titles.push(task.title)
+      hints.set(sourceId, titles)
+    }
+    return hints
+  }, [snapshot.tasks])
   // The notice clears itself: the card is visible in the column meanwhile, so
   // the message only has to explain the drop.
   useEffect(() => {
@@ -562,7 +583,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
         blocked.push({ task, blocker: 'invalid' })
         continue
       }
-      const blocker = transitionBlockerOf(task, machine, columnStatus, snapshot.host?.sessionDefaultPermission)
+      const blocker = transitionBlockerOf(task, machine, columnStatus, snapshot.host?.sessionDefaultPermission, hasFollowUpLock(task, snapshot.tasks))
       if (blocker !== undefined) blocked.push({ task, blocker })
       else queueable.push(task)
     }
@@ -887,6 +908,10 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                   selected={false}
                   dragging={false}
                   awaitingAnswerSessionId={awaitingAnswerById[task.id]}
+                  hasFollowUpSource={followUpTitlesBySource.has(task.id)}
+                  followUpSourceHint={followUpTitlesBySource.get(task.id) === undefined
+                    ? undefined
+                    : t('card.followUpSourceHint', { titles: (followUpTitlesBySource.get(task.id) ?? []).join(', ') })}
                   onSelect={selectCard}
                   onKeySelect={selectCardByKey}
                   onOpen={openDetail}
@@ -931,10 +956,12 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                     // One-column steps are strictly the adjacent configured
                     // column, judged with the same blockers as the detail's
                     // transition buttons (archived/running/paused/permission/
-                    // missing transition), so a disabled arrow and a refused
-                    // drop always tell the same story.
-                    const left = columnStepOf(task, machine, 'left', snapshot.host?.sessionDefaultPermission)
-                    const right = columnStepOf(task, machine, 'right', snapshot.host?.sessionDefaultPermission)
+                    // follow-up lock/missing transition), so a disabled arrow and
+                    // a refused drop always tell the same story.
+                    const followUpLocked = hasFollowUpLock(task, snapshot.tasks)
+                    const left = columnStepOf(task, machine, 'left', snapshot.host?.sessionDefaultPermission, followUpLocked)
+                    const right = columnStepOf(task, machine, 'right', snapshot.host?.sessionDefaultPermission, followUpLocked)
+                    const followUpTitles = followUpTitlesBySource.get(task.id)
                     // A run the Host holds back because the machine is
                     // overloaded says so; the WIP wait keeps its own text.
                     const pressure = pressureWaitingIds.has(task.id)
@@ -952,6 +979,10 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                         waitingReason={pressure ? PRESSURE_WAITING : waitingReasonById.get(task.id)}
                         waitingTooltip={pressure ? pressureWaitingText : waitingTooltipById.get(task.id)}
                         awaitingAnswerSessionId={awaitingAnswerById[task.id]}
+                        hasFollowUpSource={followUpTitles !== undefined}
+                        followUpSourceHint={followUpTitles === undefined
+                          ? undefined
+                          : t('card.followUpSourceHint', { titles: followUpTitles.join(', ') })}
                         leftTarget={left.target}
                         leftBlocker={left.blocker}
                         rightTarget={right.target}

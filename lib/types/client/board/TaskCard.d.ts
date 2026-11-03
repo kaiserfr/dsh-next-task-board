@@ -45,7 +45,7 @@ export declare function isCardDraggable(task: TaskRecord): boolean;
  * must end first (`running`). Only the drag onto Done may bypass the run.
  */
 export declare function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean;
-declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
+declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
     task: TaskRecord;
     pending: boolean;
     /** A merge release of this card runs in the Host's background. */
@@ -57,6 +57,10 @@ declare function TaskCardInner({ task, pending, releasePending, pendingTransitio
     timeZone?: string;
     selected: boolean;
     dragging: boolean;
+    /** The card is the source of at least one follow-up card. */
+    hasFollowUpSource?: boolean;
+    /** Titles of this card's follow-ups, for the source badge's tooltip. */
+    followUpSourceHint?: string;
     /**
      * Why the card waits for its lane's WIP slot (undefined when it waits for
      * nothing). The reason itself is not rendered; the tooltip carries the text.

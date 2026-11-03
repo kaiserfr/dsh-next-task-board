@@ -17,7 +17,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
-import { openExecution, type TaskRecord } from '../../core/tasks.ts'
+import { hasFollowUpLock, openExecution, type TaskRecord } from '../../core/tasks.ts'
 import { mergeStateOf, type MergeState } from '../../core/merge.ts'
 import { t, type TaskBoardKey } from '../locales.ts'
 import css from '../board.module.css'
@@ -97,6 +97,9 @@ export function ReviewSection({ controller, task, timeZone }: {
   // `testing` has not passed the test phase yet (the test run may even be
   // running), so releasing it would merge untested work.
   const releasable = task.status === 'tested'
+  // A source card's branch belongs to its follow-up: once one exists, the Host
+  // refuses the release, so the control says why instead of failing later.
+  const followUpLocked = hasFollowUpLock(task, snapshot.tasks)
   // The manual test start is the retry path of the `testing` column. The Host
   // refuses it while a run is open; the control says so through its disabled
   // state instead of pretending a second run could start.
@@ -149,8 +152,8 @@ export function ReviewSection({ controller, task, timeZone }: {
             type="button"
             data-action="start-tests"
             className={css.primaryButton}
-            disabled={busy || testRunOpen}
-            title={t('review.startTestsHint')}
+            disabled={busy || testRunOpen || followUpLocked}
+            title={followUpLocked ? t('detail.followUpLockHint') : t('review.startTestsHint')}
             onClick={() => { void controller.startTest(task.id) }}
           >
             {t('review.startTests')}
@@ -163,13 +166,18 @@ export function ReviewSection({ controller, task, timeZone }: {
             type="button"
             data-action="release"
             className={css.primaryButton}
-            disabled={busy || merge === 'resolving'}
-            title={t('review.releaseHint')}
+            disabled={busy || merge === 'resolving' || followUpLocked}
+            title={followUpLocked ? t('review.releaseFollowUpLocked') : t('review.releaseHint')}
             onClick={() => { setConfirmRelease(true) }}
           >
             {t('review.release')}
           </button>
         </div>
+      )}
+      {releasable && followUpLocked && (
+        <p className={css.formError} data-dsh-part="review-release-follow-up-lock">
+          {t('review.releaseFollowUpLocked')}
+        </p>
       )}
 
       {!inReview ? null : plan?.dir === undefined ? (
