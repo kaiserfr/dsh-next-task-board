@@ -425,6 +425,113 @@ describe('TaskBoardHostService clarification runs', () => {
     expect(card.executions.filter(execution => execution.endedAt === undefined)).toHaveLength(1)
     service.dispose()
   })
+
+  /**
+   * The reported duplicate sessions. The go-ahead is pulled while the last
+   * roster read still shows the clarification conversation as running (the round
+   * ended a moment ago and no poll has seen it at rest yet). The run continues
+   * that conversation and sends only the go-ahead; it must never mint a second
+   * conversation for the same card — that is the pair of sessions the human saw
+   * on the card, and the full card prompt paid twice.
+   */
+  it('continues the clarification conversation although the roster still shows it running', async () => {
+    const now = new Date(2026, 7, 16, 10, 3, 0).getTime()
+    const ledger = new HostTaskLedger(root(), () => now)
+    ledger.applyRequest('create-card', {
+      kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' },
+    })
+
+    const prompts: Array<{ sessionId: string; text: string }> = []
+    let created = 0
+    const { gateway } = makeGateway(request => {
+      if (request.namespace !== 'session') throw new Error('unexpected namespace')
+      if (request.method === 'list') return { items: [{ sessionId: 'session-clarify', running: true }] }
+      if (request.method === 'create') { created += 1; return { sessionId: 'session-clarify' } }
+      if (request.method === 'rename') return { title: 'Card', seq: 1 }
+      if (request.method === 'prompt') {
+        const args = request.args as unknown as { request: { sessionId: string; content: Array<{ text: string }> } }
+        prompts.push({ sessionId: args.request.sessionId, text: args.request.content[0].text })
+        return { accepted: true }
+      }
+      throw new Error('unexpected gateway call: ' + request.method)
+    })
+    const service = new TaskBoardHostService(gateway, {
+      ledger,
+      power: new PowerInhibitor({ platform: 'linux' }),
+      now: () => now,
+    })
+    await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
+
+    await service.apply('card-to-todo', { kind: 'move', taskId: 'card', status: 'clarification' })
+    await flush()
+    expect(created).toBe(1)
+    expect(prompts[0]?.sessionId).toBe('session-clarify')
+
+    // The roster still claims the round's session is running: the go-ahead
+    // lands in that conversation anyway (the runtime queues it after the turn).
+    await service.apply('card-to-running', { kind: 'move', taskId: 'card', status: 'running' })
+    await flush()
+    expect(created).toBe(1)
+    expect(prompts[1]?.sessionId).toBe('session-clarify')
+    expect(prompts[1]?.text.startsWith('Bitte jetzt implementieren.')).toBe(true)
+    const card = ledger.state().tasks.find(task => task.id === 'card')!
+    expect(card.status).toBe('running')
+    expect(new Set(card.executions.map(execution => execution.sessionId))).toEqual(new Set(['session-clarify']))
+    service.dispose()
+  })
+
+  /**
+   * The automatic test run opens inside the settle of the implementation run —
+   * before any poll could have seen that conversation at rest. It continues it
+   * with the short test turn; reading a roster to decide that is exactly what
+   * produced the second session (16 of 17 test runs in the live ledger).
+   */
+  it('continues the implementation conversation in the automatic test run without a roster', async () => {
+    const now = new Date(2026, 7, 16, 10, 4, 0).getTime()
+    const ledger = new HostTaskLedger(root(), () => now)
+    ledger.applyRequest('create-card', {
+      kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'implement it' },
+    })
+    const run = ledger.applyRequest('run-card', { kind: 'run', taskId: 'card' }).run!
+    ledger.attachSession('card', run.execution.id, 'session-impl')
+    // The park opens the WIP-free test run of the `testing` column.
+    ledger.settle('card', run.execution.id, 'succeeded')
+    const parked = ledger.state().tasks.find(task => task.id === 'card')!
+    expect(parked.status).toBe('testing')
+
+    const prompts: Array<{ sessionId: string; text: string }> = []
+    const create = vi.fn(async () => ({ sessionId: 'session-fresh' }))
+    const { gateway } = makeGateway(request => {
+      if (request.namespace !== 'session') throw new Error('unexpected namespace')
+      // The launch must not need a roster read at all.
+      if (request.method === 'list') throw new Error('launch must not read the session roster')
+      if (request.method === 'create') return create()
+      if (request.method === 'rename') return { title: 'Card', seq: 1 }
+      if (request.method === 'prompt') {
+        const args = request.args as unknown as { request: { sessionId: string; content: Array<{ text: string }> } }
+        prompts.push({ sessionId: args.request.sessionId, text: args.request.content[0].text })
+        return { accepted: true }
+      }
+      throw new Error('unexpected gateway call: ' + request.method)
+    })
+    const service = new TaskBoardHostService(gateway, {
+      ledger,
+      power: new PowerInhibitor({ platform: 'linux' }),
+      now: () => now,
+    })
+    // The service took the settled run's test execution off the ledger queue.
+    ;(service as unknown as { pumpLaunchQueue(): void }).pumpLaunchQueue()
+    await flush()
+
+    expect(create).not.toHaveBeenCalled()
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]?.sessionId).toBe('session-impl')
+    expect(prompts[0]?.text.startsWith('Bitte jetzt testen.')).toBe(true)
+    const testRun = ledger.state().tasks.find(task => task.id === 'card')!.executions.at(-1)!
+    expect(testRun.kind).toBe('test')
+    expect(testRun.sessionId).toBe('session-impl')
+    service.dispose()
+  })
 })
 
 describe('TaskBoardHostService rework continuation', () => {
@@ -469,9 +576,8 @@ describe('TaskBoardHostService rework continuation', () => {
       power: new PowerInhibitor({ platform: 'linux' }),
       now: () => clock,
     })
-    // The roster has to be known before the launch: an unknown roster never
-    // reuses, and the round would then open a fresh conversation.
-    await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
+    // No roster read is needed: the corrected conversation comes from the
+    // ledger, so the round continues it even though no poll has run.
     clock += 1_000
     const opened = ledger.applyRequest('run-second', { kind: 'run', taskId: 'card' }).run
     await (service as unknown as { launch(run: unknown): Promise<void> }).launch(opened)

@@ -181,10 +181,10 @@ describe('the clarification step starts the card own run', () => {
 describe('the clarification session is the run conversation', () => {
   it('continues the clarification session instead of minting a new one', () => {
     const task = { ...card(), clarificationSessionId: 'session-clarify' }
-    expect(reusableSessionId(task, new Set(['session-clarify']))).toBe('session-clarify')
-    // Fail closed while the roster is unknown: a fresh conversation is safe.
-    expect(reusableSessionId(task, undefined)).toBeUndefined()
-    expect(reusableSessionId(task, new Set(['other']))).toBeUndefined()
+    // The ledger is the authority: no roster has to have seen the conversation
+    // at rest, so a go-ahead pulled right after the round settled continues it.
+    expect(reusableSessionId(task)).toBe('session-clarify')
+    expect(reusableSessionId({ ...card() })).toBeUndefined()
   })
 
   it('prefers the newest settled execution of a rework round', () => {
@@ -193,8 +193,8 @@ describe('the clarification session is the run conversation', () => {
       clarificationSessionId: 'session-clarify',
       executions: [{ id: 'run-1', sessionId: 'session-run', startedAt: NOW, endedAt: NOW + 1, result: 'succeeded', error: undefined }],
     }
-    expect(reusableSessionId(task, new Set(['session-clarify', 'session-run']), { rework: true })).toBe('session-run')
-    expect(reusableSessionId(task, new Set(['session-clarify', 'session-run']))).toBe('session-clarify')
+    expect(reusableSessionId(task, { rework: true })).toBe('session-run')
+    expect(reusableSessionId(task)).toBe('session-clarify')
   })
 
   it('composes the clarification turn from the run prompt plus the addendum', () => {

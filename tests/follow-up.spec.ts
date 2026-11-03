@@ -129,14 +129,14 @@ describe('follow-up session reuse', () => {
   })
 
   it('continues the source conversation on the first run', () => {
-    expect(reusableSessionId(followUp, new Set(['session-src']))).toBe('session-src')
-    expect(reusableSessionId(followUp, new Set(['other-session']))).toBeUndefined()
-    expect(reusableSessionId(followUp, undefined)).toBeUndefined()
+    // No roster snapshot stands between the follow-up and its source chat: the
+    // framing has not been written yet, so this run is the one that lands there.
+    expect(reusableSessionId(followUp)).toBe('session-src')
   })
 
   it('stops offering the source conversation once the framing was written', () => {
     const injected: TaskRecord = { ...followUp, followUp: { ...followUp.followUp!, injectedAt: NOW } }
-    expect(reusableSessionId(injected, new Set(['session-src']))).toBeUndefined()
+    expect(reusableSessionId(injected)).toBeUndefined()
   })
 })
 

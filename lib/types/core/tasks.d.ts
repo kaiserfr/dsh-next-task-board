@@ -429,9 +429,9 @@ export interface TaskRecord {
     /**
      * Whether later executions continue in the previous execution's session
      * (issue #1419) instead of minting a fresh conversation per run. Absent or
-     * false keeps the historical one-session-per-execution behavior; the reuse
-     * itself only happens when that session is idle and still present (see
-     * {@link reusableSessionId}).
+     * false keeps the historical one-session-per-execution behavior; a follow-up,
+     * a rework round, the test run and the card's clarification session continue
+     * their conversation without this opt-in (see {@link reusableSessionId}).
      */
     reuseSession?: boolean;
     /**
