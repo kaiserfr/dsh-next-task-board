@@ -388,3 +388,20 @@ describe('parseLedger pause stamp', () => {
     expect(parsed[0].pausedAt).toBeUndefined()
   })
 })
+
+describe('parseLedger stop marker', () => {
+  it('keeps an explicit stop marker and clears a torn or malformed pair', () => {
+    const card = createTask({ title: 's', description: '', prompt: '' }, 1, 't-s')
+    const stopped = { ...card, status: 'clarification' as const, stoppedAt: 5, stoppedSessionId: 'session-a' }
+    const kept = parseLedger(JSON.stringify([stopped]))[0]
+    expect(kept.stoppedAt).toBe(5)
+    expect(kept.stoppedSessionId).toBe('session-a')
+    // A malformed stamp clears the marker instead of dropping the card row.
+    const malformed = parseLedger(JSON.stringify([{ ...stopped, stoppedAt: 'soon' }]))[0]
+    expect(malformed.stoppedAt).toBeUndefined()
+    expect(malformed.stoppedSessionId).toBeUndefined()
+    // The session id without its stamp is a torn pair and clears with it.
+    const torn = parseLedger(JSON.stringify([{ ...stopped, stoppedAt: undefined }]))[0]
+    expect(torn.stoppedSessionId).toBeUndefined()
+  })
+})

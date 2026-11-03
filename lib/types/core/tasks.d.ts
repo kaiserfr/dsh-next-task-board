@@ -543,6 +543,22 @@ export interface TaskRecord {
      * either direction.
      */
     pausedAt?: number;
+    /**
+     * When the human stopped the card's conversation from the card (ms epoch).
+     * The stop settles the open run immediately — a killed session cannot send
+     * the `turn/end` the normal monitor waits for, so the settlement cannot be
+     * deferred to `inspect()`. The stamp, together with
+     * {@link TaskRecord.stoppedSessionId}, keeps the adoption pass from turning
+     * the very conversation that was stopped back into a running card; the next
+     * run of the card (or a deliberate resume) clears it.
+     */
+    stoppedAt?: number;
+    /**
+     * The conversation the human stopped from the card. Only this session is
+     * refused by the adoption pass; a stop of a run that had no session yet keeps
+     * the field absent, and a new run/resume clears the pair.
+     */
+    stoppedSessionId?: string;
 }
 /**
  * Default maximum number of on-board tasks the `done` column may hold. A move
@@ -830,6 +846,21 @@ export declare function latestSessionIdOf(task: TaskRecord): string | undefined;
  * keeps the original stamp (idempotent); resuming a running card is a no-op.
  */
 export declare function withPause(task: TaskRecord, paused: boolean, now: number): TaskRecord;
+/**
+ * Stamp an explicit stop of the card's conversation. The run is settled
+ * cancelled at the same time, but the marker stays behind: without it the 5 s
+ * adoption pass would see the stopped session writing again (its last turn
+ * ending, a job notice) and turn the card straight back into `running` — the
+ * exact state the stop removed. `sessionId` is absent when the card had no
+ * conversation yet (a queued run); there is nothing for adoption to refuse.
+ */
+export declare function withStopMarker(task: TaskRecord, sessionId: string | undefined, now: number): TaskRecord;
+/**
+ * Clear an explicit stop marker: the card starts a new run or deliberately
+ * continues the stopped conversation, so the adoption pass may look at that
+ * session again.
+ */
+export declare function withoutStopMarker(task: TaskRecord): TaskRecord;
 /**
  * Whether a task is being executed right now: its latest run is still open,
  * has already attached its dsh session, and the card is not paused. A card that

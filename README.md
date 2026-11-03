@@ -460,6 +460,18 @@ happening; both directions are reconciled, not just the happy path:
 - **Card → session.** A paused, archived or done card's running conversation is
   stopped; a human turn written into a settled review/failed card is a rework,
   which moves the card instead.
+- **Explicit stop → never running.** Stopping a conversation from the card
+  (`stop-session`, or the destructive `hard-stop`) settles its open run as
+  cancelled **before** the session stop is attempted: a killed session can no
+  longer send the turn end the normal monitor waits for, and a runtime may keep
+  reporting it as running, yet the card must leave the run column. An
+  implementation run parks in Clarification, a test run stays in Testing and a
+  clarification run in Clarification; the conflict-resolution exception stays
+  paused in In progress. The written stop marker (`stoppedAt` /
+  `stoppedSessionId`) keeps the adoption pass from re-opening the card on the
+  very session that was stopped, and the orphan watchdog retries the stop even
+  in its 5 s pass. The marker is cleared by the card's next run or a deliberate
+  resume.
 - **Finished → running.** A card that was parked while its conversation keeps
   working is the reverse mismatch. When the session wrote an event *after* the
   settle (`updatedAt > settledAt`), the 2 s quiet window has passed, no release

@@ -393,6 +393,12 @@ function normalizeReview(value: unknown): TaskReview | undefined {
     // The pause stamp is repaired like the other runtime stamps: a malformed
     // persisted value clears the pause instead of dropping the card row.
     task.pausedAt = typeof row.pausedAt === 'number' && Number.isFinite(row.pausedAt) ? row.pausedAt : undefined
+    // The explicit-stop marker is repaired the same way; its session id without
+    // the stamp is a torn pair and clears with it.
+    task.stoppedAt = typeof row.stoppedAt === 'number' && Number.isFinite(row.stoppedAt) ? row.stoppedAt : undefined
+    task.stoppedSessionId = task.stoppedAt === undefined
+      ? undefined
+      : (typeof row.stoppedSessionId === 'string' && row.stoppedSessionId !== '' ? row.stoppedSessionId : undefined)
     // The rework stamp is repaired like the other runtime stamps; a count
     // without a stamp is a torn pair and clears with it.
     task.reworkAt = typeof row.reworkAt === 'number' && Number.isFinite(row.reworkAt) ? row.reworkAt : undefined
