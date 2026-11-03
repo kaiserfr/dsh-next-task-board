@@ -615,8 +615,13 @@ export declare class TaskBoardHostService {
      *   marker says the wake-up is unwanted, and the watchdog stops it;
      * - the session must have written an event **after** the settle (a mere status
      *   flip is not evidence of work), and the quiet window must have passed;
-     * - a human turn since the settle is a rework, not a resume: the rework watch
-     *   moves that card, and this pass leaves it alone;
+     * - outside `clarification`, a human turn since the settle is a rework, not a
+     *   resume: the rework watch moves that card, and this pass leaves it alone.
+     *   The clarification column is the exception — its conversation is the card's
+     *   question round, so a human answer or "continue" is exactly the work that
+     *   column exists for. It is re-opened as a **clarification** run (never as
+     *   the settled run's kind) so the card shows Running but stays in its column
+     *   when the run settles;
      * - an unreadable history is no evidence and is retried, never guessed.
      *
      * The roster `updatedAt` memo makes an unchanged conversation cost no history

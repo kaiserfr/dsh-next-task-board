@@ -2017,8 +2017,13 @@ export class TaskBoardHostService {
    *   marker says the wake-up is unwanted, and the watchdog stops it;
    * - the session must have written an event **after** the settle (a mere status
    *   flip is not evidence of work), and the quiet window must have passed;
-   * - a human turn since the settle is a rework, not a resume: the rework watch
-   *   moves that card, and this pass leaves it alone;
+   * - outside `clarification`, a human turn since the settle is a rework, not a
+   *   resume: the rework watch moves that card, and this pass leaves it alone.
+   *   The clarification column is the exception — its conversation is the card's
+   *   question round, so a human answer or "continue" is exactly the work that
+   *   column exists for. It is re-opened as a **clarification** run (never as
+   *   the settled run's kind) so the card shows Running but stays in its column
+   *   when the run settles;
    * - an unreadable history is no evidence and is retried, never guessed.
    *
    * The roster `updatedAt` memo makes an unchanged conversation cost no history
@@ -2050,20 +2055,30 @@ export class TaskBoardHostService {
       if (this.sessionAdoptScans.get(row.sessionId) === scannedAt) continue
       // The live event feed is exact even when a long agent answer pushed the
       // human turn out of the short history head.
-      const liveHuman = this.lastUserMessages.get(row.sessionId)
-      if (liveHuman !== undefined && liveHuman >= row.settledAt) {
-        this.sessionAdoptScans.set(row.sessionId, scannedAt)
-        continue
+      const clarification = row.status === 'clarification'
+      if (!clarification) {
+        const liveHuman = this.lastUserMessages.get(row.sessionId)
+        if (liveHuman !== undefined && liveHuman >= row.settledAt) {
+          this.sessionAdoptScans.set(row.sessionId, scannedAt)
+          continue
+        }
       }
       if (this.now() - row.settledAt < SESSION_ADOPT_QUIET_MS) continue
-      const human = await this.runner.newestHumanTurn(row.sessionId, row.settledAt)
-      if (!human.known) continue
-      if (human.at !== undefined) {
-        // The human wrote after the park: that card belongs to the rework path.
-        this.sessionAdoptScans.set(row.sessionId, scannedAt)
-        continue
+      if (!clarification) {
+        const human = await this.runner.newestHumanTurn(row.sessionId, row.settledAt)
+        if (!human.known) continue
+        if (human.at !== undefined) {
+          // The human wrote after the park: that card belongs to the rework path.
+          this.sessionAdoptScans.set(row.sessionId, scannedAt)
+          continue
+        }
       }
-      if (this.ledger.adoptRunningSession(row.taskId, row.sessionId, row.kind)) {
+      // A clarification card is always re-opened as a clarification run: the
+      // human continued its question round in the chat, so the card has to stay
+      // in that column and settle there again — the settled run's kind could
+      // park it somewhere else.
+      const kind = clarification ? 'clarify' : row.kind
+      if (this.ledger.adoptRunningSession(row.taskId, row.sessionId, kind)) {
         this.sessionAdoptScans.set(row.sessionId, scannedAt)
         this.ledger.note(row.taskId, 'Die Session arbeitet nach dem Parken weiter; die Karte wurde wieder als laufend übernommen.')
       }
