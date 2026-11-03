@@ -342,6 +342,11 @@ route and system-prompt section).
   answers there, and the agent ends its turn. There is deliberately **no question
   field** on the card — the list would be the human's, and what has to be settled
   is what the agent does not know yet.
+- **The chat stays a live round**: when the human answers or types `continue`
+  after the round settled, the 5 s sync adopts the resumed conversation as a
+  clarification run — same session, no new prompt, no board action. The card
+  reads *Running* again and settles back into Clarification when the agent stops,
+  so a longer Q&A never looks like a card whose session is still busy.
 - **The stop holds past the first turn.** The board's system-prompt section
   carries a clarification-session stop rule that keys off the first line of that
   block and is re-sent with *every* turn: in a clarification session the agent
@@ -459,7 +464,9 @@ happening; both directions are reconciled, not just the happy path:
   safety-net poll, so neither can inspect or settle the same run concurrently.
 - **Card → session.** A paused, archived or done card's running conversation is
   stopped; a human turn written into a settled review/failed card is a rework,
-  which moves the card instead.
+  which moves the card instead. A human answer or `continue` typed into a settled
+  Clarification chat is the normal work of that column and re-opens its
+  clarification run (see below).
 - **Explicit stop → never running.** Stopping a conversation from the card
   (`stop-session`, or the destructive `hard-stop`) settles its open run as
   cancelled **before** the session stop is attempted: a killed session can no
@@ -475,13 +482,17 @@ happening; both directions are reconciled, not just the happy path:
 - **Finished → running.** A card that was parked while its conversation keeps
   working is the reverse mismatch. When the session wrote an event *after* the
   settle (`updatedAt > settledAt`), the 2 s quiet window has passed, no release
-  is in flight and the human has not written since the settle, the Host re-opens
-  a run on the **same conversation** (`adoptRunningSession`): no new session, no
-  prompt, no new lane slot. A clarification stays in its column; an
-  implementation run moves back to In progress. The ordinary inspection settles
-  that run when the session comes to rest again. A human turn instead of a
-  wake-up is left to the rework path, and an unreadable history is retried
-  rather than guessed.
+  is in flight and — outside Clarification — the human has not written since the
+  settle, the Host re-opens a run on the **same conversation**
+  (`adoptRunningSession`): no new session, no prompt, no new lane slot. A
+  clarification stays in its column; an implementation run moves back to In
+  progress. The ordinary inspection settles that run when the session comes to
+  rest again. A human turn instead of a wake-up is left to the rework path —
+  **except in Clarification**: its conversation is the card's question round, so
+  an answer or `continue` after the round settled re-opens a *clarification* run
+  (never the settled run's kind), the card reads Running while the agent answers
+  and settles back into Clarification. An unreadable history is retried rather
+  than guessed.
 - **No false syncs.** The settle itself is idempotent, pauses are re-checked at
   write time, adoption refuses a card that already owns an open run, and the
   roster `updatedAt` memo keeps an unchanged conversation from costing a history

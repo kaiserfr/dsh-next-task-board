@@ -1103,6 +1103,16 @@ describe('TaskBoardHostService session/card synchronization', () => {
     return ledger
   }
 
+  /** A card whose clarification round settled, with `session-card` as its chat. */
+  function clarified(settledAt: number): HostTaskLedger {
+    const ledger = new HostTaskLedger(root(), () => settledAt)
+    ledger.applyRequest('create', { kind: 'create', id: 'card', input: { title: 'Card', description: '', prompt: 'work' } })
+    const round = ledger.applyRequest('clarify', { kind: 'move', taskId: 'card', status: 'clarification' }).clarification
+    ledger.attachSession('card', round!.execution.id, 'session-card')
+    ledger.settle('card', round!.execution.id, 'succeeded', undefined)
+    return ledger
+  }
+
   /** A service with one roster row and a `session/follow` history. */
   function service(
     ledger: HostTaskLedger,
@@ -1204,6 +1214,66 @@ describe('TaskBoardHostService session/card synchronization', () => {
     const card = ledger.state().tasks[0]!
     expect(card.status).toBe('tested')
     expect(card.executions).toHaveLength(2)
+    instance.dispose()
+  })
+
+  it('re-opens a settled clarification card when the human continues its chat', async () => {
+    const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
+    const settledAt = now - 10_000
+    const ledger = clarified(settledAt)
+    const instance = service(
+      ledger,
+      now,
+      () => ({ sessionId: 'session-card', running: true, updatedAt: now - 5_000 }),
+      empty,
+    )
+    // The human typed "continue" into the card's clarification conversation.
+    instance.handleSessionEvent('session-card', { type: 'user/message', time: now - 4_000, data: {} })
+
+    await sync(instance)
+
+    const card = ledger.state().tasks[0]!
+    // The card stays in its column, but it is running again on the same
+    // conversation — a clarification run, never the settled run's kind.
+    expect(card.status).toBe('clarification')
+    expect(card.executions).toHaveLength(2)
+    expect(card.executions[1]?.kind).toBe('clarify')
+    expect(card.executions[1]?.sessionId).toBe('session-card')
+    expect(card.executions[1]?.endedAt).toBeUndefined()
+    expect(card.clarificationSessionId).toBe('session-card')
+    instance.dispose()
+  })
+
+  it('settles the adopted clarification run without moving the card', async () => {
+    const now = new Date(2026, 7, 16, 10, 1, 0).getTime()
+    const settledAt = now - 10_000
+    const ledger = clarified(settledAt)
+    let running = true
+    const instance = service(
+      ledger,
+      now,
+      () => ({ sessionId: 'session-card', running, updatedAt: running ? now - 5_000 : now - 1_000 }),
+      () => ({
+        async *[Symbol.asyncIterator]() {
+          yield snapshot([sessionEvent('turn/end', 10, now - 4_000, { reason: { kind: 'completed' } })], 10, false)
+        },
+      }),
+    )
+    instance.handleSessionEvent('session-card', { type: 'user/message', time: now - 6_000, data: {} })
+    await sync(instance)
+    expect(ledger.state().tasks[0]!.executions.at(-1)?.endedAt).toBeUndefined()
+
+    // The human's continue turn ended: the adopted run settles as a
+    // clarification, so the card stays in its column.
+    running = false
+    await sync(instance)
+
+    const card = ledger.state().tasks[0]!
+    expect(card.status).toBe('clarification')
+    const settled = card.executions.at(-1)!
+    expect(settled.kind).toBe('clarify')
+    expect(settled.result).toBe('succeeded')
+    expect(settled.endedAt).toBeDefined()
     instance.dispose()
   })
 
