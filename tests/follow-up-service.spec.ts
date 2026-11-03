@@ -40,9 +40,16 @@ function sourceTask(): TaskRecord {
 }
 
 describe('follow-up launch', () => {
+  /**
+   * The genuinely fresh case: the source card has no conversation of its own, so
+   * there is nothing to continue. The frozen source text rides along as context
+   * and the framing is stamped after the launch.
+   */
   it('framed the first run in a fresh conversation and stamps it', async () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
-    ledger.applyRequest('seed', { kind: 'import', sourceId: 'seed', tasks: [sourceTask()] })
+    const source = sourceTask()
+    source.executions = source.executions.map(execution => ({ ...execution, sessionId: undefined }))
+    ledger.applyRequest('seed', { kind: 'import', sourceId: 'seed', tasks: [source] })
     ledger.applyRequest('create-fu', {
       kind: 'create',
       id: 'fu',
@@ -98,7 +105,7 @@ describe('follow-up launch', () => {
     }
   })
 
-  it('continues the source conversation when it is idle and does not repeat its text', async () => {
+  it('continues the source conversation and does not repeat its text', async () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
     ledger.applyRequest('seed', { kind: 'import', sourceId: 'seed', tasks: [sourceTask()] })
     ledger.applyRequest('create-fu', {
@@ -134,9 +141,8 @@ describe('follow-up launch', () => {
       now: () => NOW,
     })
     try {
-      // Teach the service the roster first: the source conversation must be
-      // known to be present and idle for the reuse rule to pick it.
-      await (service as unknown as { pollSessions(): Promise<void> }).pollSessions()
+      // No roster read before the launch: the ledger names the source
+      // conversation, so the first run continues it even though no poll has run.
       service.acceptAction('to-clarify', { kind: 'move', taskId: 'fu', status: 'clarification' })
       const deadline = Date.now() + 2000
       while (prompts.length === 0 && Date.now() < deadline) {

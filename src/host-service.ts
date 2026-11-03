@@ -150,20 +150,6 @@ export class TaskBoardHostService {
   private sessionSyncInFlight = false
   private tickInFlight = false
   private active = true
-  /**
-   * Ids the last roster poll saw as present and idle; undefined while the
-   * roster is unknown. Session reuse (issue #1419) requires this positive
-   * evidence, so a launch before the first successful poll mints a fresh
-   * conversation instead of prompting into a session it cannot see.
-   *
-   * Deliberately *not* an input to the WIP accounting: the roster only knows
-   * whether a turn is running right now, which is not the same as "the run is
-   * over". An implementation run whose agent ended its turn (mid-task question,
-   * partial answer) is idle in the roster while its worktree, branch and card
-   * are still owned by it — letting the lane's next card start there is exactly
-   * the parallel work the WIP limit exists to prevent.
-   */
-  private idleSessionIds: ReadonlySet<string> | undefined
   private preventIdleSleep = false
   /** Runs waiting for a free WIP slot, in arrival order. */
   private launchQueue: OpenedRun[] = []
@@ -1327,11 +1313,10 @@ export class TaskBoardHostService {
       const rework = opened.execution.rework === true
       const reuseSessionId = reusableSessionId(
         opened.task,
-        this.idleSessionIds,
         rework ? { rework: true } : testRun ? { test: true } : {},
       )
       if (rework && reuseSessionId === undefined) {
-        console.warn(`[dsh-task-board] rework for task ${opened.task.id} starts a fresh session: the corrected conversation is gone or busy, so its remarks are not in context`)
+        console.warn(`[dsh-task-board] rework for task ${opened.task.id} starts a fresh session: the card has no settled conversation on record, so its correction remarks are not in context`)
       }
       // A follow-up's first run must land in the source conversation: no other
       // source can name it (the card has no execution history yet), and a
@@ -1339,7 +1324,7 @@ export class TaskBoardHostService {
       // chat. The generic reuse rule already yields it for implementation runs;
       // the clarification run below gets it from here.
       const followUpReuseId = opened.task.followUp !== undefined && opened.task.followUp.injectedAt === undefined
-        ? reusableSessionId(opened.task, this.idleSessionIds)
+        ? reusableSessionId(opened.task)
         : undefined
       const clarificationSessionId = opened.task.clarificationSessionId
       // The conversation this launch actually continues (undefined = fresh).
@@ -1351,7 +1336,7 @@ export class TaskBoardHostService {
       const followUpFrame = launched.followUp !== undefined
         && (launched.followUp.injectedAt === undefined || continuedSessionId === undefined)
       if (followUpFrame && continuedSessionId === undefined) {
-        console.warn(`[dsh-task-board] follow-up for task ${opened.task.id} starts a fresh session: the previous conversation is gone or busy, so the frozen source text is sent as context`)
+        console.warn(`[dsh-task-board] follow-up for task ${opened.task.id} starts a fresh session: the source card has no conversation on record, so the frozen source text is sent as context`)
       }
       // Continuing the card's clarification conversation means the agent already
       // holds the card's instruction, its questions and their answers:
@@ -1682,7 +1667,6 @@ export class TaskBoardHostService {
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
     if (!running.known) {
-      this.idleSessionIds = undefined
       this.power.updateReasons({
         runningSessions: previous.runningSessions,
         armedSchedules: this.ledger.armedScheduleCount(),
@@ -1690,7 +1674,6 @@ export class TaskBoardHostService {
       })
       return
     }
-    this.idleSessionIds = new Set(running.items.filter(item => !item.running).map(item => item.sessionId))
     const runtime = this.ledger.runtimeView()
     this.power.updateReasons({
       runningSessions: running.count,
@@ -1729,7 +1712,6 @@ export class TaskBoardHostService {
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
     if (!running.known) {
-      this.idleSessionIds = undefined
       this.power.updateReasons({
         runningSessions: previous.runningSessions,
         armedSchedules: this.ledger.armedScheduleCount(),
@@ -1737,7 +1719,6 @@ export class TaskBoardHostService {
       })
       return
     }
-    this.idleSessionIds = new Set(running.items.filter(item => !item.running).map(item => item.sessionId))
     // Read after the RPC so executions attached while it was in flight are
     // included in this pass, matching the former full-state snapshot timing.
     const runtime = this.ledger.runtimeView()

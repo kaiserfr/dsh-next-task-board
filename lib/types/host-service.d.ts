@@ -31,20 +31,6 @@ export declare class TaskBoardHostService {
     private sessionSyncInFlight;
     private tickInFlight;
     private active;
-    /**
-     * Ids the last roster poll saw as present and idle; undefined while the
-     * roster is unknown. Session reuse (issue #1419) requires this positive
-     * evidence, so a launch before the first successful poll mints a fresh
-     * conversation instead of prompting into a session it cannot see.
-     *
-     * Deliberately *not* an input to the WIP accounting: the roster only knows
-     * whether a turn is running right now, which is not the same as "the run is
-     * over". An implementation run whose agent ended its turn (mid-task question,
-     * partial answer) is idle in the roster while its worktree, branch and card
-     * are still owned by it — letting the lane's next card start there is exactly
-     * the parallel work the WIP limit exists to prevent.
-     */
-    private idleSessionIds;
     private preventIdleSleep;
     /** Runs waiting for a free WIP slot, in arrival order. */
     private launchQueue;
