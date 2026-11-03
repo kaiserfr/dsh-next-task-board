@@ -2,9 +2,11 @@
  * Waiting questions: a card whose conversation holds a question the agent asked
  * and stopped on. The Host reads that state off the conversation (a blocking
  * `ask_user_question` call nothing answered, or an agent that ended its turn
- * with its own message while the session rests), publishes card → session to the
- * board, and drops the entry again the moment the human answers — the question
- * lives in the chat, the board only points at it.
+ * with a message that actually asks something while the session rests),
+ * publishes card → session to the board, and drops the entry again the moment
+ * the human answers — the question lives in the chat, the board only points at
+ * it. A session that merely finished (a summary, a test verdict, the `FERTIG:`
+ * report) is not waiting and must not carry the symbol.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -93,31 +95,61 @@ function makeRunner(records: readonly unknown[], options: { projections?: unknow
 
 describe('questionState folds the newest surface event', () => {
   it('reports an unanswered ask_user_question call as open', () => {
-    expect(questionState([userMessage(1), askCall(2)] as never)).toEqual({ openQuestion: true, yielded: false })
+    expect(questionState([userMessage(1), askCall(2)] as never)).toEqual({ openQuestion: true, asksQuestion: false })
   })
 
   it('drops the question once a tool result answers the call', () => {
-    expect(questionState([askCall(2), toolResult(3)] as never)).toEqual({ openQuestion: false, yielded: false })
+    expect(questionState([askCall(2), toolResult(3)] as never)).toEqual({ openQuestion: false, asksQuestion: false })
     // Any result newer than the call means the agent went on working.
-    expect(questionState([askCall(2, 'call-1'), toolResult(3, 'call-2')] as never)).toEqual({ openQuestion: false, yielded: false })
+    expect(questionState([askCall(2, 'call-1'), toolResult(3, 'call-2')] as never)).toEqual({ openQuestion: false, asksQuestion: false })
   })
 
   it('ignores tool calls that are not questions', () => {
     expect(questionState([event('tool/call', 2, { callId: 'c', name: 'bash', arguments: '{}' })] as never))
-      .toEqual({ openQuestion: false, yielded: false })
+      .toEqual({ openQuestion: false, asksQuestion: false })
   })
 
-  it('reads the agent speaking last as a yielded turn', () => {
-    expect(questionState([userMessage(1), assistantMessage(2)] as never)).toEqual({ openQuestion: false, yielded: true })
+  it('reads a closing agent message that asks something as a question', () => {
+    expect(questionState([userMessage(1), assistantMessage(2)] as never)).toEqual({ openQuestion: false, asksQuestion: true })
     // The turn end after the message frames it and must not change the verdict.
     expect(questionState([assistantMessage(2), event('turn/end', 3, { reason: { kind: 'completed' } })] as never))
-      .toEqual({ openQuestion: false, yielded: true })
+      .toEqual({ openQuestion: false, asksQuestion: true })
+  })
+
+  it('does not read a finished run as a question', () => {
+    // The shapes a completed run leaves behind: a summary, a test verdict, the
+    // board's own completion report. Speaking last is not asking.
+    for (const text of [
+      'Alles geklärt — hier die Zusammenfassung.',
+      'FERTIG: Tests grün',
+      'Die Implementierung steht und ist verifiziert.',
+    ]) {
+      expect(questionState([userMessage(1), assistantMessage(2, text)] as never))
+        .toEqual({ openQuestion: false, asksQuestion: false })
+    }
+  })
+
+  it('ignores question marks the model only writes in its reasoning', () => {
+    // Reasoning runs full of self-directed questions; only the message text is
+    // addressed to the human.
+    const reasoningOnly = event('assistant/message', 2, {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'Soll ich wirklich weitermachen?' },
+          { type: 'text', text: 'Die Implementierung steht.' },
+        ],
+      },
+    })
+    expect(questionState([reasoningOnly] as never)).toEqual({ openQuestion: false, asksQuestion: false })
   })
 
   it('does not count a human turn or a dangling tool result as a question', () => {
-    expect(questionState([assistantMessage(1), userMessage(2)] as never)).toEqual({ openQuestion: false, yielded: false })
-    expect(questionState([assistantMessage(1), toolResult(2, 'other')] as never)).toEqual({ openQuestion: false, yielded: false })
-    expect(questionState([] as never)).toEqual({ openQuestion: false, yielded: false })
+    expect(questionState([assistantMessage(1), userMessage(2)] as never)).toEqual({ openQuestion: false, asksQuestion: false })
+    expect(questionState([assistantMessage(1), toolResult(2, 'other')] as never)).toEqual({ openQuestion: false, asksQuestion: false })
+    expect(questionState([] as never)).toEqual({ openQuestion: false, asksQuestion: false })
   })
 })
 
@@ -132,6 +164,15 @@ describe('HostExecutionRunner.awaitingAnswer', () => {
     const { runner, invokes } = makeRunner([userMessage(1), assistantMessage(2)])
     await expect(runner.awaitingAnswer('session-a', false)).resolves.toBe(true)
     expect(invokes).toEqual([])
+  })
+
+  it('does not report a finished run whose last message asks nothing', async () => {
+    // The reported false positive: a settled-looking turn with a summary or the
+    // completion report kept the symbol on the card.
+    for (const text of ['Alles geklärt — hier die Zusammenfassung.', 'FERTIG: Tests grün']) {
+      const { runner } = makeRunner([userMessage(1), assistantMessage(2, text)])
+      await expect(runner.awaitingAnswer('session-a', false)).resolves.toBe(false)
+    }
   })
 
   it('does not call a running agent that merely spoke last a wait', async () => {
@@ -290,6 +331,20 @@ describe('TaskBoardHostService publishes waiting questions', () => {
     await view.poll()
     expect(view.service.snapshot().awaitingAnswer).toEqual({})
     expect(frames.at(-1)).toEqual({})
+    view.service.dispose()
+  })
+
+  it('does not publish a finished clarification round that asks nothing', async () => {
+    // The card stays in `clarification` after its round settles, so it remains a
+    // watch candidate; only the message content decides whether the human owes
+    // an answer. A closing summary must leave the symbol off.
+    const view = makeService(clarifyingCard(), {
+      records: [userMessage(1), assistantMessage(2, 'Alles geklärt — die Implementierung kann starten.')],
+      updatedAt: 5,
+      running: false,
+    })
+    await view.poll()
+    expect(view.service.snapshot().awaitingAnswer).toEqual({})
     view.service.dispose()
   })
 
