@@ -31,8 +31,12 @@ interface SessionGateway {
 export interface QuestionState {
     /** The newest thing that happened is an `ask_user_question` call nothing answered yet. */
     readonly openQuestion: boolean;
-    /** The agent spoke last: the turn ended with a message of its own. */
-    readonly yielded: boolean;
+    /**
+     * The agent ended the turn with a message that actually asks the human
+     * something. Speaking last is not enough on its own: a run closing with a
+     * summary or a `FERTIG:` report has finished, not asked.
+     */
+    readonly asksQuestion: boolean;
 }
 /**
  * Fold one history window into {@link QuestionState}: which of the two ways the
@@ -41,11 +45,13 @@ export interface QuestionState {
  * `openQuestion` is the blocking `ask_user_question` call (the schema the
  * shipped presets compose): the tool call is the newest surface event and no
  * `tool/result` answers it, while the turn — and the roster's `running` flag —
- * stays open. `yielded` is the other shape: the agent ended the turn with its
- * own message, which is how the board's clarification round stops after every
- * question round. A call the human already answered is no question any more,
- * and a tool result the agent left unanswered is a stalled run, not a question
- * to the human.
+ * stays open. `asksQuestion` is the other shape: the agent ended the turn with
+ * its own message, which is how the board's clarification round stops after
+ * every question round. That message must actually ask something (a question
+ * mark in its text); a closing summary, a test verdict or a `FERTIG:` report is
+ * the agent finishing, not waiting for an answer. A call the human already
+ * answered is no question any more, and a tool result the agent left unanswered
+ * is a stalled run, not a question to the human.
  * @param records - the conversation's newest history records, in any order.
  * @returns the folded state; both flags false when nothing speaks for a question.
  */
@@ -460,9 +466,11 @@ export declare class HostExecutionRunner {
      * Two shapes count, because the agent can ask in two ways: a blocking
      * `ask_user_question` call no result has answered yet (the turn stays open, so
      * the roster still reports the session as running), and the agent ending its
-     * turn with a message of its own — the shape the board's clarification round
-     * produces by stopping after every question round, which needs the session to
-     * be at rest to mean "the human is next".
+     * turn with a message that actually asks the human something — the shape the
+     * board's clarification round produces by stopping after every question
+     * round, which needs the session to be at rest to mean "the human is next".
+     * An agent message without a question is a finished run (a summary, a test
+     * verdict, the `FERTIG:` report), not a wait.
      *
      * The durable `userQuestions` projection answers for the timed
      * `ask_user_question` schema, whose foreground wait may end with a pending

@@ -121,12 +121,34 @@ function toolCallName(data: unknown): string | undefined {
   return typeof name === 'string' ? name : undefined
 }
 
+/**
+ * Read the text an `assistant/message` event carries. Only the message's text
+ * blocks count: the model's reasoning deliberately does not, because it
+ * routinely questions itself while working (`Should I check …?`) without
+ * asking the human anything.
+ */
+function assistantText(data: unknown): string {
+  const content = (data as { message?: { content?: unknown } } | null | undefined)?.message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  let text = ''
+  for (const part of content) {
+    const block = part as { type?: unknown; text?: unknown } | null | undefined
+    if (block?.type === 'text' && typeof block.text === 'string') text += `${block.text}\n`
+  }
+  return text
+}
+
 /** What the newest events of one conversation say about an open question. */
 export interface QuestionState {
   /** The newest thing that happened is an `ask_user_question` call nothing answered yet. */
   readonly openQuestion: boolean
-  /** The agent spoke last: the turn ended with a message of its own. */
-  readonly yielded: boolean
+  /**
+   * The agent ended the turn with a message that actually asks the human
+   * something. Speaking last is not enough on its own: a run closing with a
+   * summary or a `FERTIG:` report has finished, not asked.
+   */
+  readonly asksQuestion: boolean
 }
 
 /**
@@ -136,11 +158,13 @@ export interface QuestionState {
  * `openQuestion` is the blocking `ask_user_question` call (the schema the
  * shipped presets compose): the tool call is the newest surface event and no
  * `tool/result` answers it, while the turn — and the roster's `running` flag —
- * stays open. `yielded` is the other shape: the agent ended the turn with its
- * own message, which is how the board's clarification round stops after every
- * question round. A call the human already answered is no question any more,
- * and a tool result the agent left unanswered is a stalled run, not a question
- * to the human.
+ * stays open. `asksQuestion` is the other shape: the agent ended the turn with
+ * its own message, which is how the board's clarification round stops after
+ * every question round. That message must actually ask something (a question
+ * mark in its text); a closing summary, a test verdict or a `FERTIG:` report is
+ * the agent finishing, not waiting for an answer. A call the human already
+ * answered is no question any more, and a tool result the agent left unanswered
+ * is a stalled run, not a question to the human.
  * @param records - the conversation's newest history records, in any order.
  * @returns the folded state; both flags false when nothing speaks for a question.
  */
@@ -151,13 +175,15 @@ export function questionState(records: readonly SessionHistoryRecord[]): Questio
     if (!QUESTION_SURFACE_EVENTS.has(event.type)) continue
     if (newest === undefined || event.seq > newest.seq) newest = { seq: event.seq, type: event.type, data: event.data }
   }
-  if (newest === undefined) return { openQuestion: false, yielded: false }
+  if (newest === undefined) return { openQuestion: false, asksQuestion: false }
   // A tool result answers its call, and a later call is a newer question; the
   // newest call is therefore open exactly when nothing has answered it yet.
-  if (newest.type === 'tool/call') return { openQuestion: toolCallName(newest.data) === ASK_USER_QUESTION_TOOL, yielded: false }
+  if (newest.type === 'tool/call') return { openQuestion: toolCallName(newest.data) === ASK_USER_QUESTION_TOOL, asksQuestion: false }
   // The remaining surface events are the two message kinds and a tool result;
-  // only an assistant message hands the turn back to the human.
-  return { openQuestion: false, yielded: newest.type === 'assistant/message' }
+  // only an assistant message hands the turn back to the human, and only when
+  // that message actually asks something.
+  const asksQuestion = newest.type === 'assistant/message' && assistantText(newest.data).includes('?')
+  return { openQuestion: false, asksQuestion }
 }
 
 /** One session-list row consumed by task-board reconciliation. */
@@ -1272,9 +1298,11 @@ export class HostExecutionRunner {
    * Two shapes count, because the agent can ask in two ways: a blocking
    * `ask_user_question` call no result has answered yet (the turn stays open, so
    * the roster still reports the session as running), and the agent ending its
-   * turn with a message of its own — the shape the board's clarification round
-   * produces by stopping after every question round, which needs the session to
-   * be at rest to mean "the human is next".
+   * turn with a message that actually asks the human something — the shape the
+   * board's clarification round produces by stopping after every question
+   * round, which needs the session to be at rest to mean "the human is next".
+   * An agent message without a question is a finished run (a summary, a test
+   * verdict, the `FERTIG:` report), not a wait.
    *
    * The durable `userQuestions` projection answers for the timed
    * `ask_user_question` schema, whose foreground wait may end with a pending
@@ -1302,7 +1330,7 @@ export class HostExecutionRunner {
     }
     const state = questionState(records)
     if (state.openQuestion) return true
-    if (state.yielded && !running) return true
+    if (state.asksQuestion && !running) return true
     return await this.pendingTimedQuestion(sessionId)
   }
 
