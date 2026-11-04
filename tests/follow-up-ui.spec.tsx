@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 /**
- * Follow-up UI: the detail's follow-up button opens the prefilled new-task
- * dialog (linked to the source), the source card shows what it continues, the
- * source of a follow-up renders the reverse reference and has its run/release
- * buttons disabled, and the board card carries the small badge.
+ * Follow-up UI: the detail's follow-up button opens an empty new-task dialog
+ * (linked to the source), the source card shows what it continues, the source
+ * of a follow-up renders the reverse reference and has its run/release buttons
+ * disabled, and the board card carries the small badge.
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
@@ -90,6 +90,21 @@ function render(element: React.ReactElement): HTMLElement {
   return container
 }
 
+function field(container: HTMLElement, placeholder: string): HTMLInputElement | HTMLTextAreaElement {
+  const element = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[placeholder="${placeholder}"]`)
+  if (element === null) throw new Error(`no field with placeholder ${placeholder}`)
+  return element
+}
+
+function typeInto(element: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+  const setter = Object.getOwnPropertyDescriptor(prototype, 'value')!.set!
+  act(() => {
+    setter.call(element, value)
+    element.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
 describe('follow-up detail and modal', () => {
   it('offers a follow-up button on a settled source card', () => {
     const container = render(<TaskDetail controller={controller([card()])} task={card()} />)
@@ -99,7 +114,7 @@ describe('follow-up detail and modal', () => {
     expect(button!.textContent).toBe(t('detail.followUp'))
   })
 
-  it('opens the new-task dialog prefilled from the source and submits the source id', async () => {
+  it('opens the new-task dialog empty and submits only the follow-up task', async () => {
     const current = card()
     const fake = controller([current])
     const container = render(<TaskDetail controller={fake} task={current} />)
@@ -108,17 +123,27 @@ describe('follow-up detail and modal', () => {
     await act(async () => { button.click() })
 
     expect(container.querySelector('[data-dsh-part="new-follow-up"]')).not.toBeNull()
-    const title = container.querySelector(`input[placeholder="${t('new.titlePlaceholder')}"]`) as HTMLInputElement
-    expect(title.value).toBe('Follow-up: Login flow')
+    // Unlike a duplicate, a follow-up carries only its own, yet-to-be-written
+    // task: none of the source's text may sit in the boxes.
+    const title = field(container, t('new.titlePlaceholder')) as HTMLInputElement
+    expect(title.value).toBe('')
+    expect(field(container, t('new.descriptionPlaceholder')).value).toBe('')
+    expect(field(container, t('new.promptPlaceholder')).value).toBe('')
 
     const submit = [...container.querySelectorAll('button')].find(item => item.textContent === t('new.submit'))
     expect(submit).toBeDefined()
+    // An unnamed follow-up is not created; the reason is the form's error line.
+    await act(async () => { submit!.click() })
+    expect(fake.createTaskConfirmed).not.toHaveBeenCalled()
+    expect(container.textContent).toContain(t('new.required'))
+
+    typeInto(title, 'Fix the logout redirect')
     await act(async () => { submit!.click() })
 
     expect(fake.createTaskConfirmed).toHaveBeenCalledWith(expect.objectContaining({
-      title: 'Follow-up: Login flow',
-      description: 'old description',
-      prompt: 'old prompt',
+      title: 'Fix the logout redirect',
+      description: '',
+      prompt: '',
       followUpOf: 'card-1',
     }))
   })
