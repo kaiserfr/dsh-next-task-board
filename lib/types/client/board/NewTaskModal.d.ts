@@ -6,10 +6,12 @@ export interface NewTaskModalProps {
     /** Optional task template to clone/duplicate from. */
     initialTask?: TaskRecord;
     /**
-     * Source card of a follow-up: the form is prefilled from it like a duplicate,
-     * but the new card stays linked to the source (and the source card stays in
-     * place) and continues its conversation on the first run. The Host resolves
-     * the source again from its own ledger; this is only the id it names.
+     * Source card of a follow-up: the new card stays linked to the source (and
+     * the source card stays in place) and continues its conversation on the first
+     * run. Unlike a duplicate, the text boxes start empty — they carry only the
+     * new follow-up task, never the source's text; the source's execution targets
+     * and tags are inherited. The Host resolves the source again from its own
+     * ledger; this is only the id it names.
      */
     followUpSource?: TaskRecord;
     /**

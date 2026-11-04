@@ -18,10 +18,12 @@ export interface NewTaskModalProps {
   /** Optional task template to clone/duplicate from. */
   initialTask?: TaskRecord
   /**
-   * Source card of a follow-up: the form is prefilled from it like a duplicate,
-   * but the new card stays linked to the source (and the source card stays in
-   * place) and continues its conversation on the first run. The Host resolves
-   * the source again from its own ledger; this is only the id it names.
+   * Source card of a follow-up: the new card stays linked to the source (and
+   * the source card stays in place) and continues its conversation on the first
+   * run. Unlike a duplicate, the text boxes start empty — they carry only the
+   * new follow-up task, never the source's text; the source's execution targets
+   * and tags are inherited. The Host resolves the source again from its own
+   * ledger; this is only the id it names.
    */
   followUpSource?: TaskRecord
   /**
@@ -31,11 +33,6 @@ export interface NewTaskModalProps {
   defaultWorkspaceId?: string
   /** Optional callback after successful duplication (e.g. to archive source). */
   onDuplicateSuccess?: (sourceTaskId: string) => Promise<void>
-}
-
-/** "Follow-up: …" title, without stacking the prefix on a chained follow-up. */
-function followUpTitle(title: string): string {
-  return /^follow-up\b/i.test(title.trim()) ? title : `Follow-up: ${title}`
 }
 
 /**
@@ -66,10 +63,10 @@ interface NewTaskForm {
 export function NewTaskModal({ controller, onClose, initialTask, followUpSource, defaultWorkspaceId, onDuplicateSuccess }: NewTaskModalProps) {
   const isFollowUp = followUpSource !== undefined
   const isDuplicate = initialTask !== undefined
-  // The card the form is prefilled from: a duplicate's source or the
-  // follow-up's source. Both open on the same text and execution targets; only
-  // the consequence differs (a duplicate may archive the source, a follow-up
-  // keeps it and links the new card to it).
+  // The card the form is prefilled from: a duplicate's source (text and
+  // execution targets) or the follow-up's source (execution targets and tags
+  // only — a follow-up carries its own new text). The consequence differs too:
+  // a duplicate may archive the source, a follow-up keeps it and links to it.
   const template = followUpSource ?? initialTask
   // A duplicate/follow-up popup keeps its own draft per source card: what was
   // typed while duplicating card A must not appear when duplicating card B.
@@ -81,12 +78,14 @@ export function NewTaskModal({ controller, onClose, initialTask, followUpSource,
   const { stored, restored, discard: forgetDraft } = useStoredFormDraft<NewTaskForm>(controller, draftKey)
   // The untouched form: what "discard draft" falls back to, and the yardstick
   // that keeps a form nobody worked in from becoming a draft. A follow-up
-  // inherits the source's text and execution targets (like a duplicate) but not
-  // its schedule: a follow-up must not silently become a recurring copy.
+  // starts on empty text — title, description, prompt, parse and handover boxes
+  // carry only the new follow-up task, never the source's text — and inherits
+  // just the source's execution targets and tags. It also never inherits the
+  // schedule: a follow-up must not silently become a recurring copy.
   const [pristine] = useState<NewTaskForm>(() => ({
-    title: followUpSource !== undefined ? followUpTitle(followUpSource.title) : template?.title ?? '',
-    description: template?.description ?? '',
-    prompt: template?.prompt ?? '',
+    title: followUpSource !== undefined ? '' : template?.title ?? '',
+    description: followUpSource !== undefined ? '' : template?.description ?? '',
+    prompt: followUpSource !== undefined ? '' : template?.prompt ?? '',
     workspaceId: template?.workspaceId ?? defaultWorkspaceId ?? '',
     mode: template?.mode ?? '',
     permission: template?.permission ?? '',
@@ -96,10 +95,14 @@ export function NewTaskModal({ controller, onClose, initialTask, followUpSource,
     scheduleEnabled: isFollowUp ? false : template?.schedule?.enabled ?? false,
     scheduleCron: isFollowUp ? '' : template?.schedule?.cron ?? '',
     freezeText: '',
-    handoverText: template?.handover?.references !== undefined ? template.handover.references.join('\n') : '',
+    handoverText: followUpSource !== undefined
+      ? ''
+      : template?.handover?.references !== undefined
+        ? template.handover.references.join('\n')
+        : '',
     tags: template?.tags ?? [],
     archiveOriginal: true,
-    parseText: template?.parseText ?? '',
+    parseText: followUpSource !== undefined ? '' : template?.parseText ?? '',
   }))
   const [title, setTitle] = useState(stored?.title ?? pristine.title)
   const [description, setDescription] = useState(stored?.description ?? pristine.description)
@@ -199,6 +202,13 @@ export function NewTaskModal({ controller, onClose, initialTask, followUpSource,
   )
 
   const submit = async (): Promise<void> => {
+    // A follow-up form starts empty by design, so nothing names the card until
+    // the user writes the new task's title; without one it stays unnamed and
+    // unfindable on the board.
+    if (isFollowUp && title.trim() === '') {
+      setError(t('new.required'))
+      return
+    }
     if (scheduleEnabled) {
       const cron = scheduleCron.trim()
       if (cron === '' || !isValidCron(cron)) {
