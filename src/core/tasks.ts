@@ -72,8 +72,10 @@ export interface ExecutionRecord {
    * test run of the `testing` column: the Host opens it automatically (or from
    * the card's "Tests starten" button) once the implementation run settled, it
    * continues the same conversation, its prompt only tests and reports, and it
-   * is WIP-free like a clarification run because it changes no code. Its settle
-   * parks the card in `tested`.
+   * changes no code. It waits for the lane's own test slot (`maxTestingRuns`,
+   * default 1): a second test of the same workspace queues behind the running
+   * one, while clarification runs stay WIP-free. Its settle parks the card in
+   * `tested`.
    */
   kind?: 'clarify' | 'merge' | 'test'
 }
@@ -921,9 +923,11 @@ export function withSchedule(
  * a lane slot, and the board shows the card as Running and links the session),
  * but the card keeps its column — the clarification must not leave
  * `clarification`, because the human pulls it on to the run column afterwards.
- * `kind: 'test'` opens the WIP-free test run of the `testing` column: the card
- * already stands in `testing`, so this run keeps the column too; its settle
- * parks it in `tested`.
+ * `kind: 'test'` opens the test run of the `testing` column: the card already
+ * stands in `testing`, so this run keeps the column too; its settle parks it in
+ * `tested`. The test run is gated by the lane's own test limit
+ * (`maxTestingRuns`): only one test at a time per workspace, the rest wait in
+ * the same launch queue as implementation runs.
  */
 export function startExecution(
   task: TaskRecord,
@@ -1042,10 +1046,10 @@ export function settleExecution(
 
 /**
  * Where a succeeded implementation run parks the card. A card with tests goes
- * to the `testing` column, whose WIP-free test run does the testing; a card the
- * human marked as test-free skips that column and goes straight to the merge
- * gate (`tested`) — or straight to `done` when it has no branch to merge
- * either.
+ * to the `testing` column, whose test run (gated by the lane's own test limit,
+ * `maxTestingRuns`) does the testing; a card the human marked as test-free skips
+ * that column and goes straight to the merge gate (`tested`) — or straight to
+ * `done` when it has no branch to merge either.
  * @param task - the card whose implementation run just succeeded.
  */
 export function implementationParkStatus(task: TaskRecord): TaskStatus {
@@ -1076,6 +1080,23 @@ export function openExecution(task: TaskRecord): ExecutionRecord | undefined {
  */
 export function hasOpenRun(task: TaskRecord): boolean {
   return task.executions.some(execution => execution.endedAt === undefined && execution.kind !== 'clarify')
+}
+
+/**
+ * The card's test run that has not attached its session yet — the entry the
+ * `testing` column's own WIP limit holds back in the Host's launch queue, or
+ * undefined when the card has none.
+ *
+ * Such a run is a reservation, not work: it owns no conversation and no turn,
+ * so a manual move may discard it (the human's status change wins over the
+ * queued test). A test run that already attached its session is working and
+ * keeps blocking the card like any other run.
+ */
+export function queuedTestExecution(task: TaskRecord): ExecutionRecord | undefined {
+  const open = task.executions.filter(execution => execution.endedAt === undefined)
+  const only = open.length === 1 ? open[0] : undefined
+  if (only === undefined || only.kind !== 'test' || only.sessionId !== undefined) return undefined
+  return only
 }
 
 /**
@@ -1197,10 +1218,11 @@ export function runArrivalAt(task: TaskRecord): number {
 }
 
 /**
- * Order a runner-owned (WIP) column: the card being executed now comes first —
- * the user must see what is running without hunting for it — then the queued
- * cards in arrival order, so a card dragged in later sits below the ones that
- * were already waiting and the newest arrival lands at the bottom.
+ * Order a runner-owned (WIP) column — the `run` column and the `testing`
+ * column, each with its own per-lane queue: the card being executed now comes
+ * first (the user must see what is running without hunting for it), then the
+ * queued cards in arrival order, so a card that joined later sits below the
+ * ones that were already waiting and the newest arrival lands at the bottom.
  */
 export function compareWipOrder(left: TaskRecord, right: TaskRecord): number {
   const rank = (isTaskExecuting(right) ? 1 : 0) - (isTaskExecuting(left) ? 1 : 0)
@@ -1209,9 +1231,11 @@ export function compareWipOrder(left: TaskRecord, right: TaskRecord): number {
 
 /**
  * Why a card is waiting for its lane's WIP slot, or undefined when it is not
- * waiting at all. A card waits when it carries an open *implementation*
- * execution that has not attached a session yet, while another card of the same
- * lane holds the lane's slot — the state the Host's launch queue leaves it in.
+ * waiting at all. A card waits when it carries an open execution that has not
+ * attached a session yet, while the lane's matching slot is taken — an
+ * implementation run waits for `maxConcurrentRuns`, a test run of the `testing`
+ * column for the lane's own `maxTestingRuns` — the state the Host's launch queue
+ * leaves it in.
  *
  * This is presentation data for the board's waiting badge; the Host remains the
  * authority on whether a launch starts. The strings are task titles: resolving
@@ -1225,29 +1249,49 @@ export interface WaitingReason {
 }
 
 /**
- * Whether one card holds the given lane's WIP slot: an open implementation
- * execution that already attached its session, on a card that is not paused.
- * That is exactly the state the Host's launch queue counts, so the board's
- * explanation and the Host's gate agree.
+ * Which lane slot a queued card waits for: the implementation slot (the `run`
+ * column's `maxConcurrentRuns`) or the test slot (`testing` column's
+ * `maxTestingRuns`). Test runs got a queue of their own, so a busy test slot
+ * explains a waiting test card just as a busy run slot explains a waiting
+ * implementation card.
  */
-function holdsLaneSlot(task: TaskRecord): boolean {
-  if (task.archivedAt !== undefined || task.pausedAt !== undefined) return false
-  const latest = task.executions[task.executions.length - 1]
-  if (latest === undefined || latest.endedAt !== undefined) return false
-  return latest.kind !== 'clarify' && latest.kind !== 'test' && latest.sessionId !== undefined
+export type WipSlot = 'run' | 'test'
+
+/** The two per-workspace WIP limits the board renders its waiting cards from. */
+export interface WipLimits {
+  /** Implementation runs of one workspace at once (`maxConcurrentRuns`). */
+  maxConcurrentRuns: number
+  /** Test runs of one workspace at once (`maxTestingRuns`). */
+  maxTestingRuns: number
 }
 
 /**
- * The cards that hold a lane's WIP slots, in board order: an open
- * implementation execution that already attached its session, on a card that is
- * not paused. That is exactly the state the Host's launch queue counts, so the
- * board's explanation and the Host's gate agree.
+ * Whether one card holds the given lane slot: an open run that already attached
+ * its session, on a card that is not paused. `run` counts implementation and
+ * conflict-resolution runs, `test` counts the test runs of the `testing` column.
+ * That is exactly the state the Host's launch queue counts, so the board's
+ * explanation and the Host's gate agree.
  */
-function laneSlotHolders(lane: string, allTasks: readonly TaskRecord[]): TaskRecord[] {
+function holdsLaneSlot(task: TaskRecord, slot: WipSlot): boolean {
+  if (task.archivedAt !== undefined || task.pausedAt !== undefined) return false
+  const latest = task.executions[task.executions.length - 1]
+  if (latest === undefined || latest.endedAt !== undefined) return false
+  if (latest.sessionId === undefined) return false
+  if (slot === 'test') return latest.kind === 'test'
+  return latest.kind !== 'clarify' && latest.kind !== 'test'
+}
+
+/**
+ * The cards that hold a lane's WIP slots of one kind, in board order: an open
+ * run that already attached its session, on a card that is not paused. That is
+ * exactly the state the Host's launch queue counts, so the board's explanation
+ * and the Host's gate agree.
+ */
+function laneSlotHolders(lane: string, allTasks: readonly TaskRecord[], slot: WipSlot): TaskRecord[] {
   const holders: TaskRecord[] = []
   for (const other of allTasks) {
     if (other.archivedAt !== undefined || other.pausedAt !== undefined) continue
-    if (taskLane(other) !== lane || !holdsLaneSlot(other)) continue
+    if (taskLane(other) !== lane || !holdsLaneSlot(other, slot)) continue
     holders.push(other)
   }
   return holders
@@ -1256,26 +1300,31 @@ function laneSlotHolders(lane: string, allTasks: readonly TaskRecord[]): TaskRec
 /**
  * The waiting reason of one card, or undefined when its lane has room. Mirrors
  * the Host's slot accounting: a clarification run is WIP-free, a paused card
- * released its slot, and a settled execution holds nothing. The lane is
- * saturated when as many cards hold its slot as the limit allows; the card that
- * blocks is the first holder found.
+ * released its slot, and a settled execution holds nothing. A card whose open
+ * run is a test run waits for the lane's test slot (its own limit); every other
+ * run waits for the implementation slot. The lane is saturated when as many
+ * cards hold the relevant slot as the limit allows; the card that blocks is the
+ * first holder found.
  *
- * Deliberately says nothing about the card's own execution record: a card that
- * was just dropped has none yet, while a card already in the queue has one — in
- * both cases the reason is the lane, not the card.
+ * Deliberately says nothing about the card's own execution record beyond the
+ * slot kind: a card that was just dropped has none yet, while a card already in
+ * the queue has one — in both cases the reason is the lane, not the card.
  *
- * @param task - the card to explain (its lane is what matters).
+ * @param task - the card to explain (its lane and run kind are what matters).
  * @param allTasks - every board card (the holders are looked up here).
- * @param maxConcurrentRuns - the enforced per-lane limit (>= 1).
+ * @param limits - the enforced per-lane limits (each >= 1).
  */
 export function waitingReasonFor(
   task: TaskRecord,
   allTasks: readonly TaskRecord[],
-  maxConcurrentRuns: number,
+  limits: WipLimits,
 ): WaitingReason | undefined {
+  const latest = task.executions[task.executions.length - 1]
+  const slot: WipSlot = latest !== undefined && latest.endedAt === undefined && latest.kind === 'test' ? 'test' : 'run'
+  const limit = Math.max(1, slot === 'test' ? limits.maxTestingRuns : limits.maxConcurrentRuns)
   const lane = taskLane(task)
-  const holders = laneSlotHolders(lane, allTasks).filter(holder => holder.id !== task.id)
-  if (holders.length < Math.max(1, maxConcurrentRuns)) return undefined
+  const holders = laneSlotHolders(lane, allTasks, slot).filter(holder => holder.id !== task.id)
+  if (holders.length < limit) return undefined
   const blocker = holders[0]
   return blocker === undefined ? undefined : { blockerTitle: blocker.title, lane }
 }

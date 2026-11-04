@@ -155,11 +155,20 @@ export class TaskBoardHostService {
   private launchQueue: OpenedRun[] = []
   /** Per-lane launches already started whose session is not attached yet (invisible to the ledger). */
   private readonly launchesInFlight = new Map<string, number>()
+  /** Same as {@link launchesInFlight}, for the `testing` column's own launch slot. */
+  private readonly testLaunchesInFlight = new Map<string, number>()
   /**
    * WIP limit per workspace/lane: how many implementation runs may hold a
    * session at once (always >= 1). Clarification runs are exempt.
    */
   private maxConcurrentRuns = 1
+  /**
+   * Test limit per workspace/lane: how many test runs of the `testing` column
+   * may hold a session at once (always >= 1). A separate queue from the
+   * implementation slots: a workspace can run one implementation and one test
+   * at the same time, and a second test of that workspace waits.
+   */
+  private maxTestingRuns = 1
   /**
    * Rework watch: per card in a settled column (`testing`/`tested`/`failed`), the
    * `updatedAt` its conversation had when it was last read. An unchanged chat
@@ -709,6 +718,26 @@ export class TaskBoardHostService {
   }
 
   /**
+   * Apply the board's test limit (settings namespace `task-board`,
+   * `maxTestingRuns`) per workspace/lane: how many test runs of the `testing`
+   * column may hold a session at once. It is a slot of its own — the
+   * implementation limit does not count tests, and a test does not consume the
+   * lane's implementation slot. Lowering the limit never aborts a running test:
+   * the surplus drains as the test runs settle while the queue holds the rest
+   * back.
+   * @param limit - configured maximum per lane; values below 1 or non-finite mean 1.
+   */
+  setMaxTestingRuns(limit: number): void {
+    const next = Number.isFinite(limit) ? Math.max(1, Math.floor(limit)) : 1
+    if (next === this.maxTestingRuns) return
+    this.maxTestingRuns = next
+    this.pumpLaunchQueue()
+    // The board explains a waiting test card with this limit; a changed setting
+    // has to reach every open tab (the event frame carries it).
+    this.emit()
+  }
+
+  /**
    * Apply the board's Done-column limit (settings namespace `task-board`,
    * `maxDoneTasks`). The ledger trims an over-limit `done` column right away
    * and keeps enforcing it on every later move into `done` (oldest cards first,
@@ -838,6 +867,7 @@ export class TaskBoardHostService {
       // its drop targets against exactly what the Host enforces.
       stateMachine: this.ledger.stateMachine.toJSON(),
       maxConcurrentRuns: this.maxConcurrentRuns,
+      maxTestingRuns: this.maxTestingRuns,
       maxDoneTasks: this.ledger.maxDoneTasksLimit,
       awaitingAnswer: { ...this.awaitingAnswer },
       reviewPlans: { ...this.reviewPlans },
@@ -882,6 +912,7 @@ export class TaskBoardHostService {
       scheduler,
       power: this.power.snapshot(),
       maxConcurrentRuns: this.maxConcurrentRuns,
+      maxTestingRuns: this.maxTestingRuns,
       maxDoneTasks: this.ledger.maxDoneTasksLimit,
       // Rides the frame like the limits do: the flag is derived, so it never
       // bumps the ledger revision, and the 5 s heartbeat must still deliver it.
@@ -1281,9 +1312,10 @@ export class TaskBoardHostService {
     // and its prompt is the run prompt plus the clarification addendum
     // (composed by the runner).
     const clarification = opened.execution.kind === 'clarify'
-    // The test run of the `testing` column is WIP-free like a clarification run,
-    // but it is a real test: it continues the implementation conversation, its
-    // prompt only tests and reports, and its settle parks the card in `tested`.
+    // The test run of the `testing` column has the lane's own test slot (the
+    // `maxTestingRuns` queue, independent of the implementation slot), but it is
+    // a real test: it continues the implementation conversation, its prompt only
+    // tests and reports, and its settle parks the card in `tested`.
     const testRun = opened.execution.kind === 'test'
     // The automatic conflict resolution of a merge release is an ordinary run in
     // every structural respect, but its turn is the merge framing: the card's
@@ -2181,14 +2213,18 @@ export class TaskBoardHostService {
 
   /**
    * Start queued runs while their lane (workspace) holds fewer than
-   * `maxConcurrentRuns` sessions. Lanes are independent: a saturated lane never
-   * blocks another lane's queue entry, which is scanned in arrival order so
-   * runs within one lane still start FIFO. A run above its lane's limit stays
-   * queued: its ledger execution is already open without a session, so the card
-   * reads as waiting and cannot be opened twice. A clarification run is never
-   * held back — the clarification column has no WIP limit. Called on enqueue, on every ledger
-   * change (a settle frees a slot), after a launch attaches a session or fails,
-   * and when the limit changes.
+   * `maxConcurrentRuns` implementation sessions — or, for a run of the
+   * `testing` column, fewer than `maxTestingRuns` test sessions. The two slots
+   * are independent: a workspace can run one implementation and one test at the
+   * same time, and a second test of that workspace waits in the same arrival
+   * order. Lanes are independent: a saturated lane never blocks another lane's
+   * queue entry, which is scanned in arrival order so runs within one lane still
+   * start FIFO. A run above its lane's limit stays queued: its ledger execution
+   * is already open without a session, so the card reads as waiting and cannot
+   * be opened twice. A clarification run is never held back — the clarification
+   * column has no WIP limit. Called on enqueue, on every ledger change (a settle
+   * frees a slot), after a launch attaches a session or fails, and when either
+   * limit changes.
    */
   private pumpLaunchQueue(): void {
     if (this.disposed) return
@@ -2225,15 +2261,22 @@ export class TaskBoardHostService {
     }
     for (;;) {
       // Sessions per lane from the ledger snapshot plus the launches that lane
-      // started but whose session the snapshot cannot show yet.
+      // started but whose session the snapshot cannot show yet — counted
+      // separately for the two slots.
       //
-      // The slot belongs to every open *implementation* execution that already
-      // attached its session, from attachment until the execution settles (or
-      // the card is paused, which runtimeView hides). The roster is not
-      // consulted: it reports whether a turn runs right now, not whether the run
-      // is over, and a run that ended its turn without settling still owns its
-      // worktree and branch. Counting idle-but-open sessions here is what keeps
-      // a lane strictly at WIP 1 instead of merely throttling its launch rate.
+      // An implementation slot belongs to every open *implementation* execution
+      // that already attached its session, from attachment until the execution
+      // settles (or the card is paused, which runtimeView hides). The roster is
+      // not consulted: it reports whether a turn runs right now, not whether the
+      // run is over, and a run that ended its turn without settling still owns
+      // its worktree and branch. Counting idle-but-open sessions here is what
+      // keeps a lane strictly at WIP 1 instead of merely throttling its launch
+      // rate.
+      //
+      // A test slot belongs to every open *test* execution that already attached
+      // its session: the `testing` column has its own limit, independent of the
+      // implementation slot, so a workspace can implement and test at the same
+      // time while a second test of that workspace waits.
       //
       // A clarification run (the `clarification` column's execution) holds no
       // slot at all: the clarification column is WIP-free, so a card pulled in
@@ -2241,33 +2284,43 @@ export class TaskBoardHostService {
       // if need be. Its prompt forbids implementing anything, which is what
       // makes the overlap safe.
       const holding = new Map<string, number>()
+      const testingHolding = new Map<string, number>()
       for (const execution of open) {
-        if (execution.kind === 'clarify' || execution.kind === 'test') continue
         if (execution.sessionId === undefined) continue
+        if (execution.kind === 'clarify') continue
+        if (execution.kind === 'test') {
+          testingHolding.set(execution.lane, (testingHolding.get(execution.lane) ?? 0) + 1)
+          continue
+        }
         holding.set(execution.lane, (holding.get(execution.lane) ?? 0) + 1)
       }
       const index = this.launchQueue.findIndex((opened) => {
-        if (opened.execution.kind === 'clarify' || opened.execution.kind === 'test') return true
         const lane = taskLane(opened.task)
+        if (opened.execution.kind === 'clarify') return true
+        if (opened.execution.kind === 'test') {
+          return (testingHolding.get(lane) ?? 0) + (this.testLaunchesInFlight.get(lane) ?? 0) < this.maxTestingRuns
+        }
         return (holding.get(lane) ?? 0) + (this.launchesInFlight.get(lane) ?? 0) < this.maxConcurrentRuns
       })
       if (index === -1) return
       const next = this.launchQueue.splice(index, 1)[0]
       if (next === undefined) return
       const lane = taskLane(next.task)
-      // A WIP-free launch must not raise the lane's in-flight count either, or
-      // the clarification/test rounds of the following cards would queue behind
-      // it.
-      const wipFree = next.execution.kind === 'clarify' || next.execution.kind === 'test'
-      if (!wipFree) this.launchesInFlight.set(lane, (this.launchesInFlight.get(lane) ?? 0) + 1)
+      // A clarification launch holds no slot, so it must not raise any in-flight
+      // count either — the rounds of the following cards would queue behind it.
+      // A test launch raises the lane's test count, an implementation launch the
+      // implementation count; each release lowers exactly its own.
+      const wipFree = next.execution.kind === 'clarify'
+      const inFlight = next.execution.kind === 'test' ? this.testLaunchesInFlight : this.launchesInFlight
+      if (!wipFree) inFlight.set(lane, (inFlight.get(lane) ?? 0) + 1)
       let released = false
       const release = (): void => {
         if (released) return
         released = true
         if (!wipFree) {
-          const remaining = (this.launchesInFlight.get(lane) ?? 1) - 1
-          if (remaining <= 0) this.launchesInFlight.delete(lane)
-          else this.launchesInFlight.set(lane, remaining)
+          const remaining = (inFlight.get(lane) ?? 1) - 1
+          if (remaining <= 0) inFlight.delete(lane)
+          else inFlight.set(lane, remaining)
         }
         this.pumpLaunchQueue()
       }

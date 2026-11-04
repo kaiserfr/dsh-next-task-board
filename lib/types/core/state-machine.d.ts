@@ -112,8 +112,10 @@ export declare const STAMP_FIELDS: readonly ["doneAt"];
  *   straight onto Done: `running → done` is a manual move for the human who
  *   decides the work ends here, and the Host settles the open run (cancelled)
  *   and stops its session instead of waiting for it.
- * - `testing` is the test phase: the card is parked there (WIP released) and a
- *   WIP-free test run of the same conversation tests it. The test run's settle
+ * - `testing` is the test phase: the card is parked there (the implementation
+ *   slot is released) and a test run of the same conversation tests it, gated
+ *   by the lane's own test limit (`maxTestingRuns`, default 1) — a second test
+ *   of the same workspace waits in the launch queue. The test run's settle
  *   parks the card in `tested`; a red test report is corrected by pulling the
  *   card back to `running` (or `clarification`), which starts a rework run.
  *   A human may drag `testing → tested` to skip the run (no tests / manual test).

@@ -36,11 +36,20 @@ export declare class TaskBoardHostService {
     private launchQueue;
     /** Per-lane launches already started whose session is not attached yet (invisible to the ledger). */
     private readonly launchesInFlight;
+    /** Same as {@link launchesInFlight}, for the `testing` column's own launch slot. */
+    private readonly testLaunchesInFlight;
     /**
      * WIP limit per workspace/lane: how many implementation runs may hold a
      * session at once (always >= 1). Clarification runs are exempt.
      */
     private maxConcurrentRuns;
+    /**
+     * Test limit per workspace/lane: how many test runs of the `testing` column
+     * may hold a session at once (always >= 1). A separate queue from the
+     * implementation slots: a workspace can run one implementation and one test
+     * at the same time, and a second test of that workspace waits.
+     */
+    private maxTestingRuns;
     /**
      * Rework watch: per card in a settled column (`testing`/`tested`/`failed`), the
      * `updatedAt` its conversation had when it was last read. An unchanged chat
@@ -283,6 +292,17 @@ export declare class TaskBoardHostService {
      * @param limit - configured maximum per lane; values below 1 or non-finite mean 1.
      */
     setMaxConcurrentRuns(limit: number): void;
+    /**
+     * Apply the board's test limit (settings namespace `task-board`,
+     * `maxTestingRuns`) per workspace/lane: how many test runs of the `testing`
+     * column may hold a session at once. It is a slot of its own — the
+     * implementation limit does not count tests, and a test does not consume the
+     * lane's implementation slot. Lowering the limit never aborts a running test:
+     * the surplus drains as the test runs settle while the queue holds the rest
+     * back.
+     * @param limit - configured maximum per lane; values below 1 or non-finite mean 1.
+     */
+    setMaxTestingRuns(limit: number): void;
     /**
      * Apply the board's Done-column limit (settings namespace `task-board`,
      * `maxDoneTasks`). The ledger trims an over-limit `done` column right away
@@ -646,14 +666,18 @@ export declare class TaskBoardHostService {
     private scheduleLaunch;
     /**
      * Start queued runs while their lane (workspace) holds fewer than
-     * `maxConcurrentRuns` sessions. Lanes are independent: a saturated lane never
-     * blocks another lane's queue entry, which is scanned in arrival order so
-     * runs within one lane still start FIFO. A run above its lane's limit stays
-     * queued: its ledger execution is already open without a session, so the card
-     * reads as waiting and cannot be opened twice. A clarification run is never
-     * held back — the clarification column has no WIP limit. Called on enqueue, on every ledger
-     * change (a settle frees a slot), after a launch attaches a session or fails,
-     * and when the limit changes.
+     * `maxConcurrentRuns` implementation sessions — or, for a run of the
+     * `testing` column, fewer than `maxTestingRuns` test sessions. The two slots
+     * are independent: a workspace can run one implementation and one test at the
+     * same time, and a second test of that workspace waits in the same arrival
+     * order. Lanes are independent: a saturated lane never blocks another lane's
+     * queue entry, which is scanned in arrival order so runs within one lane still
+     * start FIFO. A run above its lane's limit stays queued: its ledger execution
+     * is already open without a session, so the card reads as waiting and cannot
+     * be opened twice. A clarification run is never held back — the clarification
+     * column has no WIP limit. Called on enqueue, on every ledger change (a settle
+     * frees a slot), after a launch attaches a session or fails, and when either
+     * limit changes.
      */
     private pumpLaunchQueue;
     private schedulePoll;

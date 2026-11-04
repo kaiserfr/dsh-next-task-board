@@ -217,7 +217,7 @@ export interface ControllerSnapshot {
    * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
    */
   sessionOpenError?: string
-  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'>
+  host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxTestingRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'>
 }
 
 /** The selected task (resolved from the ledger), or undefined. */
@@ -334,7 +334,7 @@ export class BoardController {
   private readonly formDrafts = new Map<string, unknown>()
   private transportError: string | undefined
   private sessionOpenError: string | undefined
-  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'> | undefined
+  private hostState: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxTestingRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'> | undefined
   /** Liveness net for accepted actions whose result event was lost (reconnect). */
   private outboxSweep: ReturnType<typeof setInterval> | undefined
   private remoteSubscribed = false
@@ -860,8 +860,9 @@ export class BoardController {
 
   /**
    * Start the card's test run from the `testing` column (the "Tests starten"
-   * control): the Host opens the WIP-free test execution of the card's own
-   * conversation. Normally the Host starts it automatically right after the
+   * control): the Host opens the test execution of the card's own conversation,
+   * gated by the lane's test limit (`maxTestingRuns`) exactly like the automatic
+   * one. Normally the Host starts it automatically right after the
    * implementation run parks the card; this is the manual retry after a
    * cancelled run, or for a card dragged into `testing` by hand.
    * @param id - the card to test.
@@ -1611,6 +1612,7 @@ export class BoardController {
       scheduler: payload.scheduler,
       power: payload.power,
       ...(payload.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: payload.maxConcurrentRuns }),
+      ...(payload.maxTestingRuns === undefined ? {} : { maxTestingRuns: payload.maxTestingRuns }),
       ...(payload.maxDoneTasks === undefined ? {} : { maxDoneTasks: payload.maxDoneTasks }),
       ...(payload.awaitingAnswer === undefined ? {} : { awaitingAnswer: payload.awaitingAnswer }),
       ...(payload.reviewPlans === undefined ? {} : { reviewPlans: payload.reviewPlans }),
@@ -1722,6 +1724,7 @@ export class BoardController {
       // Same for the enforced limits: an older Host sends none, and the board
       // keeps explaining waiting cards with what it already has.
       ...(snapshot.maxConcurrentRuns === undefined ? {} : { maxConcurrentRuns: snapshot.maxConcurrentRuns }),
+      ...(snapshot.maxTestingRuns === undefined ? {} : { maxTestingRuns: snapshot.maxTestingRuns }),
       ...(snapshot.maxDoneTasks === undefined ? {} : { maxDoneTasks: snapshot.maxDoneTasks }),
       // Waiting questions: an older Host sends none, and the board keeps what it
       // has; the current Host always sends the map, so an empty one clears it.

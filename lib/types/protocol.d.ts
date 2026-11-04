@@ -86,6 +86,13 @@ export interface TaskBoardSnapshot {
      * authority on whether a launch starts. Absent on an older Host.
      */
     maxConcurrentRuns?: number;
+    /**
+     * The enforced test limit per workspace/lane (`maxTestingRuns`): how many test
+     * runs of the `testing` column may hold a session at once, independent of
+     * `maxConcurrentRuns`. Only used to explain a waiting test card; the Host
+     * stays the authority on whether a launch starts. Absent on an older Host.
+     */
+    maxTestingRuns?: number;
     /** The enforced Done-column limit (`maxDoneTasks`). Absent on an older Host. */
     maxDoneTasks?: number;
     /**
@@ -205,6 +212,7 @@ export interface TaskBoardEventPayload {
     power: TaskBoardPowerSnapshot;
     /** Enforced limits, so a settings change reaches every open board. */
     maxConcurrentRuns?: number;
+    maxTestingRuns?: number;
     maxDoneTasks?: number;
     /** Machine pressure and the launch queue's waiting reasons (derived). */
     pressure?: TaskBoardPressure;
@@ -340,8 +348,9 @@ export type TaskBoardAction = {
 }
 /**
  * Start the card's test run without waiting for the automatic one: the
- * `testing` column's WIP-free run. Used by the card's "Tests starten" control
- * after a cancelled test run or for a card parked in `testing` by hand.
+ * `testing` column's run, gated by the lane's test limit (`maxTestingRuns`)
+ * like the automatic one. Used by the card's "Tests starten" control after a
+ * cancelled test run or for a card parked in `testing` by hand.
  */
  | {
     kind: 'start-test';

@@ -50,6 +50,7 @@ Paketierungs-/Datenschutz-Unterschiede (2, 3, 5). Alles Weitere ist unverändert
 | 30 | **Mehr können** | **To-do-Spalte und Spec-Freigabe entfernt: Klärung → In progress ist der direkte Weg** — die Default-Maschine hat sechs Spalten (Backlog → Klärung → In progress → Ready for test → Failed → Done), `clarification → running` trägt `run` und schließt den offenen Klärungslauf, `ready_for_test`/`failed` gehen beim Rework zurück nach `clarification`, und `approve-spec`/`specApprovedAt` samt Knopf „Release specification“ sind vollständig entfallen; bestehende To-do-Karten migrieren beim Laden nach `clarification` |
 | 31 | **Mehr können** | **Zweiphasiger Lauf über `Testing` nach `Tested`**: die alte Spalte „Ready for test" heißt „Testing", danach folgt die neue Merge-Spalte „Tested"; der Implementierungslauf testet nicht mehr selbst, ein WIP-freier Testlauf (gleiche Session, `kind: 'test'`) testet und meldet, erst dann ist der Merge aus „Tested" erlaubt; Karten ohne Tests (`skipTests`) springen direkt nach Tested/Done |
 | 29 | **Mehr können** | **Merge-Freigabe setzt den Branch erst auf die aktuelle Basis neu auf (Rebase)**: `git.mergeBranch` prüft weiterhin das Gate (sauberer Worktree, HEAD exakt `reviewedCommit`) und **rebased den Feature-Branch dann auf den Basis-Branch, wie er jetzt steht** — in der Zwischenzeit können andere Karten in die Basis gemergt worden sein, und ohne diesen Schritt träfe die geprüfte Arbeit die neue Basis erst im Merge-Commit, den nie jemand auf ihr gebaut oder getestet hat. Ein Konflikt wird nicht dem Menschen zugemutet: der halb fertige Rebase bleibt **im Worktree der Karte** stehen (Marker, `rebase-merge`), der Haupt-Checkout wird nie angefasst, und die Karte läuft als `merge`-Ausführung mit eigenem Prompt (Konflikt lösen, `git add`, `git -c core.editor=true rebase --continue`, sonst nichts ändern). Genau ein Auflösungslauf je Freigabe (`MERGE_RESOLVE_ATTEMPTS`): danach stempelt der Settle des Laufs den rebasten HEAD als Prüf-Commit und der Host merged von selbst nach; ein zweiter Konflikt, ein fehlgeschlagener Lauf oder ein danach noch offener Rebase bricht ihn ab (der Branch steht wieder auf dem geprüften Commit) und schickt die Karte nach `failed`. Die alte Spiegel-Merge-Maschinerie (`beginMergeResolution`, `MergeResolutionStart`, Gate-Ausnahme „Prüf-Commit ist Vorfahre") ist entfallen; `commitBranch`, `hasUnresolvedMerge` und `abortUnresolvedMerge` kennen den unfertigen Rebase |
+| 32 | **Mehr können** | **Eigenes WIP-Limit der Testing-Spalte (`maxTestingRuns`, Default 1)**: Testläufe (`kind: 'test'`) bekommen eine eigene, vom Implementierungs-Limit getrennte FIFO-Queue je Workspace — ein Workspace kann weiterhin 1 Implementierung + 1 Test gleichzeitig fahren, ein zweiter Test derselben Workspace wartet (offene Ausführung ohne Session, Warteschild samt Blocker, laufende Karte oben). Ein wartender Test wird von einem manuellen Kartenzug verworfen (cancelled); ein bereits laufender Test blockiert den Zug wie bisher. Klärungsläufe bleiben WIP-frei. (Löst die Aussage „WIP-freier Testlauf" aus 18 und 31 ab.) |
 
 Die englische Fassung dieser Übersicht steht im README unter
 „What this fork adds over the upstream task board".
@@ -1169,6 +1170,34 @@ dsh plugin --profile web remove @linxin666/dsh-client-ui-task-board
 - `scripts/install-task-board-watchdog.sh` installiert einen externen
   systemd-User-Timer (`lib/watchdog.js`), der nach ~2 Minuten ohne Antwort neu
   startet — nie bei geschlossenem Port, 404 oder 401/403.
+
+## Testing-WIP-Limit (2026-11-04)
+
+- **Einstellung `maxTestingRuns`** (Settings-Namespace `task-board`, Default `1`, Feld
+  „Maximum concurrent test runs per workspace (WIP)"): Testläufe der Spalte
+  `testing` halten je Workspace einen eigenen Slot. `pumpLaunchQueue` zählt sie
+  getrennt (`testingHolding` / `testLaunchesInFlight`) von den
+  Implementierungsläufen (`holding` / `launchesInFlight`); beide Grenzen sind
+  unabhängig, ein Workspace kann also eine Implementierung und einen Test
+  gleichzeitig laufen lassen. Weitere Tests derselben Workspace bleiben als
+  offene Ausführung ohne Session in der Start-Queue und starten nach dem
+  Settlen des laufenden Tests in Ankunftsreihenfolge.
+- **Anzeige wie in „In progress"**: die Karte wartet mit Warteschild, Blocker-Titel
+  und Workspace im Tooltip (`waitingReasonFor` ist slot-bewusst: Testkarten
+  vergleichen mit Test-Haltern und `maxTestingRuns`, Implementierungskarten mit
+  Implementierungs-Haltern und `maxConcurrentRuns`); die Spalte `testing` ist
+  wie die Laufspalte sortiert (laufende Karte oben, wartende in
+  Ankunftsreihenfolge).
+- **Auch manuelle Testläufe** („Tests starten", Aktion `start-test`) gehen durch
+  dieselbe Queue.
+- **Manueller Zug verwirft einen wartenden Test**: hat eine Karte in `testing`
+  genau einen offenen Testlauf ohne Session, lässt der Host den Zug zu und
+  settlet den Testlauf als `cancelled` (`supersedeQueuedTest`, auch beim
+  Gruppen-Drop); ein Testlauf mit Session hält die Karte weiterhin fest
+  (`running task cannot be moved`). Die Browser-Prüfung
+  (`transitionBlockerOf`) erlaubt genau dasselbe.
+- Klärungsläufe bleiben WIP-frei; `maxConcurrentRuns` zählt weiterhin nur
+  Implementierungs- und Konfliktlösungsläufe.
 
 ## Pflege
 

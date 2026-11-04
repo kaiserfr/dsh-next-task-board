@@ -48,6 +48,8 @@ export interface TaskBoardSettings {
   preventIdleSleep?: boolean
   /** WIP limit per workspace: how many implementation runs of one workspace may hold a session at once (default 1); a clarification run holds no slot. */
   maxConcurrentRuns?: number
+  /** Test limit per workspace: how many test runs of the Testing column may hold a session at once (default 1); separate from the implementation slot, a clarification run holds no slot. */
+  maxTestingRuns?: number
   /** Done-column limit: on-board Done cards before the oldest is archived (default 20). */
   maxDoneTasks?: number
   /** Compose file a card's task environment is brought up from (empty: no task containers). */
@@ -90,6 +92,8 @@ export interface TaskBoardSettingsCardState extends CardShell {
   preventIdleSleep: CardFieldState
   /** WIP limit draft. */
   maxConcurrentRuns: CardFieldState
+  /** Test-limit draft. */
+  maxTestingRuns: CardFieldState
   /** Done-column limit draft. */
   maxDoneTasks: CardFieldState
   /** Task-environment compose file draft. */
@@ -130,6 +134,7 @@ export class TaskBoardSettingsCardController {
       booleanField('announceToAgent'),
       booleanField('preventIdleSleep'),
       numberField('maxConcurrentRuns', { integer: true, min: 1 }),
+      numberField('maxTestingRuns', { integer: true, min: 1 }),
       numberField('maxDoneTasks', { integer: true, min: 1 }),
       textField('composeFile'),
       textField('composeEnv'),
@@ -150,6 +155,7 @@ export class TaskBoardSettingsCardController {
       announceToAgent: this.form.field('announceToAgent'),
       preventIdleSleep: this.form.field('preventIdleSleep'),
       maxConcurrentRuns: this.form.field('maxConcurrentRuns'),
+      maxTestingRuns: this.form.field('maxTestingRuns'),
       maxDoneTasks: this.form.field('maxDoneTasks'),
       composeFile: this.form.field('composeFile'),
       composeEnv: this.form.field('composeEnv'),
@@ -272,6 +278,16 @@ export function TaskBoardSettingsCard(props: TaskBoardSettingsCardProps) {
         {...state.maxConcurrentRuns}
         onEdit={(text) => { props.edit('maxConcurrentRuns', text) }}
         onReset={() => { props.resetField('maxConcurrentRuns') }}
+      />
+      <ValueField
+        id="settings-task-board-max-testing-runs"
+        label={t('settings.maxTestingRuns')}
+        hint={t('settings.maxTestingRunsHint')}
+        numeric
+        {...fieldProps}
+        {...state.maxTestingRuns}
+        onEdit={(text) => { props.edit('maxTestingRuns', text) }}
+        onReset={() => { props.resetField('maxTestingRuns') }}
       />
       <ValueField
         id="settings-task-board-max-done-tasks"

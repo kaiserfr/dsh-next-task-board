@@ -11,12 +11,13 @@ export interface LedgerState {
 }
 /**
  * A card whose execution the Host still has to start. The execution is either
- * the card's run (`execution.kind` undefined — the `run` action, cron) or its
- * clarification run (`execution.kind === 'clarify'`, the `backlog →
- * clarification` step): the two share the launch queue, but only the
- * implementation run obeys the lane WIP limit — the clarification column is
- * WIP-free; they also differ in the prompt and in whether settling moves the
- * card.
+ * the card's run (`execution.kind` undefined — the `run` action, cron) or one of
+ * the rounds that keep the card's column (`execution.kind === 'clarify'` for the
+ * `backlog → clarification` step, `'test'` for the `testing` column, `'merge'`
+ * for the automatic conflict resolution): they share the launch queue, but the
+ * lane gates differ — the implementation run and the test run each obey their
+ * own per-lane limit, the clarification column is WIP-free; they also differ in
+ * the prompt and in whether settling moves the card.
  */
 export interface OpenedRun {
     task: TaskRecord;
@@ -63,7 +64,7 @@ export interface OpenExecutionReference {
     readonly startedAt: number;
     /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
     readonly lane: string;
-    /** `'clarify'`/`'test'` for the WIP-free rounds; a real run otherwise. */
+    /** `'clarify'`/`'test'`/`'merge'` for the column-keeping rounds; a real run otherwise. */
     readonly kind: 'clarify' | 'merge' | 'test' | undefined;
 }
 /**
@@ -322,6 +323,14 @@ export declare class HostTaskLedger {
      * by the pump.
      */
     private supersedeClarification;
+    /**
+     * Close the test run of the `testing` column that is still waiting for the
+     * lane's test slot, because the human moved the card on: the status change
+     * wins over the queued test. A test run that already attached its session is
+     * working and is never discarded here (the move refuses it, as before). A
+     * launch not started yet is dropped by the pump's self-heal.
+     */
+    private supersedeQueuedTest;
     /**
      * Ensure the card has a feature branch before it starts. The backlog →
      * clarification pull normally opens it; a cron trigger or the detail Run

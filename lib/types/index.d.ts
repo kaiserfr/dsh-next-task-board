@@ -48,6 +48,15 @@ export interface Config {
      */
     maxConcurrentRuns?: Volatile<number>;
     /**
+     * Test limit per workspace/lane: how many test runs of the Testing column may
+     * hold a session at the same time. It is a slot of its own: the implementation
+     * limit does not count tests, and a test does not consume the implementation
+     * slot, so a workspace can implement and test at the same time. Test runs
+     * above their lane's limit wait in a FIFO queue and start as soon as a test
+     * slot frees up. `1` (default) serialises the workspace's tests.
+     */
+    maxTestingRuns?: Volatile<number>;
+    /**
      * The board's state machine: columns (task states), the transitions allowed
      * between them, and the actions fired by a transition (`git.openBranch`,
      * `git.commitBranch`, `git.mergeBranch`, `run`, `clarify`, `stamp`). Absent
@@ -57,9 +66,9 @@ export interface Config {
      * starts its run there, its prompt asks the agent's open questions and stops,
      * and a human start on to `running` continues that same session with the
      * implementation; there is no separate To do column; every way into
-     * `testing`/`tested` commits the card's worktree, the WIP-free test run of
-     * `testing` parks the card in `tested`, and `tested → done` merges the
-     * branch). An invalid
+     * `testing`/`tested` commits the card's worktree, the test run of `testing`
+     * (its own per-workspace limit `maxTestingRuns`, default 1) parks the card in
+     * `tested`, and `tested → done` merges the branch). An invalid
      * config is refused as a whole and the machine in force stays.
      * Shape: `{ initial?, states: [{ status, label?, order?, drop? }],
      * transitions: [{ from, to, trigger?, git?, actions? }] }`.
@@ -160,6 +169,7 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     preventIdleSleep: z<boolean, boolean, "volatile-defined">;
     pressureGate: z<boolean, boolean, "volatile-defined">;
     maxConcurrentRuns: z<number, number, "volatile-defined">;
+    maxTestingRuns: z<number, number, "volatile-defined">;
     stateMachine: z<any, any, "volatile">;
     maxDoneTasks: z<number, number, "volatile-defined">;
     composeFile: z<string, string, "volatile-defined">;
@@ -178,6 +188,7 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     preventIdleSleep: z<boolean, boolean, "volatile-defined">;
     pressureGate: z<boolean, boolean, "volatile-defined">;
     maxConcurrentRuns: z<number, number, "volatile-defined">;
+    maxTestingRuns: z<number, number, "volatile-defined">;
     stateMachine: z<any, any, "volatile">;
     maxDoneTasks: z<number, number, "volatile-defined">;
     composeFile: z<string, string, "volatile-defined">;

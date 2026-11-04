@@ -145,11 +145,17 @@ onto the run column (the run continues the card's conversation, so a correction
 written there is already in context). `clarify` rides the same
 `backlog → clarification` transition as the branch hook — the card's
 clarification step. The **test phase** sits between the two: an implementation
-run parks the card in `testing` (WIP released), a second, **WIP-free run of the
-same conversation** tests it (`test` execution kind, prompt only tests and
-reports), and its settle parks the card in `tested`. A card marked *no tests*
-skips `testing` and lands in `tested` (with a branch) or `done` (without one).
-A human may also drag `testing → tested` to skip the test run.
+run parks the card in `testing` (the implementation slot is released), a second
+run of the same conversation tests it (`test` execution kind, prompt only tests
+and reports), and its settle parks the card in `tested`. The test run has a
+**slot of its own per workspace** (`maxTestingRuns`, default 1): a workspace
+may implement and test at the same time, and a second test of that workspace
+waits in the launch queue (open execution without a session, **Queued** badge
+and the blocking card, like the run column). A card marked *no tests* skips
+`testing` and lands in `tested` (with a branch) or `done` (without one). A human
+may also drag `testing → tested` to skip the test run; a **waiting** test run is
+discarded by that move (a test that already runs keeps the card blocked, as
+before).
 
 ## Commit policy: nothing stays uncommitted
 

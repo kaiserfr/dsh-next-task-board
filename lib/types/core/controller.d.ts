@@ -185,7 +185,7 @@ export interface ControllerSnapshot {
      * Cleared by the next successful jump or by {@link BoardController.dismissSessionOpenError}.
      */
     sessionOpenError?: string;
-    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'>;
+    host?: Pick<TaskBoardSnapshot, 'revision' | 'scheduler' | 'power' | 'sessionDefaultPermission' | 'stateMachine' | 'maxConcurrentRuns' | 'maxTestingRuns' | 'maxDoneTasks' | 'awaitingAnswer' | 'reviewPlans' | 'pendingReleases' | 'pendingWork' | 'runningSessions' | 'pressure' | 'queued'>;
 }
 /** The selected task (resolved from the ledger), or undefined. */
 export declare function selectedTaskOf(snapshot: ControllerSnapshot): TaskRecord | undefined;
@@ -433,8 +433,9 @@ export declare class BoardController {
     runTask(id: string): Promise<boolean>;
     /**
      * Start the card's test run from the `testing` column (the "Tests starten"
-     * control): the Host opens the WIP-free test execution of the card's own
-     * conversation. Normally the Host starts it automatically right after the
+     * control): the Host opens the test execution of the card's own conversation,
+     * gated by the lane's test limit (`maxTestingRuns`) exactly like the automatic
+     * one. Normally the Host starts it automatically right after the
      * implementation run parks the card; this is the manual retry after a
      * cancelled run, or for a card dragged into `testing` by hand.
      * @param id - the card to test.

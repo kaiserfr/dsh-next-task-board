@@ -1,5 +1,5 @@
 import { type BoardController } from '../../core/controller.ts';
-import { type TaskRecord } from '../../core/tasks.ts';
+import { type TaskRecord, type WipLimits } from '../../core/tasks.ts';
 /** Sentinel option value of the project row's "register a new project" entry. */
 export declare const NEW_PROJECT_VALUE = "__dsh_new_project__";
 /**
@@ -10,13 +10,12 @@ export declare const NEW_PROJECT_VALUE = "__dsh_new_project__";
 export declare const BATCH_DRAG_MIME = "application/x-dsh-taskboard-cards";
 /**
  * The notice for a drop on the run column whose cards cannot start yet, or
- * undefined when at least one of them starts now. The clarification and review
- * columns are WIP-free, so only the cards whose lane is held by another run
- * count; they
+ * undefined when at least one of them starts now. The clarification column is
+ * WIP-free, so only the cards whose lane is held by another run count; they
  * keep their place in the lane's FIFO queue and start on their own. Exported
  * for the test that pins the wording against a blocked lane.
  */
-export declare function queuedDropNotice(tasks: readonly TaskRecord[], allTasks: readonly TaskRecord[], maxConcurrentRuns: number, workspaceTitles: ReadonlyMap<string, string>): string | undefined;
+export declare function queuedDropNotice(tasks: readonly TaskRecord[], allTasks: readonly TaskRecord[], limits: WipLimits, workspaceTitles: ReadonlyMap<string, string>): string | undefined;
 /**
  * The dragged card ids: the batch payload when present and well-formed, else
  * the lead id from `text/plain` (single-card drags and older writers).

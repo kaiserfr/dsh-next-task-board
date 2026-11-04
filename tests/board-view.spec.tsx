@@ -461,11 +461,11 @@ describe('TaskBoard running-card marking and runner-column order', () => {
     // handed over all the same (the Host queues it), and the notice names the
     // blocker and its workspace.
     const drop = tasks.find(item => item.id === 't-drop')!
-    const notice = queuedDropNotice([drop], tasks, 1, new Map([['w1', 'Comfy']]))
+    const notice = queuedDropNotice([drop], tasks, { maxConcurrentRuns: 1, maxTestingRuns: 1 }, new Map([['w1', 'Comfy']]))
     expect(notice).toContain('Exec card')
     expect(notice).toContain('Comfy')
     // A card whose lane is free starts right away: no notice at all.
-    expect(queuedDropNotice([drop], [drop], 1, new Map())).toBeUndefined()
+    expect(queuedDropNotice([drop], [drop], { maxConcurrentRuns: 1, maxTestingRuns: 1 }, new Map())).toBeUndefined()
     // The dropped card still reaches the controller, which is what starts (and
     // queues) it in production.
     const dataTransfer = { getData: (type: string) => (type === 'text/plain' ? 't-drop' : '') }

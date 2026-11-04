@@ -512,8 +512,9 @@ export const COMPLETION_INSTRUCTION =
 /**
  * Phase 1 (the implementation run): what the card's run may still do and what
  * it must leave for the test phase. The card is split in two runs on purpose —
- * the long/GUI tests run in the WIP-free test run of the `testing` column, so
- * the implementation run must not hold the lane's slot while they run.
+ * the long/GUI tests run in the test run of the `testing` column (its own
+ * per-workspace test slot), so the implementation run must not hold the lane's
+ * implementation slot while they run.
  */
 export const IMPLEMENTATION_PHASE_INSTRUCTION = [
   'Phase 1 — Implementierung: Implementiere die Aufgabe jetzt vollständig.',

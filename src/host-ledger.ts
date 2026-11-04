@@ -6,7 +6,7 @@ import { dshHome } from './dsh-home.ts'
 import { isValidCron, nextRunAtMs } from './core/schedule.ts'
 import { isTaskRecord, parseLedger } from './core/store.ts'
 import type { TaskCompose, TaskFollowUp, TaskGit, TaskMerge, TaskReview } from './core/tasks.ts'
-import { DEFAULT_MAX_DONE_TASKS, FOLLOW_UP_SOURCE_STATUSES, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, implementationParkStatus, isReworkReturn, latestSessionIdOf, openExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, withStopMarker, withoutStopMarker, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
+import { DEFAULT_MAX_DONE_TASKS, FOLLOW_UP_SOURCE_STATUSES, MERGE_RESOLVE_ATTEMPTS, hasOpenRun, implementationParkStatus, isReworkReturn, latestSessionIdOf, openExecution, queuedTestExecution, retainRecentExecutions, settleExecution, startExecution, taskLane, withPause, withReworkStamp, withStatus, withStopMarker, withoutStopMarker, type ExecutionRecord, type TaskRecord } from './core/tasks.ts'
 import { resolveStateMachine, type StateMachine, type StateTransition } from './core/state-machine.ts'
 import { applyArchiveTask, applyRestoreTask } from './core/use-cases/task-archive.ts'
 import { applyCreateTask } from './core/use-cases/task-create.ts'
@@ -46,12 +46,13 @@ export interface LedgerState {
 
 /**
  * A card whose execution the Host still has to start. The execution is either
- * the card's run (`execution.kind` undefined — the `run` action, cron) or its
- * clarification run (`execution.kind === 'clarify'`, the `backlog →
- * clarification` step): the two share the launch queue, but only the
- * implementation run obeys the lane WIP limit — the clarification column is
- * WIP-free; they also differ in the prompt and in whether settling moves the
- * card.
+ * the card's run (`execution.kind` undefined — the `run` action, cron) or one of
+ * the rounds that keep the card's column (`execution.kind === 'clarify'` for the
+ * `backlog → clarification` step, `'test'` for the `testing` column, `'merge'`
+ * for the automatic conflict resolution): they share the launch queue, but the
+ * lane gates differ — the implementation run and the test run each obey their
+ * own per-lane limit, the clarification column is WIP-free; they also differ in
+ * the prompt and in whether settling moves the card.
  */
 export interface OpenedRun {
   task: TaskRecord
@@ -142,7 +143,7 @@ export interface OpenExecutionReference {
   readonly startedAt: number
   /** WIP lane (effective workspace id) the run counts against; '' when unpinned. */
   readonly lane: string
-  /** `'clarify'`/`'test'` for the WIP-free rounds; a real run otherwise. */
+  /** `'clarify'`/`'test'`/`'merge'` for the column-keeping rounds; a real run otherwise. */
   readonly kind: 'clarify' | 'merge' | 'test' | undefined
 }
 
@@ -934,6 +935,19 @@ export class HostTaskLedger {
     const round = openExecution(task)
     if (round?.kind !== 'clarify') return task
     return settleExecution(task, round.id, 'cancelled', now, 'superseded by the implementation run')
+  }
+
+  /**
+   * Close the test run of the `testing` column that is still waiting for the
+   * lane's test slot, because the human moved the card on: the status change
+   * wins over the queued test. A test run that already attached its session is
+   * working and is never discarded here (the move refuses it, as before). A
+   * launch not started yet is dropped by the pump's self-heal.
+   */
+  private supersedeQueuedTest(task: TaskRecord, now: number): TaskRecord {
+    const queued = queuedTestExecution(task)
+    if (queued === undefined) return task
+    return settleExecution(task, queued.id, 'cancelled', now, 'superseded by a manual move')
   }
 
   /**
@@ -1760,11 +1774,14 @@ export class HostTaskLedger {
       // A finished implementation run parks the card for a new test round, so
       // the release record of the test round before it is dropped here.
       const cleared = this.clearRelease(committed)
-      // A card that still needs its tests opens the WIP-free test run of the
-      // `testing` column right here: it continues the very conversation that
-      // just settled, and the column change already released the lane's WIP
-      // slot. A card the human marked as test-free skipped that column (parked
-      // in `tested`/`done`) and opens no run.
+      // A card that still needs its tests opens the test run of the `testing`
+      // column right here: it continues the very conversation that just settled,
+      // and the column change already released the lane's implementation slot.
+      // The test run has the lane's own test slot (`maxTestingRuns`): if another
+      // test of the workspace is running, this one queues as an open execution
+      // without a session and the card shows it. A card the human marked as
+      // test-free skipped that column (parked in `tested`/`done`) and opens no
+      // run.
       if (execution?.kind === undefined && cleared.status === 'testing' && cleared.pausedAt === undefined) {
         const opened = startExecution(cleared, now, crypto.randomUUID(), undefined, 'test')
         openedTest = { task: opened.task, execution: opened.execution }
@@ -1953,8 +1970,16 @@ export class HostTaskLedger {
         // never stands between the human and a finished card. An implementation
         // run (or a `running` card) forces the plain park instead of the merge
         // release; every other manual move stays refused while a run is open.
+        //
+        // The one exception on the way out is the `testing` column's test run
+        // that is still waiting for the lane's test slot: it owns no conversation
+        // and no turn, so the human's move wins and the queued test is dropped
+        // (see {@link supersedeQueuedTest}). A test run that attached its session
+        // is working and refuses the move like any other open run.
+        const queuedTest = queuedTestExecution(task)
+        const openRunBlocks = hasOpenRun(task) && queuedTest === undefined
         const forcingDone = action.status === 'done' && (task.status === 'running' || hasOpenRun(task))
-        if (!forcingDone && (task.status === 'running' || hasOpenRun(task))) throw new Error('running task cannot be moved')
+        if (!forcingDone && (task.status === 'running' || openRunBlocks)) throw new Error('running task cannot be moved')
         // The state machine decides whether this move exists at all: an
         // unconfigured transition is refused here, not in the browser. The
         // browser validates its drop targets against the same machine.
@@ -1982,7 +2007,11 @@ export class HostTaskLedger {
           throw new Error('this card is the source of a follow-up; it cannot run or release its branch while the follow-up exists')
         }
         const released = merges ? this.beginRelease(task, now, initiator) : undefined
-        const gitted = merges ? task : this.transitionGit(task, transition, now)
+        // The queued test (if any) is dropped before the transition's actions
+        // build on the card, so a move that opens a run (`testing → running`)
+        // never ends up with two open executions.
+        const baseTask = this.supersedeQueuedTest(task, now)
+        const gitted = merges ? baseTask : this.transitionGit(baseTask, transition, now)
         // The target state over the transition's git hooks: the base the
         // transition's actions build on, in their configured order. A queued
         // release (`pending`) leaves the card exactly where it is; its background
@@ -2003,7 +2032,7 @@ export class HostTaskLedger {
         // the implementation continues this very session. A card that already
         // has a clarification conversation re-enters it instead, so a round trip
         // never mints a second session.
-        if (actions.includes('clarify') && !hasOpenExecution(task)) {
+        if (actions.includes('clarify') && !hasOpenExecution(baseTask)) {
           const opened = startExecution(next, now, crypto.randomUUID(), initiator, 'clarify')
           next = opened.task
           clarification = { task: next, execution: opened.execution }
@@ -2072,8 +2101,12 @@ export class HostTaskLedger {
           if (task.archivedAt !== undefined) throw new Error('archived task is read-only')
           // The same "move onto Done is always allowed" rule as the single
           // move: every open run in the batch is settled as cancelled below.
+          // A queued test run of the `testing` column is dropped by the move as
+          // well, exactly like a single-card drag (see the single `move`).
+          const queuedTest = queuedTestExecution(task)
+          const openRunBlocks = hasOpenRun(task) && queuedTest === undefined
           const forcingDone = action.status === 'done' && (task.status === 'running' || hasOpenRun(task))
-          if (!forcingDone && (task.status === 'running' || hasOpenRun(task))) throw new Error('running task cannot be moved')
+          if (!forcingDone && (task.status === 'running' || openRunBlocks)) throw new Error('running task cannot be moved')
           const transition = this.machine.transition(task.status, action.status, 'manual')
           if (transition === undefined) throw new Error(`invalid state transition: ${task.status} → ${action.status}`)
           // A batch never opens executions: the runner owns the single run
@@ -2083,10 +2116,10 @@ export class HostTaskLedger {
           // otherwise sit in the clarification column without its round.
           if ((transition.actions ?? []).includes('run')) throw new Error('batch move cannot start executions')
           if ((transition.actions ?? []).includes('clarify')) throw new Error('batch move cannot start the clarification round')
-          return { task, transition, forcingDone }
+          return { task, transition, forcingDone, queuedTest }
         })
         const moved = new Map<string, TaskRecord>()
-        for (const { task, transition, forcingDone } of batch) {
+        for (const { task, transition, forcingDone, queuedTest } of batch) {
           const actions = transition.actions ?? []
           const merges = action.status === 'done' && transition.git !== false && actions.includes('git.mergeBranch') && !forcingDone
           if (merges && this.followUpLocked(task.id)) {
@@ -2101,7 +2134,10 @@ export class HostTaskLedger {
             moved.set(task.id, this.beginRelease(task, now, initiator).task)
             continue
           }
-          let target = withStatus(this.transitionGit(task, transition, now), action.status, now)
+          // The queued test run (if any) is dropped before the status change is
+          // written, so no run is left behind for a card that has left `testing`.
+          const base = this.supersedeQueuedTest(task, now)
+          let target = withStatus(this.transitionGit(base, transition, now), action.status, now)
           if (action.status === 'done' && !merges) {
             for (const execution of task.executions) {
               if (execution.endedAt !== undefined) continue

@@ -6,7 +6,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
-import { collectKnownTags, compareWipOrder, hasFollowUpLock, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason } from '../../core/tasks.ts'
+import { collectKnownTags, compareWipOrder, hasFollowUpLock, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason, type WipLimits } from '../../core/tasks.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
 import { columnStepOf, transitionBlockerOf, type QueuedTransition, type StepBlocker, type TransitionBlocker, type TransitionError } from '../../core/transitions.ts'
 import { t } from '../locales.ts'
@@ -58,21 +58,20 @@ function waitingTooltip(reason: WaitingReason, workspaceTitles: ReadonlyMap<stri
 
 /**
  * The notice for a drop on the run column whose cards cannot start yet, or
- * undefined when at least one of them starts now. The clarification and review
- * columns are WIP-free, so only the cards whose lane is held by another run
- * count; they
+ * undefined when at least one of them starts now. The clarification column is
+ * WIP-free, so only the cards whose lane is held by another run count; they
  * keep their place in the lane's FIFO queue and start on their own. Exported
  * for the test that pins the wording against a blocked lane.
  */
 export function queuedDropNotice(
   tasks: readonly TaskRecord[],
   allTasks: readonly TaskRecord[],
-  maxConcurrentRuns: number,
+  limits: WipLimits,
   workspaceTitles: ReadonlyMap<string, string>,
 ): string | undefined {
   const blockers = new Set<string>()
   for (const task of tasks) {
-    const reason = waitingReasonFor(task, allTasks, maxConcurrentRuns)
+    const reason = waitingReasonFor(task, allTasks, limits)
     if (reason === undefined) return undefined
     blockers.add(reason.lane === '' ? reason.blockerTitle : `${reason.blockerTitle} (${workspaceTitles.get(reason.lane) ?? reason.lane})`)
   }
@@ -113,15 +112,19 @@ function isRunColumn(machine: BoardMachine, status: TaskStatus): boolean {
 
 /**
  * The cards of one column in the order the board renders them. The
- * runner-owned column reads as a work queue — the card being executed now sits
- * on top, the runs still waiting for a WIP slot follow in arrival order (the
- * card dragged in last sits at the bottom) — every other column keeps the
- * ledger's order. Rendering and the Shift-click range share this, so the two
- * never disagree about what "between two cards" means.
+ * runner-owned column and the `testing` column read as work queues — each with
+ * its own per-lane limit: the card being executed now sits on top, the runs
+ * still waiting for a slot follow in arrival order (the card that joined last
+ * sits at the bottom) — every other column keeps the ledger's order. Rendering
+ * and the Shift-click range share this, so the two never disagree about what
+ * "between two cards" means.
  */
 function columnTasks(machine: BoardMachine, visible: readonly TaskRecord[], status: TaskStatus): TaskRecord[] {
   const tasks = visible.filter(task => task.status === status)
-  if (isRunColumn(machine, status)) tasks.sort(compareWipOrder)
+  // `testing` owns the test queue (`maxTestingRuns`) like the run column owns
+  // the implementation queue (`maxConcurrentRuns`): both show the card that is
+  // executing now first and the waiting ones in arrival order.
+  if (isRunColumn(machine, status) || status === 'testing') tasks.sort(compareWipOrder)
   return tasks
 }
 
@@ -336,13 +339,18 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     () => new Map(projects.map(workspace => [workspace.workspaceId, workspace.title])),
     [projects],
   )
-  // Why a card is waiting for its lane's WIP slot: it carries an open run that
-  // has not attached a session yet, so another card of the same lane holds the
-  // slot. The Host decides whether a launch starts; this only explains it. The
-  // resolved text is identical for every card of the same blocker, so a card
-  // re-renders only when the blocker actually changes (memoized, above).
+  // Why a card is waiting for its lane's slot: it carries an open run that has
+  // not attached a session yet, so another card of the same lane holds that
+  // slot. Implementation runs wait for `maxConcurrentRuns`, test runs of the
+  // `testing` column for the lane's own `maxTestingRuns`. The Host decides
+  // whether a launch starts; this only explains it. The resolved text is
+  // identical for every card of the same blocker, so a card re-renders only
+  // when the blocker actually changes (memoized, above).
   const waitingReasonById = useMemo(() => {
-    const maxConcurrentRuns = snapshot.host?.maxConcurrentRuns ?? 1
+    const limits: WipLimits = {
+      maxConcurrentRuns: snapshot.host?.maxConcurrentRuns ?? 1,
+      maxTestingRuns: snapshot.host?.maxTestingRuns ?? 1,
+    }
     const reasons = new Map<string, WaitingReason>()
     for (const task of visible) {
       // Only a card the runner owns (open run, no session attached yet) waits in
@@ -352,11 +360,11 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       const latest = task.executions[task.executions.length - 1]
       if (latest === undefined || latest.endedAt !== undefined || latest.kind === 'clarify') continue
       if (latest.sessionId !== undefined) continue
-      const reason = waitingReasonFor(task, snapshot.tasks, maxConcurrentRuns)
+      const reason = waitingReasonFor(task, snapshot.tasks, limits)
       if (reason !== undefined) reasons.set(task.id, reason)
     }
     return reasons
-  }, [visible, pendingSet, snapshot.host?.maxConcurrentRuns, snapshot.tasks])
+  }, [visible, pendingSet, snapshot.host?.maxConcurrentRuns, snapshot.host?.maxTestingRuns, snapshot.tasks])
   // The reason as display text. Keyed off the reason map, so it is recomputed
   // only when a card actually starts or stops waiting — not on every poll.
   const waitingTooltipById = useMemo(() => {
@@ -612,7 +620,10 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       // queues the card(s) instead of starting them: say so, with the blocker's
       // name, right where the drop happened. The card itself shows the same
       // reason while it waits.
-      const queueNotice = queuedDropNotice(queueable, snapshot.tasks, snapshot.host?.maxConcurrentRuns ?? 1, workspaceTitles)
+      const queueNotice = queuedDropNotice(queueable, snapshot.tasks, {
+        maxConcurrentRuns: snapshot.host?.maxConcurrentRuns ?? 1,
+        maxTestingRuns: snapshot.host?.maxTestingRuns ?? 1,
+      }, workspaceTitles)
       if (queueNotice !== undefined) setQueuedNotice(queueNotice)
     }
     const moving = queueable.map(task => task.id)
@@ -622,7 +633,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       return
     }
     void controller.moveTasks(moving, columnStatus).then(moved => { if (moved) clearSelection() })
-  }, [clearSelection, controller, machine, snapshot.host?.maxConcurrentRuns, snapshot.host?.sessionDefaultPermission, snapshot.tasks, workspaceTitles])
+  }, [clearSelection, controller, machine, snapshot.host?.maxConcurrentRuns, snapshot.host?.maxTestingRuns, snapshot.host?.sessionDefaultPermission, snapshot.tasks, workspaceTitles])
   // Bulk archive/delete of the marked cards: both reuse the per-card
   // controller actions and apply them to the bulk-actionable subset, so a card
   // with a Host action in flight stays behind.

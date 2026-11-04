@@ -11,7 +11,7 @@
  */
 import { requiresPermissionConfirmation, type TaskPermission } from './handover.ts'
 import type { StateMachine } from './state-machine.ts'
-import { hasOpenRun, isTaskPaused, type TaskRecord, type TaskStatus } from './tasks.ts'
+import { hasOpenRun, isTaskPaused, queuedTestExecution, type TaskRecord, type TaskStatus } from './tasks.ts'
 
 /**
  * Why a card cannot take a manual transition right now:
@@ -79,8 +79,10 @@ export function transitionBlockerOf(
   if (!forcingDone && task.status === 'running') return 'running'
   // A clarify run deliberately does not block moves: it owns no branch and the
   // Host lets the card move on while its round is open. Only an implementation
-  // run does.
-  if (!forcingDone && hasOpenRun(task)) return isTaskPaused(task) ? 'paused' : 'running'
+  // run does. The one exception is a test run that is still waiting for the
+  // `testing` column's slot: it owns no conversation either, so the Host lets
+  // the move discard it (a test run with a session blocks like any other run).
+  if (!forcingDone && hasOpenRun(task) && queuedTestExecution(task) === undefined) return isTaskPaused(task) ? 'paused' : 'running'
   const transition = machine.transition(task.status, to, 'manual')
   if (transition === undefined) return 'invalid'
   if (followUpLocked && ((transition.actions ?? []).includes('run')

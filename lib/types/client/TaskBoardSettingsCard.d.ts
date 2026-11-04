@@ -18,6 +18,8 @@ export interface TaskBoardSettings {
     preventIdleSleep?: boolean;
     /** WIP limit per workspace: how many implementation runs of one workspace may hold a session at once (default 1); a clarification run holds no slot. */
     maxConcurrentRuns?: number;
+    /** Test limit per workspace: how many test runs of the Testing column may hold a session at once (default 1); separate from the implementation slot, a clarification run holds no slot. */
+    maxTestingRuns?: number;
     /** Done-column limit: on-board Done cards before the oldest is archived (default 20). */
     maxDoneTasks?: number;
     /** Compose file a card's task environment is brought up from (empty: no task containers). */
@@ -59,6 +61,8 @@ export interface TaskBoardSettingsCardState extends CardShell {
     preventIdleSleep: CardFieldState;
     /** WIP limit draft. */
     maxConcurrentRuns: CardFieldState;
+    /** Test-limit draft. */
+    maxTestingRuns: CardFieldState;
     /** Done-column limit draft. */
     maxDoneTasks: CardFieldState;
     /** Task-environment compose file draft. */

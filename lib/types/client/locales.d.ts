@@ -287,6 +287,8 @@ export declare const zh: {
     'settings.preventIdleSleepHint': string;
     'settings.maxConcurrentRuns': string;
     'settings.maxConcurrentRunsHint': string;
+    'settings.maxTestingRuns': string;
+    'settings.maxTestingRunsHint': string;
     'settings.maxDoneTasks': string;
     'settings.composeFile': string;
     'settings.composeFileHint': string;
