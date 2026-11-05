@@ -213,6 +213,7 @@ describe('follow-up card badge', () => {
         onOpenSession={() => {}}
         onTogglePause={() => {}}
         onStopSession={() => {}}
+        onRelease={() => {}}
         onStep={() => {}}
       />,
     )

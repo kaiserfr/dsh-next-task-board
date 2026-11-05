@@ -45,11 +45,16 @@ export declare function isCardDraggable(task: TaskRecord): boolean;
  * must end first (`running`). Only the drag onto Done may bypass the run.
  */
 export declare function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean;
-declare function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
+declare function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
     task: TaskRecord;
     pending: boolean;
     /** A merge release of this card runs in the Host's background. */
     releasePending?: boolean;
+    /**
+     * The Host would refuse the release (the card's branch belongs to a
+     * follow-up): the card then offers no merge control of its own.
+     */
+    releaseLocked?: boolean;
     /** The card's waiting transition intent (one per card), if any. */
     pendingTransition?: QueuedTransition;
     /** The last discarded/failed transition, until the card's next action. */
@@ -91,6 +96,8 @@ declare function TaskCardInner({ task, pending, releasePending, pendingTransitio
     onTogglePause: (task: TaskRecord) => void;
     /** Stop the conversation right now (the Host says it is running). */
     onStopSession: (task: TaskRecord) => void;
+    /** Ask to release the card for the merge (the Host's `approve-merge`). */
+    onRelease: (task: TaskRecord) => void;
     /** Fire the manual transition into the adjacent column (same as a drop). */
     onStep: (taskId: string, status: TaskStatus) => void;
     /** Whether the card's conversation is running right now (derived by the Host). */

@@ -134,11 +134,16 @@ function CardStepButton({ taskId, direction, target, blocker, disabled, queued, 
   )
 }
 
-function TaskCardInner({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
+function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** A merge release of this card runs in the Host's background. */
   releasePending?: boolean
+  /**
+   * The Host would refuse the release (the card's branch belongs to a
+   * follow-up): the card then offers no merge control of its own.
+   */
+  releaseLocked?: boolean
   /** The card's waiting transition intent (one per card), if any. */
   pendingTransition?: QueuedTransition
   /** The last discarded/failed transition, until the card's next action. */
@@ -180,6 +185,8 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
   onTogglePause: (task: TaskRecord) => void
   /** Stop the conversation right now (the Host says it is running). */
   onStopSession: (task: TaskRecord) => void
+  /** Ask to release the card for the merge (the Host's `approve-merge`). */
+  onRelease: (task: TaskRecord) => void
   /** Fire the manual transition into the adjacent column (same as a drop). */
   onStep: (taskId: string, status: TaskStatus) => void
   /** Whether the card's conversation is running right now (derived by the Host). */
@@ -224,6 +231,17 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
   // from the card's own git/merge records, so a card never claims a merge it did
   // not record; undefined on cards with nothing to say about a merge.
   const merge = mergeStateOf(task)
+  // The card's own way to the merge (next to the detail's release button and
+  // the drop on Done): the Host's `approve-merge`, offered by the card exactly
+  // when the Host would really accept it — the card stands in `tested`, no
+  // release of it runs in the background, and its branch is not owned by a
+  // follow-up. A card without a branch is offered too: the Host then moves it to
+  // Done without merging, which is what the detail's button does as well.
+  const releasable = !archived && !pending && task.status === 'tested'
+    && releasePending !== true && releaseLocked !== true && merge !== 'resolving'
+    // The Host refuses a release while a run of the card is still open (a
+    // paused one included): the control then has nothing to offer.
+    && !openRun && !paused
   // One-column steps: the board resolved the neighbor and its blocker. A step
   // already queued for that very target is disabled like the detail's button;
   // a different waiting target stays selectable (the last click wins per card).
@@ -258,6 +276,7 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
         data-paused={paused || undefined}
         data-has-session={sessionId !== undefined || undefined}
         data-has-pause={showPauseControl || undefined}
+        data-releasable={releasable || undefined}
         data-has-step={!archived || undefined}
         data-answering={answering || undefined}
         data-selected={selected || undefined}
@@ -428,6 +447,27 @@ function TaskCardInner({ task, pending, releasePending, pendingTransition, trans
           onDoubleClick={(event) => { event.stopPropagation() }}
         >
           <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>
+        </button>
+      )}
+      {releasable && (
+        // The card's own merge entry: the same Host action as the detail's
+        // "Freigeben (Merge)" and the drop on Done — deliberately no second
+        // implementation, and the confirmation the board opens before it stays
+        // the same dialog. It sits in the corner the question symbol uses, and
+        // the two can never show at once: the question watch follows cards with
+        // an open run and the clarification column, while this control exists
+        // only in `tested`. A sibling button like pause and the chevrons — a
+        // button may not nest in a button — so the card's own click never fires.
+        <button
+          type="button"
+          className={css.cardRelease}
+          data-dsh-part="card-release"
+          title={`${t('review.release')} — ${t('review.releaseHint')}`}
+          aria-label={t('review.release')}
+          onClick={(event) => { event.stopPropagation(); onRelease(task) }}
+          onDoubleClick={(event) => { event.stopPropagation() }}
+        >
+          <span aria-hidden="true">⇥</span>
         </button>
       )}
       {!archived && (
