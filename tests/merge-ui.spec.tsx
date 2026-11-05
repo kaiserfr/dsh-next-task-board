@@ -86,8 +86,49 @@ function badgeOf(tasks: TaskRecord[], id = 'card-1'): HTMLElement | null {
     ?? container.querySelector('[data-dsh-part="card-merge"]')
 }
 
-/** A detail render whose controller records the release call. */
-function detail(task: TaskRecord): { container: HTMLElement; calls: Record<string, unknown[]> } {
+/**
+ * A board render of the given cards whose controller records the release call.
+ * `options` patches the derived Host fields the card's glyph depends on.
+ */
+function boardOf(tasks: TaskRecord[], options: { pending?: string[]; releasePending?: boolean } = {}): { container: HTMLElement; calls: Record<string, unknown[]> } {
+  const calls: Record<string, unknown[]> = {}
+  const state: ControllerSnapshot = {
+    tasks,
+    boardOpen: true,
+    archiveView: false,
+    selectedTaskId: undefined,
+    executionOptions: { workspaces: [], presets: [] },
+    pendingTaskIds: options.pending ?? [],
+    host: {
+      revision: 1,
+      scheduler: { timeZone: 'UTC' },
+      power: { platform: 'linux', phase: 'disabled', enabled: false, runningSessions: 0, armedSchedules: 0, sessionStateKnown: true },
+      reviewPlans: {},
+      ...(options.releasePending === true ? { pendingReleases: { 'card-1': { startedAt: 1 } } } : {}),
+    },
+  }
+  const controller = {
+    getSnapshot: () => state,
+    subscribe: () => () => {},
+    closeBoard: () => {},
+    toggleArchiveView: () => {},
+    retryHostSync: async () => {},
+    openTask: (id: string) => { calls.openTask = [id] },
+    moveTask: () => {},
+    moveTasks: async () => false,
+    openSession: () => {},
+    dismissSessionOpenError: () => {},
+    approveMerge: async (id: string) => { calls.approveMerge = [id]; return true },
+  } as unknown as BoardController
+  return { container: render(<TaskBoard controller={controller} />), calls }
+}
+
+/** The card's own release glyph, if the board renders one. */
+function releaseGlyphOf(container: HTMLElement): Element | null {
+  return container.querySelector('[data-dsh-part="card-release"]')
+}
+
+/** A detail render whose controller records the release call. */function detail(task: TaskRecord): { container: HTMLElement; calls: Record<string, unknown[]> } {
   const calls: Record<string, unknown[]> = {}
   const state: ControllerSnapshot = {
     tasks: [task],
@@ -191,5 +232,65 @@ describe('release control', () => {
   it('renders nothing for a failed card that never was released', () => {
     const { container } = detail(card({ status: 'failed', git: undefined }))
     expect(container.querySelector('[data-dsh-part="review"]')).toBeNull()
+  })
+})
+
+describe('card release glyph', () => {
+  it('offers the merge on a tested card, asks first and releases after the confirmation', () => {
+    const { container, calls } = boardOf([card()])
+    const glyph = releaseGlyphOf(container)
+    expect(glyph).not.toBeNull()
+    expect(glyph!.getAttribute('aria-label')).toBe(t('review.release'))
+    // The card reserves its left edge for the glyph (`[data-releasable]` in the
+    // stylesheet), so the title never runs under it on a narrow card.
+    expect(container.querySelector('[data-dsh-part="card"]')!.getAttribute('data-releasable')).toBe('true')
+    // The glyph acts on this card, not on the board: the card's own click (which
+    // would open the detail in this render) must never also fire.
+    click(glyph)
+    expect(calls.openTask).toBeUndefined()
+    expect(calls.approveMerge).toBeUndefined()
+    const dialog = document.querySelector('[role="alertdialog"]')
+    expect(dialog).not.toBeNull()
+    expect(dialog!.textContent).toContain('main')
+    click([...dialog!.querySelectorAll('button')].find(button => button.textContent === t('review.releaseConfirm')))
+    expect(calls.approveMerge).toEqual(['card-1'])
+  })
+
+  it('merges nothing when the confirmation is cancelled', () => {
+    const { container, calls } = boardOf([card()])
+    click(releaseGlyphOf(container))
+    click([...document.querySelectorAll('[role="alertdialog"] button')].find(button => button.textContent === t('delete.cancel')))
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(calls.approveMerge).toBeUndefined()
+  })
+
+  it('offers the merge on a tested card without a branch too', () => {
+    const { container } = boardOf([card({ git: undefined })])
+    expect(releaseGlyphOf(container)).not.toBeNull()
+  })
+
+  it('is absent in every column where the Host would refuse it', () => {
+    for (const status of ['backlog', 'clarification', 'running', 'testing', 'failed', 'done'] as const) {
+      const { container } = boardOf([card({ status })])
+      expect(releaseGlyphOf(container), status).toBeNull()
+    }
+    const archived = boardOf([card({ archivedAt: 1 })])
+    expect(releaseGlyphOf(archived.container)).toBeNull()
+  })
+
+  it('is absent while the release runs and while the card is already in flight', () => {
+    expect(releaseGlyphOf(boardOf([card()], { releasePending: true }).container)).toBeNull()
+    expect(releaseGlyphOf(boardOf([card()], { pending: ['card-1'] }).container)).toBeNull()
+  })
+
+  it('is absent while a follow-up owns the branch', () => {
+    const followUp = card({
+      id: 'card-2',
+      title: 'Follow-up',
+      status: 'backlog',
+      git: undefined,
+      followUp: { sourceTaskId: 'card-1', title: 'Card', description: '', prompt: 'p', createdAt: 0 },
+    })
+    expect(releaseGlyphOf(boardOf([card(), followUp]).container)).toBeNull()
   })
 })

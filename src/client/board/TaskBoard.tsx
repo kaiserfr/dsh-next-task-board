@@ -174,11 +174,13 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onStep, sessionRunning }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** The Host is merging this card in the background. */
   releasePending?: boolean
+  /** The card's branch belongs to a follow-up: no release from the card. */
+  releaseLocked?: boolean
   pendingTransition?: QueuedTransition
   transitionError?: TransitionError
   timeZone?: string
@@ -210,6 +212,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   onOpenSession: (sessionId: string) => void
   onTogglePause: (task: TaskRecord) => void
   onStopSession: (task: TaskRecord) => void
+  /** Ask to release this card for the merge (the Host's `approve-merge`). */
+  onRelease: (task: TaskRecord) => void
   /** Fire the manual transition into the adjacent column (same as a drop). */
   onStep: (id: string, status: TaskStatus) => void
   /** The Host says this card's conversation is running right now. */
@@ -224,6 +228,7 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       task={task}
       pending={pending}
       releasePending={releasePending}
+      releaseLocked={releaseLocked}
       pendingTransition={pendingTransition}
       transitionError={transitionError}
       timeZone={timeZone}
@@ -246,6 +251,7 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       onOpenSession={onOpenSession}
       onTogglePause={onTogglePause}
       onStopSession={onStopSession}
+      onRelease={onRelease}
       onStep={onStep}
       sessionRunning={sessionRunning}
     />
@@ -281,6 +287,10 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // Bulk delete asks first (the action is irreversible); bulk archive does not,
   // exactly like the per-card buttons in the detail view.
   const [confirmDeleteSelection, setConfirmDeleteSelection] = useState(false)
+  // A card's own release (the glyph on the card) asks first, with the very same
+  // dialog the detail's "Freigeben (Merge)" opens: merging ends the review, so
+  // the board never does it on one click. `base` is the branch the dialog names.
+  const [confirmRelease, setConfirmRelease] = useState<{ taskId: string; base: string } | undefined>(undefined)
   // The Shift range starts at the anchor: the card the last plain or Ctrl click
   // landed on. A ref, not state, so marking a card never changes the memoized
   // cards' props — only the cards whose `selected` flag flips re-render.
@@ -518,6 +528,13 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const stopSession = useCallback((task: TaskRecord): void => {
     controller.stopSession(task.id)
   }, [controller])
+  // The card's own merge entry only opens the board's confirmation; the Host
+  // action itself goes out after the human confirmed, exactly like the detail's
+  // release button (same dialog, same `approve-merge`, no optimistic move).
+  const requestRelease = useCallback((task: TaskRecord): void => {
+    if (task.archivedAt !== undefined || task.status !== 'tested') return
+    setConfirmRelease({ taskId: task.id, base: task.git?.base ?? 'main' })
+  }, [])
   // The bulk pause is deliberately global (not filter-scoped, unlike the
   // selection actions): "pause all running work" must not silently skip cards
   // the current filter or project pick hides. Paused cards come back through
@@ -931,6 +948,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                   onOpenSession={openSession}
                   onTogglePause={togglePause}
                   onStopSession={stopSession}
+                  onRelease={requestRelease}
                   onStep={stepTask}
                   sessionRunning={snapshot.host?.runningSessions?.[task.id] === true}
                 />
@@ -982,6 +1000,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                         task={task}
                         pending={pendingSet.has(task.id)}
                         releasePending={snapshot.host?.pendingReleases?.[task.id] !== undefined}
+                        releaseLocked={followUpLocked}
                         pendingTransition={pendingTransitionById.get(task.id)}
                         transitionError={transitionErrorById[task.id]}
                         timeZone={snapshot.host?.scheduler.timeZone}
@@ -1006,6 +1025,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                         onOpenSession={openSession}
                         onTogglePause={togglePause}
                         onStopSession={stopSession}
+                        onRelease={requestRelease}
                         onStep={stepTask}
                         sessionRunning={snapshot.host?.runningSessions?.[task.id] === true}
                       />
@@ -1039,6 +1059,22 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
           danger
           onCancel={() => { setConfirmDeleteSelection(false) }}
           onConfirm={deleteSelection}
+        />
+      )}
+      {confirmRelease !== undefined && (
+        // The card's release glyph and the detail's release button open the same
+        // dialog and the same Host action; the board owns it because the glyph
+        // only reports the click.
+        <ConfirmDialog
+          title={t('review.releaseTitle')}
+          message={t('review.releaseMessage', { base: confirmRelease.base })}
+          confirmLabel={t('review.releaseConfirm')}
+          onCancel={() => { setConfirmRelease(undefined) }}
+          onConfirm={() => {
+            const id = confirmRelease.taskId
+            setConfirmRelease(undefined)
+            void controller.approveMerge(id)
+          }}
         />
       )}
     </div>

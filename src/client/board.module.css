@@ -659,6 +659,51 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   .cardQuestion { animation: none; }
 }
 
+/* The card's own release for the merge ("Freigeben (Merge)"): the same corner,
+   ring and 18px size as the waiting-question symbol — the two never show at
+   once, because the question watch follows cards with an open run and the
+   clarification column while this control exists only in `tested` — but in the
+   business tone, since releasing is the human's decision, not a wait. It is a
+   sibling button like pause and the chevrons (a button may not nest in a
+   button), so the card stays one click target for the detail. The corner is
+   reserved through [data-releasable], so the title, tags and meta chips never
+   run under it even on a one-line card; the rule sits after the chevron
+   reservation above so it wins over the 26px edge. */
+.card[data-releasable] {
+  padding-left: 30px;
+}
+
+.card[data-has-step][data-releasable] {
+  padding-left: 30px;
+}
+
+.cardRelease {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-state-business-primary);
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-state-business-primary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.cardRelease:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
 .cardRunningLabel {
   font-size: 11px;
   color: var(--dsw-alias-state-warn-primary);
@@ -1457,6 +1502,7 @@ textarea.input::-webkit-resizer {
 .cardSession:focus-visible,
 .cardPause:focus-visible,
 .cardQuestion:focus-visible,
+.cardRelease:focus-visible,
 .cardStep:focus-visible,
 .primaryButton:focus-visible,
 .ghostButton:focus-visible,
