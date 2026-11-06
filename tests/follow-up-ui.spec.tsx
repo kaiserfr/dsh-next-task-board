@@ -129,6 +129,13 @@ describe('follow-up detail and modal', () => {
     expect(title.value).toBe('')
     expect(field(container, t('new.descriptionPlaceholder')).value).toBe('')
     expect(field(container, t('new.promptPlaceholder')).value).toBe('')
+    // A follow-up is a continuation by definition: the Host forces the reuse
+    // flag, so the dialog shows it fixed instead of offering a meaningless
+    // choice (the created card always continues the source conversation).
+    const reuse = container.querySelector('[data-dsh-part="exec-reuse-session"]') as HTMLInputElement
+    expect(reuse.checked).toBe(true)
+    expect(reuse.disabled).toBe(true)
+    expect(container.textContent).toContain(t('exec.reuseSessionFollowUpHint'))
 
     const submit = [...container.querySelectorAll('button')].find(item => item.textContent === t('new.submit'))
     expect(submit).toBeDefined()
@@ -145,6 +152,7 @@ describe('follow-up detail and modal', () => {
       description: '',
       prompt: '',
       followUpOf: 'card-1',
+      reuseSession: true,
     }))
   })
 

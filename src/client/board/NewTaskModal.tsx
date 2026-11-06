@@ -255,7 +255,7 @@ export function NewTaskModal({ controller, onClose, initialTask, followUpSource,
       mode: mode === '' ? undefined : mode,
       permission: permission === '' ? undefined : permission as TaskPermission,
       model: model === '' ? undefined : model,
-      ...(reuseSession ? { reuseSession: true } : {}),
+      ...(isFollowUp || reuseSession ? { reuseSession: true } : {}),
       ...(skipTests ? { skipTests: true } : {}),
       ...(tagList.length > 0 ? { tags: tagList } : {}),
       schedule: scheduleEnabled ? { enabled: true, cron: scheduleCron.trim() } : undefined,
@@ -414,15 +414,22 @@ export function NewTaskModal({ controller, onClose, initialTask, followUpSource,
           </select>
         </label>
 
+        {/* A follow-up is a continuation by definition: the Host forces the flag
+            on, so the dialog shows it fixed instead of pretending it is a
+            choice the user could turn off here. */}
         <label className={css.scheduleToggle}>
           <input
             type="checkbox"
-            checked={reuseSession}
+            data-dsh-part="exec-reuse-session"
+            checked={isFollowUp ? true : reuseSession}
+            disabled={isFollowUp}
             onChange={event => { setReuseSession(event.target.checked) }}
           />
           <span>{t('exec.reuseSession')}</span>
         </label>
-        <p className={css.detailText}>{t('exec.reuseSessionHint')}</p>
+        <p className={css.detailText}>
+          {isFollowUp ? t('exec.reuseSessionFollowUpHint') : t('exec.reuseSessionHint')}
+        </p>
 
         <label className={css.scheduleToggle}>
           <input

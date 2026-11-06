@@ -270,6 +270,7 @@ export declare const zh: {
     'exec.model.unknown': string;
     'exec.reuseSession': string;
     'exec.reuseSessionHint': string;
+    'exec.reuseSessionFollowUpHint': string;
     'exec.skipTests': string;
     'exec.skipTestsHint': string;
     'card.skipTests': string;
