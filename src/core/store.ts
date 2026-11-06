@@ -361,6 +361,13 @@ function normalizeReview(value: unknown): TaskReview | undefined {
     task.workspaceId = normalizeTargetId(row.workspaceId)
     task.mode = normalizeTargetId(row.mode)
     task.archivedAt = typeof row.archivedAt === 'number' && Number.isFinite(row.archivedAt) ? row.archivedAt : undefined
+    // The warm-cache release marker is meaningless without an archive stamp
+    // (a restored card has none), so a stray value from a future version is
+    // dropped instead of freezing the card's resources.
+    task.warmReleasedAt = task.archivedAt !== undefined
+      && typeof row.warmReleasedAt === 'number' && Number.isFinite(row.warmReleasedAt)
+      ? row.warmReleasedAt
+      : undefined
     // The Done-column FIFO key: kept for a card in `done`, backfilled from
     // `updatedAt` for a legacy row, and cleared on every other status so a card
     // that left Done cannot resurface with a stale queue position.

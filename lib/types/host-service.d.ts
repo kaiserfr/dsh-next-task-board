@@ -173,6 +173,14 @@ export declare class TaskBoardHostService {
     private readonly orphanScans;
     /** Sessions the watchdog already explained, so one orphan is not toasted every 5 s. */
     private readonly orphanNoticed;
+    /**
+     * Warm-cache release of archived cards: when the Host last tried to stop a
+     * released conversation (throttles the retry) and which ones are confirmed to
+     * be at rest. Memory only — the ledger keeps the released marker, so a Host
+     * restart re-checks each released session exactly once.
+     */
+    private readonly warmSessionStops;
+    private readonly warmSessionStopped;
     /** Card id → its conversation is running right now (roster, derived). */
     private runningSessions;
     /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
@@ -516,11 +524,29 @@ export declare class TaskBoardHostService {
      */
     private reconcileReview;
     /**
-     * Retry releasing the worktree of an archived card. Archiving releases it
-     * right away; this covers the git that refused then (a locked worktree, an
-     * open file) and cards archived before archiving owned that job. A failure is
-     * logged once per card and retried silently on every poll until the directory
-     * is gone — a locked worktree is never unlocked behind the human's back.
+     * Release the warm cache of archived cards whose retention window passed and
+     * that no card on the board references any more (the ledger's derived
+     * reference count decides; see `core/warm-cache.ts`). The release stamps the
+     * card first, because the marker is what makes the removal retryable and what
+     * tells the orphan watchdog that the conversation may now be stopped; the
+     * worktree is then removed by {@link reconcileArchivedWorktrees} (which runs
+     * right after this pass) and the session is stopped here.
+     *
+     * The session stop is the only part that can refuse: the runtime may be
+     * unreachable or slow, so a failed stop is retried every
+     * {@link WARM_STOP_RETRY_MS} until the conversation really is at rest. A
+     * session a card on the board references again (a restore, a live follow-up)
+     * drops out of the projection and is not stopped.
+     */
+    private reconcileWarmCache;
+    /**
+     * Retry releasing the worktree of an archived card whose warm cache was
+     * released. The release itself is the marker; this covers the git that
+     * refused then (a locked worktree, an open file) and cards released before
+     * the Host could run the removal. A failure is logged once per card and
+     * retried silently on every poll until the directory is gone — a locked
+     * worktree is never unlocked behind the human's back, and a card still inside
+     * its warm window is never touched.
      */
     private reconcileArchivedWorktrees;
     /**
@@ -648,7 +674,10 @@ export declare class TaskBoardHostService {
      * - a card **stopped from the card** (`stop-session`/`hard-stop`) is stopped
      *   right away and never adopted back; the 5 s pass handles it too, because
      *   there is no adoption quiet window left to protect;
-     * - a **done/archived** card has no work left to do;
+     * - a **done** card has no work left to do;
+     * - an **archived** card keeps its conversation warm for the retention window
+     *   (see `core/warm-cache.ts`) and is stopped only once the Host released that
+     *   warm cache — that release is the archive's own cleanup;
      * - any other settled card is stopped only if the human has **not** written in
      *   its chat since the run settled — a conversation the human just used is
      *   theirs, a conversation a background job woke is an orphan.
@@ -658,7 +687,7 @@ export declare class TaskBoardHostService {
      * @param sessions - the roster the poll already fetched.
      * @param options.settled - whether a plain settled card may be stopped. The
      *   5 s pass disables this so it cannot pre-empt the adoption quiet window;
-     *   paused/stopped/archived/done cards are stopped either way.
+     *   paused/stopped/released-archived/done cards are stopped either way.
      */
     private stopOrphanedSessions;
     private tickSchedule;

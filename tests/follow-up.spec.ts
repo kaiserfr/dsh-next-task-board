@@ -1,8 +1,7 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { GitWorkflow } from '../src/git-workflow.ts'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   canStartFollowUp,
   createTask,
@@ -294,21 +293,34 @@ describe('HostTaskLedger follow-up', () => {
     expect(() => testedLedger.applyRequest('move-clarify', { kind: 'move', taskId: 'src2', status: 'clarification' })).not.toThrow()
   })
 
-  it('protects the shared worktree while a follow-up is live and releases it with the last owner', async () => {
-    const released: string[] = []
-    const git = {
-      releaseWorktree: vi.fn(async (task: TaskRecord) => { released.push(task.id); return undefined }),
-    } as unknown as GitWorkflow
-    const ledger = ledgerWith([sourceTask()], { git })
+  it('keeps the shared worktree warm while a follow-up is live and until the window passed', () => {
+    const root = tempRoot()
+    const worktreePath = join(root, 'worktrees', 'src')
+    mkdirSync(worktreePath, { recursive: true })
+    const source = sourceTask({ git: { ...sourceTask().git!, worktreePath } })
+    let now = NOW
+    const ledger = new HostTaskLedger(tempRoot(), () => now)
+    ledger.applyRequest('seed', { kind: 'import', sourceId: 'test-seed', tasks: [source] })
     createFollowUp(ledger, 'fu', 'src')
 
+    // Archive the source: the checkout and the conversation stay warm, and the
+    // live follow-up references both, so even after the window nothing is
+    // released.
     ledger.applyRequest('archive-src', { kind: 'archive', taskId: 'src' })
-    await ledger.awaitCard('src')
-    expect(released).not.toContain('src')
+    now = NOW + 4 * 24 * 60 * 60 * 1000
+    expect(ledger.expiredWarmTaskIds(now)).toEqual([])
+    expect(ledger.archivedWorktrees()).toEqual([])
 
+    // Archiving the follow-up starts its own window; the shared resource lives
+    // until the youngest owner's window passed, because both cards name the very
+    // same checkout and conversation.
     ledger.applyRequest('archive-fu', { kind: 'archive', taskId: 'fu' })
-    await ledger.awaitCard('fu')
-    expect(released).toContain('fu')
+    expect(ledger.expiredWarmTaskIds(now + 2 * 24 * 60 * 60 * 1000)).toEqual([])
+    const expired = now + 3 * 24 * 60 * 60 * 1000
+    expect(ledger.expiredWarmTaskIds(expired).sort()).toEqual(['fu', 'src'])
+    ledger.markWarmReleased(ledger.expiredWarmTaskIds(expired), expired)
+    expect(ledger.archivedWorktrees().map(task => task.id).sort()).toEqual(['fu', 'src'])
+    expect(ledger.releasedWarmSessions()).toEqual(['session-src'])
   })
 
   it('refuses to delete a source while a live follow-up exists', () => {

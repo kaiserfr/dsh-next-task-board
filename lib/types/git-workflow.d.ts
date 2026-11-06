@@ -208,14 +208,15 @@ export declare class GitWorkflow {
      */
     abortUnresolvedMerge(task: TaskRecord): void;
     /**
-     * Release the card's own worktree: the card is archived (it left the board
-     * for good, so no run will ever need the directory again) or deleted. The
-     * directory was disposal-only from the start — the branch, the commits and
-     * the review stamp all survive in the repository. A git that refuses
-     * (untracked build artifacts a `--force` cannot take, a locked worktree, an
-     * open file) is reported instead of thrown: archiving never fails because of
-     * it, and the Host poll retries the removal on the archived card.
-     * @param task - the card leaving the board.
+     * Release the card's own worktree: the card is deleted, or its archived warm
+     * cache expired (the retention window passed and no card on the board
+     * references the checkout any more). The directory was disposal-only from the
+     * start — the branch, the commits and the review stamp all survive in the
+     * repository. A git that refuses (untracked build artifacts a `--force` cannot
+     * take, a locked worktree, an open file) is reported instead of thrown: the
+     * release never fails because of it, and the Host poll retries the removal on
+     * the archived card.
+     * @param task - the card whose checkout is being released.
      * @returns why git refused, or undefined when the directory is gone.
      */
     releaseWorktree(task: TaskRecord): Promise<string | undefined>;

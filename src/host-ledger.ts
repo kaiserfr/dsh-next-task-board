@@ -14,6 +14,7 @@ import { applyDeleteTask } from './core/use-cases/task-delete.ts'
 import { enforceDoneLimit } from './core/use-cases/done-limit.ts'
 import { applySetSchedule, applyScheduleNextRun } from './core/use-cases/task-schedule.ts'
 import { applyUpdateTask, canEditTaskContent, hasContentPatch } from './core/use-cases/task-update.ts'
+import { expiredWarmTaskIds as warmReleaseCandidates, warmSessionIds } from './core/warm-cache.ts'
 import { TASK_BOARD_LEGACY_SCHEMA_VERSION, TASK_BOARD_SCHEMA_VERSION, type TaskBoardAction, type TaskBoardNotice, type TaskBoardSchedulerSnapshot } from './protocol.ts'
 import { DEFAULT_SESSION_PERMISSION, requiresPermissionConfirmation, type TaskPermission } from './core/handover.ts'
 import { MergeConflictError, type GitWorkflow } from './git-workflow.ts'
@@ -538,6 +539,8 @@ export class HostTaskLedger {
     stopped: boolean
     status: TaskRecord['status']
     archived: boolean
+    /** Archived, but still inside the warm window: the conversation is kept. */
+    warm: boolean
   }> {
     const rows: Array<{
       taskId: string
@@ -550,6 +553,7 @@ export class HostTaskLedger {
       stopped: boolean
       status: TaskRecord['status']
       archived: boolean
+      warm: boolean
     }> = []
     // A card whose conversation a follow-up owns must never be watched: the
     // session's work now belongs to the follow-up card, so adopting/stopping it
@@ -586,6 +590,7 @@ export class HostTaskLedger {
         stopped: task.stoppedAt !== undefined && task.stoppedSessionId === sessionId,
         status: task.status,
         archived: task.archivedAt !== undefined,
+        warm: task.archivedAt !== undefined && task.warmReleasedAt === undefined,
       })
     }
     return rows
@@ -765,8 +770,9 @@ export class HostTaskLedger {
     this.maxDoneTasks = normalizeMaxDoneTasks(limit)
     const { tasks, archivedIds } = enforceDoneLimit(this.document.tasks, this.maxDoneTasks, this.now())
     if (archivedIds.length === 0) return
+    // Displacement archives (never deletes) the surplus; the archived cards keep
+    // their checkout and conversation warm until the retention window passed.
     this.document.tasks = [...tasks]
-    this.releaseArchivedWorktrees(archivedIds)
     this.commit()
   }
 
@@ -1098,40 +1104,70 @@ export class HostTaskLedger {
   }
 
   /**
-   * Release the worktrees of cards that just became archived — the explicit
-   * archive action and the Done-column limit alike. Archiving is the last board
-   * state a card reaches, so no later run needs the directory; the branch, its
-   * commits and the review stamp stay in the repository. A git that refuses
-   * (a locked worktree, an open file) never fails the archive: the Host poll
-   * retries it on the archived card ({@link HostTaskLedger.archivedWorktrees}).
-   * @param ids - cards that the archive just took off the board.
+   * Archived cards whose warm cache may be released now: the retention window
+   * after the archive stamp has passed for every card sharing their checkout or
+   * conversation, no card on the board references either resource, and no run of
+   * theirs is still open. A cheap projection for the Host poll — it never clones
+   * the document and is a pure read (`core/warm-cache.ts`).
+   * @param now - the instant to judge the windows against.
+   * @returns ids of the cards to stamp through {@link HostTaskLedger.markWarmReleased}.
    */
-  private releaseArchivedWorktrees(ids: readonly string[]): void {
-    for (const id of ids) {
-      const task = this.document.tasks.find(item => item.id === id)
-      if (task?.git === undefined) continue
-      // A follow-up shares the source card's checkout: while another live card
-      // still names that path, archiving one card must not yank the directory
-      // out from under it. The last owner releases it (the archived card's own
-      // retry in `archivedWorktrees` picks the job up once nobody shares it).
-      if (task.git.worktreePath !== undefined && this.worktreeSharedByOther(task.id, task.git.worktreePath)) continue
-      // The removal runs on the card's work chain, never in the action path. A
-      // refusal is not fatal: the Host poll's reconcileArchivedWorktrees retries
-      // it and logs it once (a locked worktree is never unlocked behind the
-      // human's back).
-      void this.enqueueCardWork(task.id, async () => {
-        await this.git?.releaseWorktree(task)
-      })
-    }
+  expiredWarmTaskIds(now: number = this.now()): string[] {
+    return warmReleaseCandidates(this.document.tasks, now)
   }
 
   /**
-   * Archived cards whose own worktree directory still exists, so the Host poll
-   * can retry releasing it: git may have refused at archive time, or the card
-   * was archived before archiving released the worktree. A runtime projection on
-   * the hot poll path — it never clones the document. Cards whose checkout is
-   * still named by a live card (a follow-up on the source's worktree) are left
-   * out: their removal is not this card's to do.
+   * Stamp the warm-cache release on archived cards and persist it in one write.
+   * The cards stay archived (their status, history and the recorded
+   * `worktreePath`/session ids are untouched); the marker only says that the
+   * retention expired, so the Host may remove the checkout and stop the session.
+   * A card that was restored in between is left alone.
+   * @param ids - ids from {@link HostTaskLedger.expiredWarmTaskIds}.
+   * @param now - release instant (ms epoch).
+   */
+  markWarmReleased(ids: readonly string[], now: number = this.now()): void {
+    const targets = new Set(ids)
+    if (targets.size === 0) return
+    let changed = false
+    this.document.tasks = this.document.tasks.map(task => {
+      if (!targets.has(task.id) || task.archivedAt === undefined || task.warmReleasedAt !== undefined) return task
+      changed = true
+      return { ...task, warmReleasedAt: now, updatedAt: now }
+    })
+    if (changed) this.commit()
+  }
+
+  /**
+   * Sessions of released archived cards that still need stopping: the Host
+   * stops them on the release, but a stop can fail (the runtime answers slowly
+   * or not at all) and the card is long archived, so the poll retries until the
+   * conversation is at rest. Sessions a card on the board references are left
+   * out — a restored card (or a live follow-up) is using them again.
+   */
+  releasedWarmSessions(): string[] {
+    const live = new Set<string>()
+    for (const task of this.document.tasks) {
+      if (task.archivedAt !== undefined) continue
+      for (const sessionId of warmSessionIds(task)) live.add(sessionId)
+    }
+    const sessions = new Set<string>()
+    for (const task of this.document.tasks) {
+      if (task.archivedAt === undefined || task.warmReleasedAt === undefined) continue
+      for (const sessionId of warmSessionIds(task)) {
+        if (!live.has(sessionId)) sessions.add(sessionId)
+      }
+    }
+    return [...sessions]
+  }
+
+  /**
+   * Archived cards whose warm cache was released and whose worktree directory
+   * still exists, so the Host poll can retry the removal: git may refuse (a
+   * locked worktree, an open file) and the removal may have failed earlier. A
+   * runtime projection on the hot poll path — it never clones the document.
+   * Cards whose checkout is still named by a live card (a follow-up on the
+   * source's worktree) are left out: their removal is not this card's to do,
+   * and a warm card (no release stamp yet) is never touched.
    */
   archivedWorktrees(): TaskRecord[] {
     const livePaths = new Set<string>()
@@ -1139,6 +1175,7 @@ export class HostTaskLedger {
       if (task.archivedAt === undefined && task.git?.worktreePath !== undefined) livePaths.add(task.git.worktreePath)
     }
     return this.document.tasks.filter(task => task.archivedAt !== undefined
+      && task.warmReleasedAt !== undefined
       && task.git?.worktreePath !== undefined
       && !livePaths.has(task.git.worktreePath)
       && existsSync(task.git.worktreePath))
@@ -1373,9 +1410,7 @@ export class HostTaskLedger {
   private applyReleaseResult(task: TaskRecord): void {
     const moved = this.document.tasks.map(item => item.id === task.id ? task : item)
     if (task.status === 'done') {
-      const limited = enforceDoneLimit(moved, this.maxDoneTasks, this.now())
-      this.document.tasks = [...limited.tasks]
-      this.releaseArchivedWorktrees(limited.archivedIds)
+      this.document.tasks = [...enforceDoneLimit(moved, this.maxDoneTasks, this.now()).tasks]
     } else {
       this.document.tasks = moved
     }
@@ -1791,9 +1826,7 @@ export class HostTaskLedger {
       return cleared
     })
     if (movedToDone) {
-      const limited = enforceDoneLimit(this.document.tasks, this.maxDoneTasks, now)
-      this.document.tasks = [...limited.tasks]
-      this.releaseArchivedWorktrees(limited.archivedIds)
+      this.document.tasks = [...enforceDoneLimit(this.document.tasks, this.maxDoneTasks, now).tasks]
     }
     // Register the test run before the commit notification: the service's
     // ledger subscription takes pending runs, and it runs during that
@@ -2078,13 +2111,12 @@ export class HostTaskLedger {
         // The Done-column limit: a move that would leave more than N on-board
         // cards in `done` archives the oldest ones (FIFO) until it holds again.
         // Every other column is untouched and surviving cards keep their order.
-        // Archived cards give their worktrees to the poll's retry (they are the
-        // only cards that no longer need a checkout). A queued release keeps the
-        // card in tested and therefore does not touch the Done column.
+        // Archived cards keep their checkout and conversation warm for the
+        // retention window; the Host poll releases them after it. A queued
+        // release keeps the card in tested and therefore does not touch the Done
+        // column.
         if (action.status === 'done' && released?.pending !== true) {
-          const limited = enforceDoneLimit(moved, this.maxDoneTasks, now)
-          this.document.tasks = [...limited.tasks]
-          this.releaseArchivedWorktrees(limited.archivedIds)
+          this.document.tasks = [...enforceDoneLimit(moved, this.maxDoneTasks, now).tasks]
         } else {
           this.document.tasks = moved
         }
@@ -2155,22 +2187,20 @@ export class HostTaskLedger {
         // Done-column limit then trims exactly as the single-card move does.
         const next = this.document.tasks.map(item => moved.get(item.id) ?? item)
         if (action.status === 'done') {
-          const limited = enforceDoneLimit(next, this.maxDoneTasks, now)
-          this.document.tasks = [...limited.tasks]
-          this.releaseArchivedWorktrees(limited.archivedIds)
+          this.document.tasks = [...enforceDoneLimit(next, this.maxDoneTasks, now).tasks]
         } else {
           this.document.tasks = next
         }
         break
       }
       case 'archive': {
-        const task = this.document.tasks.find(item => item.id === action.taskId)
         const result = applyArchiveTask(this.document.tasks, action.taskId, now)
         if (!result.archived) throw new Error('task cannot be archived')
+        // Archiving takes the card off the board but deliberately keeps its
+        // checkout and conversation warm (see `core/warm-cache.ts`): the Host
+        // poll releases them once the retention window passed and no card on the
+        // board references them any more.
         this.document.tasks = [...result.tasks]
-        // Archive is the last board state: release the card's own checkout. A
-        // refusal is not fatal — the Host poll retries it.
-        if (task !== undefined) this.releaseArchivedWorktrees([task.id])
         break
       }
       case 'restore': {

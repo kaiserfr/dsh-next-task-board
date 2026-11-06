@@ -28,9 +28,11 @@
  *   reviewed. A replay that conflicts is left in the card's own worktree for the
  *   card's agent ({@link GitWorkflow.mergeBranch}),
  * - the worktree outlives the merge: a done card may be pulled back out of
- *   `done` (reactivated or reworked), and that run needs its own checkout. The
- *   directory is only released when the card leaves the board for good —
- *   archiving or deleting it ({@link GitWorkflow.releaseWorktree}).
+ *   `done` (reactivated or reworked), and that run needs its own checkout. It is
+ *   also kept after **archiving** (the card may be restored) until the warm
+ *   window of 3 days has passed and no card on the board references it any more;
+ *   deleting the card releases it at once
+ *   ({@link GitWorkflow.releaseWorktree}).
  *
  * The board's WIP limit stays per workspace (WIP lane): one implementation run
  * per workspace. The card's worktree is what makes that limit about *slots*, not
@@ -552,14 +554,15 @@ export class GitWorkflow {
   }
 
   /**
-   * Release the card's own worktree: the card is archived (it left the board
-   * for good, so no run will ever need the directory again) or deleted. The
-   * directory was disposal-only from the start — the branch, the commits and
-   * the review stamp all survive in the repository. A git that refuses
-   * (untracked build artifacts a `--force` cannot take, a locked worktree, an
-   * open file) is reported instead of thrown: archiving never fails because of
-   * it, and the Host poll retries the removal on the archived card.
-   * @param task - the card leaving the board.
+   * Release the card's own worktree: the card is deleted, or its archived warm
+   * cache expired (the retention window passed and no card on the board
+   * references the checkout any more). The directory was disposal-only from the
+   * start — the branch, the commits and the review stamp all survive in the
+   * repository. A git that refuses (untracked build artifacts a `--force` cannot
+   * take, a locked worktree, an open file) is reported instead of thrown: the
+   * release never fails because of it, and the Host poll retries the removal on
+   * the archived card.
+   * @param task - the card whose checkout is being released.
    * @returns why git refused, or undefined when the directory is gone.
    */
   async releaseWorktree(task: TaskRecord): Promise<string | undefined> {

@@ -11,6 +11,7 @@ import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { GitWorkflow, TASK_BRANCH_PREFIX, taskBranch } from '../src/git-workflow.ts'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
+import { WARM_RETENTION_MS } from '../src/core/warm-cache.ts'
 import { HostTaskLedger } from '../src/host-ledger.ts'
 import type { TaskBoardWorkspaceRegistry } from '../src/host-runner.ts'
 
@@ -264,7 +265,8 @@ describe.skipIf(!hasGit)('GitWorkflow', () => {
 describe.skipIf(!hasGit)('board git flow end to end', () => {
   it('opens a branch on todo, parks in ready_for_test, and merges on done', async () => {
     const repo = createRepo()
-    const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflowFor(repo) })
+    const workflow = workflowFor(repo)
+    const ledger = new HostTaskLedger(tempDir('dsh-task-board-ledger-'), () => NOW, { git: workflow })
     try {
       ledger.applyRequest('r-create', {
         kind: 'create',
@@ -315,11 +317,23 @@ describe.skipIf(!hasGit)('board git flow end to end', () => {
       expect(existsSync(join(repo, 'feature.txt'))).toBe(true)
       expect(existsSync(dir)).toBe(true)
 
-      // Archiving is where the worktree is released — the branch and its
-      // commits stay in the repository.
+      // Archiving takes the card off the board but keeps the checkout warm: the
+      // branch and its commits stay in the repository, and the card may be
+      // restored inside the retention window.
       ledger.applyRequest('r-archive', { kind: 'archive', taskId: 'card-1' })
       await ledger.awaitCard('card-1')
       expect(ledger.state().tasks[0].archivedAt).toBe(NOW)
+      expect(existsSync(dir)).toBe(true)
+      expect(git(repo, ['show', `${done.git!.branch}:feature.txt`])).toBe('agent output')
+
+      // Only after the window (and with no card referencing the checkout) does
+      // the Host release it; the branch itself survives.
+      const expired = ledger.expiredWarmTaskIds(NOW + WARM_RETENTION_MS)
+      expect(expired).toEqual(['card-1'])
+      ledger.markWarmReleased(expired, NOW + WARM_RETENTION_MS)
+      const released = ledger.archivedWorktrees()
+      expect(released.map(task => task.id)).toEqual(['card-1'])
+      await workflow.releaseWorktree(released[0]!)
       expect(existsSync(dir)).toBe(false)
       expect(git(repo, ['show', `${done.git!.branch}:feature.txt`])).toBe('agent output')
     } finally {
