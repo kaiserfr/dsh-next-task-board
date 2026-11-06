@@ -123,3 +123,9 @@ Deployment-Hinweis: Das deployte Plugin ist dieser Haupt-Checkout (Symlink in
 erst sinnvoll, wenn die Karte in einer Ruhespalte steht — ein Neustart während
 eines offenen Laufs beendet dessen Session ohne `turn/end`, und der Lauf würde
 als „session ended before the run completed a turn" scheitern.
+
+## Siehe auch
+
+- [Die Checkbox „Continue in the same conversation" (`reuseSession`)](reuse-session-checkbox.md)
+  — was die Kartenoption steuert, wann sie zu aktivieren ist und wie sie sich
+  zum Follow-up-Konzept verhält.
