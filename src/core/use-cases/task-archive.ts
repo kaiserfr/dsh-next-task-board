@@ -3,6 +3,11 @@
  * whatever its status but `running`. The task keeps its status, execution history, and
  * transcript references, while archiving disarms any schedule so it cannot
  * create more execution records until the user restores and re-enables it.
+ *
+ * Archiving does **not** release the card's worktree or conversation: both stay
+ * warm for the retention window (see `core/warm-cache.ts`), so a restore or a
+ * follow-up still finds them. Every archive cycle therefore clears the old
+ * `warmReleasedAt` marker, and restoring a card clears it too.
  */
 import type { TaskRecord } from '../tasks.ts'
 import { ARCHIVABLE_STATUSES } from '../tasks.ts'
@@ -34,8 +39,11 @@ export function applyArchiveTask(
     const schedule = task.schedule === undefined
       ? undefined
       : { ...task.schedule, enabled: false, nextRunAt: undefined }
+    // A re-archived card (restored, then archived again) gets a fresh warm
+    // window: the previous release marker belongs to the old archive cycle.
+    const { warmReleasedAt: _released, ...base } = task
     return {
-      ...task,
+      ...base,
       ...(schedule === undefined ? {} : { schedule }),
       archivedAt: now,
       updatedAt: now,
@@ -44,13 +52,13 @@ export function applyArchiveTask(
   return { tasks: next, archived: applied }
 }
 
-/** Restore one task back onto the main board (clears the archive marker). */
+/** Restore one task back onto the main board (clears the archive markers). */
 export function applyRestoreTask(tasks: readonly TaskRecord[], id: string, now: number): ArchiveTaskResult {
   let applied = false
   const next = tasks.map(task => {
     if (task.id !== id || task.archivedAt === undefined) return task
     applied = true
-    const { archivedAt: _archived, ...rest } = task
+    const { archivedAt: _archived, warmReleasedAt: _released, ...rest } = task
     return { ...rest, updatedAt: now }
   })
   return { tasks: next, archived: applied }

@@ -134,9 +134,10 @@ export interface TaskGit {
    * checkout the execution session works in, so the main checkout stays on the
    * branch the human is using and two cards of one workspace never share a
    * directory. It outlives the merge (a done card may be reactivated) and is
-   * released only when the card is archived or deleted; the path stays recorded,
-   * and `git.openBranch` re-attaches the directory when the card needs it again.
-   * Absent on cards whose branch lives in the main checkout (the legacy path,
+   * released only when the card is deleted, or when its archived card's warm
+   * cache expired (see {@link TaskRecord.warmReleasedAt}); the path stays
+   * recorded, and `git.openBranch` re-attaches the directory when the card needs
+   * it again. Absent on cards whose branch lives in the main checkout (the legacy path,
    * and any environment where `git worktree` refuses).
    */
   worktreePath?: string
@@ -598,6 +599,15 @@ export interface TaskRecord {
    * absent means on-board.
    */
   archivedAt?: number
+  /**
+   * When the archived card's warm cache was released (ms epoch): the warm
+   * retention window after {@link archivedAt} has passed and no card on the
+   * board referenced the checkout or the conversation any more, so the Host
+   * removed the worktree and stopped the session for good. Restore and a fresh
+   * archive clear it, so every archive cycle starts a new warm window. Absent on
+   * archived cards that are still warm.
+   */
+  warmReleasedAt?: number
   /**
    * When the task last entered the `done` column (ms epoch), cleared on every
    * move out of `done`. The Done-column limit orders displacement by this

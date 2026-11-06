@@ -3,6 +3,11 @@
  * whatever its status but `running`. The task keeps its status, execution history, and
  * transcript references, while archiving disarms any schedule so it cannot
  * create more execution records until the user restores and re-enables it.
+ *
+ * Archiving does **not** release the card's worktree or conversation: both stay
+ * warm for the retention window (see `core/warm-cache.ts`), so a restore or a
+ * follow-up still finds them. Every archive cycle therefore clears the old
+ * `warmReleasedAt` marker, and restoring a card clears it too.
  */
 import type { TaskRecord } from '../tasks.ts';
 /** Result of an archive transition. */
@@ -19,5 +24,5 @@ export interface ArchiveTaskResult {
  * a no-op.
  */
 export declare function applyArchiveTask(tasks: readonly TaskRecord[], id: string, now: number): ArchiveTaskResult;
-/** Restore one task back onto the main board (clears the archive marker). */
+/** Restore one task back onto the main board (clears the archive markers). */
 export declare function applyRestoreTask(tasks: readonly TaskRecord[], id: string, now: number): ArchiveTaskResult;

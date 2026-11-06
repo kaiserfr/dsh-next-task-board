@@ -1,8 +1,9 @@
 /**
  * The card worktree's lifecycle: it is cut with the feature branch, it
  * **outlives the merge** (a done card can be reactivated, and that run needs its
- * own checkout), and it is released only when the card leaves the board —
- * archived (explicitly or by the Done-column limit) or deleted. A removal git
+ * own checkout), and archiving keeps it **warm** for the retention window. Only
+ * after that window — and with no card on the board referencing it — does the
+ * Host poll release it; deleting the card releases it at once. A removal git
  * refuses is retried by the Host poll, which logs it once and never unlocks a
  * worktree behind the human's back.
  */
@@ -13,6 +14,7 @@ import { join } from 'node:path'
 import type { TypertGateway } from '@deepseek-ai/dsh-api-gateway'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createTask, type TaskRecord } from '../src/core/tasks.ts'
+import { WARM_RETENTION_MS } from '../src/core/warm-cache.ts'
 import { GitWorkflow } from '../src/git-workflow.ts'
 import { HostTaskLedger } from '../src/host-ledger.ts'
 import { TaskBoardHostService } from '../src/host-service.ts'
@@ -73,6 +75,10 @@ async function mergedCard(ledger: HostTaskLedger, id: string, title: string): Pr
   ledger.applyRequest(`create-${id}`, { kind: 'create', id, input: cardInput(title) })
   ledger.applyRequest(`pull-${id}`, { kind: 'move', taskId: id, status: 'clarification' })
   await ledger.awaitCard(id)
+  // The clarification round is a real (here session-less) run: settle it, so the
+  // archived card later has no open execution that would keep its checkout warm.
+  const clarify = ledger.state().tasks.find(task => task.id === id)!.executions.find(execution => execution.endedAt === undefined)
+  if (clarify !== undefined) ledger.settle(id, clarify.id, 'succeeded')
   const dir = ledger.state().tasks.find(task => task.id === id)!.git!.worktreePath!
   // The reviewed work the park commits and the release merges.
   writeFileSync(join(dir, `${id}.txt`), `${id}\n`)
@@ -86,72 +92,98 @@ async function mergedCard(ledger: HostTaskLedger, id: string, title: string): Pr
   return dir
 }
 
-function serviceHarness(repo: string, gitWorkflow: GitWorkflow, ledger: HostTaskLedger): TaskBoardHostService {
+function serviceHarness(
+  repo: string,
+  gitWorkflow: GitWorkflow,
+  ledger: HostTaskLedger,
+  now: () => number = () => NOW,
+): TaskBoardHostService {
   return new TaskBoardHostService({} as unknown as TypertGateway, {
     ledger,
     git: gitWorkflow,
     workspaceRegistry: registryFor(repo),
     compose: new ComposeWorkflow({ file: '' }),
     power: new PowerInhibitor({ platform: 'linux' }),
-    now: () => NOW,
+    now,
   })
 }
 
-/** One Host poll's worktree reconciliation (the poll itself needs a session roster). */
+/** One Host poll's warm-cache reconciliation (the poll itself needs a session roster). */
 async function sweep(service: TaskBoardHostService): Promise<void> {
+  await (service as unknown as { reconcileWarmCache(): Promise<void> }).reconcileWarmCache()
   await (service as unknown as { reconcileArchivedWorktrees(): Promise<void> }).reconcileArchivedWorktrees()
 }
 
 describe.skipIf(!hasGit)('card worktree lifecycle', () => {
-  it('releases the worktree of the card the Done-column limit archives when the next card lands', async () => {
+  it('keeps the worktree of the card the Done-column limit archives warm, then releases it', async () => {
     const repo = createRepo()
     const gitWorkflow = workflowFor(repo)
-    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => NOW, { git: gitWorkflow })
+    const clock = { now: NOW }
+    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => clock.now, { git: gitWorkflow })
+    const service = serviceHarness(repo, gitWorkflow, ledger, () => clock.now)
     try {
       const first = await mergedCard(ledger, 'card-a', 'First')
       ledger.setMaxDoneTasks(1)
       expect(existsSync(first)).toBe(true)
-      // Landing the second card exceeds the Done limit, so the move itself
-      // archives the first one — and that archive releases its worktree.
+      // Landing the second card exceeds the Done limit and archives the first —
+      // but archiving is not a disposal any more: the checkout stays warm.
       const second = await mergedCard(ledger, 'card-b', 'Second')
       await ledger.awaitCard('card-a')
+      expect(ledger.state().tasks.find(task => task.id === 'card-a')?.archivedAt).toBe(NOW)
+      expect(existsSync(first)).toBe(true)
+      expect(existsSync(second)).toBe(true)
+
+      clock.now = NOW + WARM_RETENTION_MS
+      await sweep(service)
       expect(existsSync(first)).toBe(false)
       expect(existsSync(second)).toBe(true)
-      expect(ledger.state().tasks.find(task => task.id === 'card-a')?.archivedAt).toBe(NOW)
     } finally {
+      service.dispose()
       ledger.dispose()
     }
-  })
+  }, 20_000)
 
-  it('releases the worktree of cards an already over-limit Done column archives', async () => {
+  it('keeps the worktree of cards an already over-limit Done column archives warm, then releases it', async () => {
     const repo = createRepo()
     const gitWorkflow = workflowFor(repo)
-    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => NOW, { git: gitWorkflow })
+    const clock = { now: NOW }
+    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => clock.now, { git: gitWorkflow })
+    const service = serviceHarness(repo, gitWorkflow, ledger, () => clock.now)
     try {
       const first = await mergedCard(ledger, 'card-a', 'First')
       const second = await mergedCard(ledger, 'card-b', 'Second')
       expect(existsSync(first)).toBe(true)
       expect(existsSync(second)).toBe(true)
       // Lowering the limit converges the column immediately (the Host start
-      // path does the same): the oldest card is archived and released.
+      // path does the same): the oldest card is archived but stays warm.
       ledger.setMaxDoneTasks(1)
       await ledger.awaitCard('card-a')
       expect(ledger.state().tasks.find(task => task.id === 'card-a')?.archivedAt).toBe(NOW)
+      expect(existsSync(first)).toBe(true)
+      expect(existsSync(second)).toBe(true)
+
+      clock.now = NOW + WARM_RETENTION_MS
+      await sweep(service)
       expect(existsSync(first)).toBe(false)
       expect(existsSync(second)).toBe(true)
     } finally {
+      service.dispose()
       ledger.dispose()
     }
-  })
+  }, 20_000)
 
-  it('releases the worktree of an unmerged archived card and keeps its branch', async () => {
+  it('keeps the worktree of an unmerged archived card warm and keeps its branch', async () => {
     const repo = createRepo()
     const gitWorkflow = workflowFor(repo)
-    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => NOW, { git: gitWorkflow })
+    const clock = { now: NOW }
+    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => clock.now, { git: gitWorkflow })
+    const service = serviceHarness(repo, gitWorkflow, ledger, () => clock.now)
     try {
       ledger.applyRequest('create', { kind: 'create', id: 'card', input: cardInput('Unmerged') })
       ledger.applyRequest('pull', { kind: 'move', taskId: 'card', status: 'clarification' })
       await ledger.awaitCard('card')
+      const clarify = ledger.state().tasks[0].executions.find(execution => execution.endedAt === undefined)
+      if (clarify !== undefined) ledger.settle('card', clarify.id, 'succeeded')
       const task = ledger.state().tasks[0]
       const dir = task.git!.worktreePath!
       expect(existsSync(dir)).toBe(true)
@@ -159,27 +191,35 @@ describe.skipIf(!hasGit)('card worktree lifecycle', () => {
       ledger.applyRequest('archive', { kind: 'archive', taskId: 'card' })
       await ledger.awaitCard('card')
       expect(ledger.state().tasks[0].archivedAt).toBe(NOW)
+      expect(existsSync(dir)).toBe(true)
+      expect(git(repo, ['branch', '--list', task.git!.branch])).toContain(task.git!.branch)
+
+      clock.now = NOW + WARM_RETENTION_MS
+      await sweep(service)
       expect(existsSync(dir)).toBe(false)
       expect(git(repo, ['branch', '--list', task.git!.branch])).toContain(task.git!.branch)
     } finally {
+      service.dispose()
       ledger.dispose()
     }
-  })
+  }, 20_000)
 
   it('retries a refused removal on the poll and logs it once, without unlocking the worktree', async () => {
     const repo = createRepo()
     const gitWorkflow = workflowFor(repo)
-    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => NOW, { git: gitWorkflow })
-    const service = serviceHarness(repo, gitWorkflow, ledger)
+    const clock = { now: NOW }
+    const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => clock.now, { git: gitWorkflow })
+    const service = serviceHarness(repo, gitWorkflow, ledger, () => clock.now)
     try {
       const dir = await mergedCard(ledger, 'card-a', 'Locked')
       git(repo, ['worktree', 'lock', dir])
-      // Archiving never fails because of git: the card leaves the board and the
-      // directory stays for the poll to retry.
+      // Archiving never fails because of git, and the warm window keeps the
+      // directory even after it: the removal only starts once it expired.
       ledger.applyRequest('archive-a', { kind: 'archive', taskId: 'card-a' })
       await ledger.awaitCard('card-a')
       expect(ledger.state().tasks[0].archivedAt).toBe(NOW)
       expect(existsSync(dir)).toBe(true)
+      clock.now = NOW + WARM_RETENTION_MS
 
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
       await sweep(service)
@@ -197,19 +237,19 @@ describe.skipIf(!hasGit)('card worktree lifecycle', () => {
       service.dispose()
       ledger.dispose()
     }
-  })
+  }, 20_000)
 
-  it('sweeps the worktree of a card archived before archiving released it', async () => {
+  it('sweeps the worktree of a card archived before the warm cache existed', async () => {
     const repo = createRepo()
     const gitWorkflow = workflowFor(repo)
     const base = createTask(cardInput('Legacy'), NOW, 'legacy')
     const legacyState = (await gitWorkflow.openBranch(base))!
-    // A card row written by an older Host: already archived, its worktree still
+    // A card row written by an older Host: archived long ago, its worktree still
     // on disk. The Host start / poll reconciles that state like any other.
     const legacy: TaskRecord = {
       ...base,
       status: 'done',
-      archivedAt: NOW,
+      archivedAt: NOW - 4 * 24 * 60 * 60 * 1000,
       git: legacyState,
     }
     const ledger = new HostTaskLedger(tempDir('worktree-lifecycle-ledger-'), () => NOW, { git: gitWorkflow })
@@ -223,5 +263,5 @@ describe.skipIf(!hasGit)('card worktree lifecycle', () => {
       service.dispose()
       ledger.dispose()
     }
-  })
+  }, 20_000)
 })

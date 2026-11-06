@@ -981,6 +981,19 @@ export class HostExecutionRunner {
   }
 
   /**
+   * Whether the runtime currently holds a live agent handle for this
+   * conversation. The warm-cache release uses it to tell a conversation that is
+   * really alive (it must be stopped) from an already cold one: asking the
+   * runtime to cancel an unknown session would only produce noise — and on a
+   * ledger with hundreds of archived cards, a long chain of pointless RPCs on
+   * every first poll after a restart.
+   * @param sessionId - the conversation to look up.
+   */
+  hasLiveAgent(sessionId: string): boolean {
+    return this.liveAgent(sessionId) !== undefined
+  }
+
+  /**
    * Stop one session for good: cancel the turn, kill the jobs that would wake it
    * again, drop what is queued, and verify that the agent really came to rest.
    *

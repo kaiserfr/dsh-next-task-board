@@ -190,6 +190,8 @@ export declare class HostTaskLedger {
         stopped: boolean;
         status: TaskRecord['status'];
         archived: boolean;
+        /** Archived, but still inside the warm window: the conversation is kept. */
+        warm: boolean;
     }>;
     /**
      * One card as a live ledger reference (no clone), for Host-side bookkeeping
@@ -378,22 +380,41 @@ export declare class HostTaskLedger {
     /** The merge record a release starts from (destructured out of the current card). */
     private releaseBase;
     /**
-     * Release the worktrees of cards that just became archived — the explicit
-     * archive action and the Done-column limit alike. Archiving is the last board
-     * state a card reaches, so no later run needs the directory; the branch, its
-     * commits and the review stamp stay in the repository. A git that refuses
-     * (a locked worktree, an open file) never fails the archive: the Host poll
-     * retries it on the archived card ({@link HostTaskLedger.archivedWorktrees}).
-     * @param ids - cards that the archive just took off the board.
+     * Archived cards whose warm cache may be released now: the retention window
+     * after the archive stamp has passed for every card sharing their checkout or
+     * conversation, no card on the board references either resource, and no run of
+     * theirs is still open. A cheap projection for the Host poll — it never clones
+     * the document and is a pure read (`core/warm-cache.ts`).
+     * @param now - the instant to judge the windows against.
+     * @returns ids of the cards to stamp through {@link HostTaskLedger.markWarmReleased}.
      */
-    private releaseArchivedWorktrees;
+    expiredWarmTaskIds(now?: number): string[];
     /**
-     * Archived cards whose own worktree directory still exists, so the Host poll
-     * can retry releasing it: git may have refused at archive time, or the card
-     * was archived before archiving released the worktree. A runtime projection on
-     * the hot poll path — it never clones the document. Cards whose checkout is
-     * still named by a live card (a follow-up on the source's worktree) are left
-     * out: their removal is not this card's to do.
+     * Stamp the warm-cache release on archived cards and persist it in one write.
+     * The cards stay archived (their status, history and the recorded
+     * `worktreePath`/session ids are untouched); the marker only says that the
+     * retention expired, so the Host may remove the checkout and stop the session.
+     * A card that was restored in between is left alone.
+     * @param ids - ids from {@link HostTaskLedger.expiredWarmTaskIds}.
+     * @param now - release instant (ms epoch).
+     */
+    markWarmReleased(ids: readonly string[], now?: number): void;
+    /**
+     * Sessions of released archived cards that still need stopping: the Host
+     * stops them on the release, but a stop can fail (the runtime answers slowly
+     * or not at all) and the card is long archived, so the poll retries until the
+     * conversation is at rest. Sessions a card on the board references are left
+     * out — a restored card (or a live follow-up) is using them again.
+     */
+    releasedWarmSessions(): string[];
+    /**
+     * Archived cards whose warm cache was released and whose worktree directory
+     * still exists, so the Host poll can retry the removal: git may refuse (a
+     * locked worktree, an open file) and the removal may have failed earlier. A
+     * runtime projection on the hot poll path — it never clones the document.
+     * Cards whose checkout is still named by a live card (a follow-up on the
+     * source's worktree) are left out: their removal is not this card's to do,
+     * and a warm card (no release stamp yet) is never touched.
      */
     archivedWorktrees(): TaskRecord[];
     /** Follow-up cards started from this card (archived ones included). */

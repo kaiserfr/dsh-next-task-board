@@ -56,6 +56,13 @@ const SESSION_ADOPT_QUIET_MS = 2_000
 const SCHEDULE_TICK_MS = 30_000
 const RESUME_GAP_MS = SCHEDULE_TICK_MS + 15_000
 /**
+ * How long a failed stop of a released warm session waits before the poll
+ * retries it. The card has been archived for days at that point, so a minute of
+ * delay is irrelevant; retrying on every 5 s pass would only hammer a broken
+ * runtime path.
+ */
+const WARM_STOP_RETRY_MS = 60_000
+/**
  * How long one action may stay inside its lane before the Host reports a
  * timeout and frees the lane. Deliberately longer than the browser's 20 s
  * action timeout: the browser retries idempotently while the Host keeps its
@@ -292,6 +299,14 @@ export class TaskBoardHostService {
   private readonly orphanScans = new Map<string, number>()
   /** Sessions the watchdog already explained, so one orphan is not toasted every 5 s. */
   private readonly orphanNoticed = new Set<string>()
+  /**
+   * Warm-cache release of archived cards: when the Host last tried to stop a
+   * released conversation (throttles the retry) and which ones are confirmed to
+   * be at rest. Memory only — the ledger keeps the released marker, so a Host
+   * restart re-checks each released session exactly once.
+   */
+  private readonly warmSessionStops = new Map<string, number>()
+  private readonly warmSessionStopped = new Set<string>()
   /** Card id → its conversation is running right now (roster, derived). */
   private runningSessions: Record<string, true> = {}
   /** Derived plan per review-column card (see {@link refreshReviewPlans}). */
@@ -1642,11 +1657,64 @@ export class TaskBoardHostService {
   }
 
   /**
-   * Retry releasing the worktree of an archived card. Archiving releases it
-   * right away; this covers the git that refused then (a locked worktree, an
-   * open file) and cards archived before archiving owned that job. A failure is
-   * logged once per card and retried silently on every poll until the directory
-   * is gone — a locked worktree is never unlocked behind the human's back.
+   * Release the warm cache of archived cards whose retention window passed and
+   * that no card on the board references any more (the ledger's derived
+   * reference count decides; see `core/warm-cache.ts`). The release stamps the
+   * card first, because the marker is what makes the removal retryable and what
+   * tells the orphan watchdog that the conversation may now be stopped; the
+   * worktree is then removed by {@link reconcileArchivedWorktrees} (which runs
+   * right after this pass) and the session is stopped here.
+   *
+   * The session stop is the only part that can refuse: the runtime may be
+   * unreachable or slow, so a failed stop is retried every
+   * {@link WARM_STOP_RETRY_MS} until the conversation really is at rest. A
+   * session a card on the board references again (a restore, a live follow-up)
+   * drops out of the projection and is not stopped.
+   */
+  private async reconcileWarmCache(): Promise<void> {
+    if (this.disposed) return
+    const expired = this.ledger.expiredWarmTaskIds(this.now())
+    if (expired.length > 0) this.ledger.markWarmReleased(expired, this.now())
+    const sessions = new Set(this.ledger.releasedWarmSessions())
+    for (const sessionId of [...this.warmSessionStopped]) if (!sessions.has(sessionId)) this.warmSessionStopped.delete(sessionId)
+    for (const sessionId of [...this.warmSessionStops.keys()]) if (!sessions.has(sessionId)) this.warmSessionStops.delete(sessionId)
+    const now = this.now()
+    for (const sessionId of sessions) {
+      if (this.warmSessionStopped.has(sessionId)) continue
+      const attemptedAt = this.warmSessionStops.get(sessionId)
+      if (attemptedAt !== undefined && now - attemptedAt < WARM_STOP_RETRY_MS) continue
+      this.warmSessionStops.set(sessionId, now)
+      // A conversation the runtime no longer holds is already cold: there is
+      // nothing left to stop, and a cancel RPC would just fail (see
+      // {@link HostExecutionRunner.hasLiveAgent}).
+      if (!this.runner.hasLiveAgent(sessionId)) {
+        this.warmSessionStopped.add(sessionId)
+        continue
+      }
+      try {
+        const report = await this.runner.stopSession(sessionId, { preserveUserMessages: false })
+        if (report.stopped) {
+          this.warmSessionStops.delete(sessionId)
+          this.warmSessionStopped.add(sessionId)
+          continue
+        }
+        if (this.orphanNoticed.has(`warm:${sessionId}`)) continue
+        this.orphanNoticed.add(`warm:${sessionId}`)
+        console.warn(`task board: could not stop the released conversation of an archived card (${sessionId}); retrying on every poll`)
+      } catch (error) {
+        safeConsoleError(`[dsh-task-board] stopping the released conversation ${sessionId} of an archived card failed`, error)
+      }
+    }
+  }
+
+  /**
+   * Retry releasing the worktree of an archived card whose warm cache was
+   * released. The release itself is the marker; this covers the git that
+   * refused then (a locked worktree, an open file) and cards released before
+   * the Host could run the removal. A failure is logged once per card and
+   * retried silently on every poll until the directory is gone — a locked
+   * worktree is never unlocked behind the human's back, and a card still inside
+   * its warm window is never touched.
    */
   private async reconcileArchivedWorktrees(): Promise<void> {
     if (this.disposed) return
@@ -1655,7 +1723,12 @@ export class TaskBoardHostService {
       // Serialize with the card's own work chain: archiving may have queued the
       // very same removal, and the poll must not race it.
       await this.ledger.awaitCard(task.id)
-      const failure = await this.git.releaseWorktree(task)
+      // The wait may have lasted long enough for the human to restore the card:
+      // a card that is on the board again (or whose release was undone by a
+      // fresh archive cycle) keeps its checkout.
+      const current = this.ledger.task(task.id)
+      if (current === undefined || current.archivedAt === undefined || current.warmReleasedAt === undefined) continue
+      const failure = await this.git.releaseWorktree(current)
       if (failure === undefined) continue
       pending.add(task.id)
       if (this.worktreeWarnings.has(task.id)) continue
@@ -1691,10 +1764,12 @@ export class TaskBoardHostService {
     const feedAlive = Date.now() - this.lastSessionEventAt < SESSION_EVENT_ALIVE_MS
     const resumable = this.active && feedAlive && watched.some(row =>
       !row.open && !row.paused && !row.archived && row.status !== 'done')
-    // Paused/done/archived cards whose conversation was woken again are the
-    // hard cases; only the roster can say whether that is still true.
+    // Paused/done/released-archived cards whose conversation was woken again are
+    // the hard cases; only the roster can say whether that is still true. A warm
+    // archived card is left alone on purpose — it must not cost a roster read
+    // every 5 s for three days.
     const stopPending = feedAlive && watched.some(row =>
-      row.paused || row.archived || row.status === 'done')
+      row.paused || (row.archived && !row.warm) || row.status === 'done')
     if (!openWithSession && !resumable && !stopPending) return
     const running = await this.runner.listRunning()
     const previous = this.power.snapshot()
@@ -1728,9 +1803,11 @@ export class TaskBoardHostService {
     // active: a stack whose card left the run/review columns (or is gone) must
     // not keep running just because the plugin was switched off meanwhile. The
     // review environments the board started are held to the same rule, and an
-    // archived card's worktree is retried until it is gone.
+    // archived card's checkout/conversation is released once its warm window
+    // passed and nobody references it any more.
     this.reconcileCompose()
     this.reconcileReview()
+    await this.reconcileWarmCache()
     await this.reconcileArchivedWorktrees()
     // Event-first: while session/agent events keep arriving, the board trusts
     // them (settle, answers, rework, roster). The full pass below is only the
@@ -2112,7 +2189,10 @@ export class TaskBoardHostService {
    * - a card **stopped from the card** (`stop-session`/`hard-stop`) is stopped
    *   right away and never adopted back; the 5 s pass handles it too, because
    *   there is no adoption quiet window left to protect;
-   * - a **done/archived** card has no work left to do;
+   * - a **done** card has no work left to do;
+   * - an **archived** card keeps its conversation warm for the retention window
+   *   (see `core/warm-cache.ts`) and is stopped only once the Host released that
+   *   warm cache — that release is the archive's own cleanup;
    * - any other settled card is stopped only if the human has **not** written in
    *   its chat since the run settled — a conversation the human just used is
    *   theirs, a conversation a background job woke is an orphan.
@@ -2122,7 +2202,7 @@ export class TaskBoardHostService {
    * @param sessions - the roster the poll already fetched.
    * @param options.settled - whether a plain settled card may be stopped. The
    *   5 s pass disables this so it cannot pre-empt the adoption quiet window;
-   *   paused/stopped/archived/done cards are stopped either way.
+   *   paused/stopped/released-archived/done cards are stopped either way.
    */
   private async stopOrphanedSessions(
     sessions: readonly SessionSummary[],
@@ -2158,7 +2238,13 @@ export class TaskBoardHostService {
         stop = true
       } else if (row.open) {
         continue
-      } else if (row.archived || row.status === 'done') {
+      } else if (row.archived) {
+        // A warm archived card is deliberately left at rest so its conversation
+        // can be continued for the retention window; only a released one is the
+        // cleanup's business (reconcileWarmCache stops it, this is the safeguard
+        // for one that a job woke after the release).
+        stop = !row.warm
+      } else if (row.status === 'done') {
         stop = true
       } else if (row.settledAt !== undefined && options.settled !== false) {
         const scannedAt = summary.updatedAt
