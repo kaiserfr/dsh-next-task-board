@@ -15,7 +15,10 @@
  * The detail button, the checkbox, the corner controls and the chevrons are
  * siblings of the card body: each click reaches only its own control, so a link
  * jumps, the checkbox marks, a chevron steps, and nothing opens the detail by
- * accident. The tags, the meta row and the card's empty space stay inert.
+ * accident. The tags, the meta row and the card's empty space stay inert. A Done
+ * card also carries the follow-up entry (↳) in the bottom-left gutter the
+ * question symbol and the release arrow use; it opens the same empty follow-up
+ * dialog as the detail view.
  *
  * Memoized: the card re-renders only when its own task record changes, so a
  * status/filter update on one card (or scrolling) never re-renders every
@@ -136,7 +139,7 @@ function CardStepButton({ taskId, direction, target, blocker, disabled, queued, 
   )
 }
 
-function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
+function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, followUpAvailable, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onFollowUp, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** A merge release of this card runs in the Host's background. */
@@ -157,6 +160,8 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
   hasFollowUpSource?: boolean
   /** Titles of this card's follow-ups, for the source badge's tooltip. */
   followUpSourceHint?: string
+  /** The board offers the card's follow-up entry (Done, source free, no action in flight). */
+  followUpAvailable?: boolean
   /**
    * Why the card waits for its lane's WIP slot (undefined when it waits for
    * nothing). The reason itself is not rendered; the tooltip carries the text.
@@ -190,6 +195,8 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
   onStopSession: (task: TaskRecord) => void
   /** Ask to release the card for the merge (the Host's `approve-merge`). */
   onRelease: (task: TaskRecord) => void
+  /** Open the empty follow-up dialog for this Done card (the Host resolves the source). */
+  onFollowUp: (task: TaskRecord) => void
   /** Fire the manual transition into the adjacent column (same as a drop). */
   onStep: (taskId: string, status: TaskStatus) => void
   /** Whether the card's conversation is running right now (derived by the Host). */
@@ -472,6 +479,25 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
           onDoubleClick={(event) => { event.stopPropagation() }}
         >
           <span aria-hidden="true">{paused ? '▶' : '⏸'}</span>
+        </button>
+      )}
+      {followUpAvailable === true && (
+        // The card's own follow-up entry: the same empty follow-up dialog as the
+        // detail's button, on the source card's conversation and branch (the
+        // Host resolves both from its ledger). It sits in the bottom-left gutter
+        // spot the question symbol and the release arrow use; a Done card
+        // carries neither, so the slot is free. A sibling button like pause and
+        // the chevrons, so the card's own click never fires.
+        <button
+          type="button"
+          className={css.cardFollowUp}
+          data-dsh-part="card-follow-up-button"
+          title={t('detail.followUpHint')}
+          aria-label={t('detail.followUp')}
+          onClick={(event) => { event.stopPropagation(); onFollowUp(task) }}
+          onDoubleClick={(event) => { event.stopPropagation() }}
+        >
+          <span aria-hidden="true">↳</span>
         </button>
       )}
       {releasable && (
