@@ -1,10 +1,10 @@
 /**
  * Board view: the multi-column kanban that replaces the middle column while
- * active. A card click marks it (Ctrl/Cmd adds one, Shift marks the range up to
- * the anchor), a double click opens the task detail (never executes directly);
- * the header offers filter, new-task, and a back-to-chat escape.
+ * active. A card's checkbox marks it (Shift marks the range up to the anchor),
+ * while the card's title/excerpt opens the task detail (never executes
+ * directly); the header offers filter, new-task, and a back-to-chat escape.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
 import { collectKnownTags, compareWipOrder, hasFollowUpLock, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason, type WipLimits } from '../../core/tasks.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
@@ -174,7 +174,7 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onKeySelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** The Host is merging this card in the background. */
@@ -204,10 +204,11 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   rightTarget?: TaskStatus
   /** Why a step right is unavailable. */
   rightBlocker?: StepBlocker
-  onSelect: (id: string, event: ReactMouseEvent<HTMLButtonElement>) => void
-  onKeySelect: (id: string, event: ReactKeyboardEvent<HTMLButtonElement>) => void
+  /** Mark or unmark; `extend` walks the range from the board's anchor. */
+  onSelect: (id: string, extend: boolean) => void
+  /** Open the card's detail from its title/excerpt. */
   onOpen: (id: string) => void
-  onDragStart: (id: string, event: ReactDragEvent<HTMLButtonElement>) => void
+  onDragStart: (id: string, event: ReactDragEvent<HTMLElement>) => void
   onDragEnd: () => void
   onOpenSession: (sessionId: string) => void
   onTogglePause: (task: TaskRecord) => void
@@ -219,10 +220,7 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   /** The Host says this card's conversation is running right now. */
   sessionRunning: boolean
 }) {
-  const onClick = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => { onSelect(task.id, event) }, [task.id, onSelect])
-  const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => { onKeySelect(task.id, event) }, [task.id, onKeySelect])
-  const onDoubleClick = useCallback(() => { onOpen(task.id) }, [task.id, onOpen])
-  const onStart = useCallback((event: ReactDragEvent<HTMLButtonElement>) => { onDragStart(task.id, event) }, [task.id, onDragStart])
+  const onStart = useCallback((event: ReactDragEvent<HTMLElement>) => { onDragStart(task.id, event) }, [task.id, onDragStart])
   return (
     <TaskCard
       task={task}
@@ -243,9 +241,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       leftBlocker={leftBlocker}
       rightTarget={rightTarget}
       rightBlocker={rightBlocker}
-      onClick={onClick}
-      onKeyDown={onKeyDown}
-      onDoubleClick={onDoubleClick}
+      onSelect={onSelect}
+      onOpen={onOpen}
       onDragStart={onStart}
       onDragEnd={onDragEnd}
       onOpenSession={onOpenSession}
@@ -449,21 +446,14 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
     anchorRef.current = undefined
     setSelectedIds(current => current.size === 0 ? current : NO_IDS)
   }, [])
-  // The card mark, the way a file manager does it:
-  //   click        → this card alone becomes the selection (and the new anchor)
-  //   Ctrl/Cmd     → toggles this card in or out of the selection
-  //   Shift        → the range from the anchor to this card, in board order
-  //   Space        → the same three marks from the keyboard (selectCardByKey)
-  //   double click → open the detail (below); Enter does the same, because the
-  //                  browser turns it into the button's own click
-  // Archived cards are read-only: they always open, never select.
-  //
-  // Marking is shared by the mouse and the keyboard; the two entry points only
-  // differ in how they read the modifiers off their event.
-  const markCard = useCallback((id: string, modifiers: { shift: boolean; toggle: boolean }): void => {
+  // The card's mark lives on its own checkbox; the card body no longer selects:
+  //   checkbox click   → toggles this card in or out, and becomes the anchor
+  //   Shift + checkbox → the range from the anchor to this card, in board order
+  // Archived cards are read-only and render no checkbox.
+  const toggleSelection = useCallback((id: string, extend: boolean): void => {
     const to = boardOrderIds.indexOf(id)
     if (to < 0) return
-    if (modifiers.shift) {
+    if (extend) {
       const from = anchorRef.current === undefined ? -1 : boardOrderIds.indexOf(anchorRef.current)
       // Without a (still visible) anchor there is no range to walk: the clicked
       // card becomes the anchor itself.
@@ -475,37 +465,14 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
       setSelectedIds(new Set(boardOrderIds.slice(Math.min(from, to), Math.max(from, to) + 1)))
       return
     }
-    if (modifiers.toggle) {
-      anchorRef.current = id
-      setSelectedIds(current => {
-        const next = new Set(current)
-        if (next.has(id)) next.delete(id)
-        else next.add(id)
-        return next
-      })
-      return
-    }
     anchorRef.current = id
-    setSelectedIds(new Set([id]))
+    setSelectedIds(current => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }, [boardOrderIds])
-  const selectCard = useCallback((id: string, event: ReactMouseEvent<HTMLButtonElement>): void => {
-    if (archiveView) { controller.openTask(id); return }
-    // A click carrying no mouse position is a keyboard/AT activation of the
-    // button, not a click on a spot; it keeps the direct route to the detail.
-    if (event.detail === 0) { controller.openTask(id); return }
-    markCard(id, { shift: event.shiftKey, toggle: event.metaKey || event.ctrlKey })
-  }, [archiveView, controller, markCard])
-  // Space is the keyboard's plain click: it marks the focused card with the
-  // same Shift/Ctrl semantics, so a keyboard has the whole marking vocabulary
-  // too. Enter is deliberately left alone — the browser's own click opens the
-  // detail through `selectCard` above. `preventDefault` suppresses both that
-  // synthetic click and the page scroll Space would otherwise start.
-  const selectCardByKey = useCallback((id: string, event: ReactKeyboardEvent<HTMLButtonElement>): void => {
-    if (event.key !== ' ') return
-    event.preventDefault()
-    if (archiveView) { controller.openTask(id); return }
-    markCard(id, { shift: event.shiftKey, toggle: event.metaKey || event.ctrlKey })
-  }, [archiveView, controller, markCard])
   // The detail keeps the selection: marking cards and inspecting one of them
   // are separate intentions.
   const openDetail = useCallback((id: string): void => { controller.openTask(id) }, [controller])
@@ -560,7 +527,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // Drag start on a card: a selected card carries the whole draggable
   // selection, any other card drags alone — the single-card behavior is
   // untouched (requirement 3).
-  const startDrag = useCallback((id: string, event: ReactDragEvent<HTMLButtonElement>): void => {
+  const startDrag = useCallback((id: string, event: ReactDragEvent<HTMLElement>): void => {
     const task = snapshot.tasks.find(item => item.id === id)
     if (task === undefined || !isCardDraggable(task)) return
     const ids = selectedIds.has(id) && dragSelectionIds.includes(id) ? dragSelectionIds : [id]
@@ -940,8 +907,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                   followUpSourceHint={followUpTitlesBySource.get(task.id) === undefined
                     ? undefined
                     : t('card.followUpSourceHint', { titles: (followUpTitlesBySource.get(task.id) ?? []).join(', ') })}
-                  onSelect={selectCard}
-                  onKeySelect={selectCardByKey}
+                  onSelect={toggleSelection}
                   onOpen={openDetail}
                   onDragStart={startDrag}
                   onDragEnd={endDrag}
@@ -1017,8 +983,7 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                         leftBlocker={left.blocker}
                         rightTarget={right.target}
                         rightBlocker={right.blocker}
-                        onSelect={selectCard}
-                        onKeySelect={selectCardByKey}
+                        onSelect={toggleSelection}
                         onOpen={openDetail}
                         onDragStart={startDrag}
                         onDragEnd={endDrag}

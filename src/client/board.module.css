@@ -300,7 +300,7 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   background: var(--dsw-alias-bg-base);
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
-  cursor: pointer;
+  cursor: default;
   color: var(--dsw-alias-label-primary);
   font-family: inherit;
   transition: box-shadow 120ms ease, border-color 120ms ease, transform 120ms ease;
@@ -345,9 +345,10 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   padding-right: 29px;
 }
 
-/* The top-left corner belongs to the waiting-question symbol, the only corner
-   still free (session link bottom-right, pause/play top-right). Same
-   reservation rule as the right edge, so the title never runs under it. */
+/* The waiting-question symbol sits in the left gutter below the selection
+   checkbox (the top-left corner is the checkbox's); the step chevron is
+   vertically centered, so the bottom-left is the free spot. Same reservation
+   rule as the right edge, so the title never runs under it. */
 .card[data-answering] {
   padding-left: 30px;
 }
@@ -627,7 +628,7 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 .cardQuestion {
   position: absolute;
   left: 8px;
-  top: 8px;
+  bottom: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -659,16 +660,16 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   .cardQuestion { animation: none; }
 }
 
-/* The card's own release for the merge ("Freigeben (Merge)"): the same corner,
-   ring and 18px size as the waiting-question symbol — the two never show at
-   once, because the question watch follows cards with an open run and the
-   clarification column while this control exists only in `tested` — but in the
-   business tone, since releasing is the human's decision, not a wait. It is a
-   sibling button like pause and the chevrons (a button may not nest in a
-   button), so the card stays one click target for the detail. The corner is
-   reserved through [data-releasable], so the title, tags and meta chips never
-   run under it even on a one-line card; the rule sits after the chevron
-   reservation above so it wins over the 26px edge. */
+/* The card's own release for the merge ("Freigeben (Merge)"): the same
+   bottom-left gutter spot, ring and 18px size as the waiting-question symbol —
+   the two never show at once, because the question watch follows cards with an
+   open run and the clarification column while this control exists only in
+   `tested` — but in the business tone, since releasing is the human's decision,
+   not a wait. It is a sibling button like pause and the chevrons (a button may
+   not nest in a button), so the card stays one click target for the detail. The
+   corner is reserved through [data-releasable], so the title, tags and meta
+   chips never run under it even on a one-line card; the rule sits after the
+   chevron reservation above so it wins over the 26px edge. */
 .card[data-releasable] {
   padding-left: 30px;
 }
@@ -680,7 +681,7 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
 .cardRelease {
   position: absolute;
   left: 8px;
-  top: 8px;
+  bottom: 8px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1856,4 +1857,57 @@ textarea.input::-webkit-resizer {
 
 @media (prefers-reduced-motion: reduce) {
   .parsePulse { animation-duration: 3.2s; }
+}
+
+/* --- card selection checkbox ------------------------------------------------- */
+
+/* Every non-archived card carries the unlabelled selection checkbox in the
+   top-left gutter; the corner badges (question/release) nest below it in that
+   same gutter, so the card's title never runs under either. These rules sit last
+   on purpose: the checkbox gutter must win over the step/executing paddings
+   above (the left edge is shared with the step chevron). */
+.card[data-selectable] {
+  padding-left: 30px;
+}
+
+.card[data-selectable][data-executing='true'] {
+  padding-left: 29px;
+}
+
+.cardSelect {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--dsw-alias-button-info-fill);
+  cursor: pointer;
+  z-index: 2;
+}
+
+.cardSelect:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+/* The card body is not a click target. Its title and short description form the
+   single detail button; tags, meta and empty space stay inert. */
+.cardDetailTarget {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cardDetailTarget:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
 }

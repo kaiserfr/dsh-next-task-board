@@ -213,9 +213,8 @@ describe('follow-up card badge', () => {
         sessionRunning={false}
         hasFollowUpSource
         followUpSourceHint={t('card.followUpSourceHint', { titles: 'Follow-up: Login flow' })}
-        onClick={() => {}}
-        onKeyDown={() => {}}
-        onDoubleClick={() => {}}
+        onSelect={() => {}}
+        onOpen={() => {}}
         onDragStart={() => {}}
         onDragEnd={() => {}}
         onOpenSession={() => {}}

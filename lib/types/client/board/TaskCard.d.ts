@@ -1,26 +1,28 @@
 /**
- * Task card: the board's column item. A plain click marks the card (the
- * board owns the Ctrl/Shift/Space rules), a double click opens the task
- * detail — it never executes anything directly (detail holds the transition
- * buttons, including the run starts). A card whose latest execution carries a
- * session also renders a direct session link, for a running (active) and a
- * settled (inactive) execution alike.
+ * Task card: the board's column item. The card body itself is not a click
+ * target: its title and the short description below it form one button that
+ * opens the task detail — the detail holds the transition buttons, including
+ * the run starts. Selection is a separate, visually unlabelled checkbox in the
+ * card's top-left corner; the board owns the Shift range rule. A card whose
+ * latest execution carries a session also renders a direct session link, for a
+ * running (active) and a settled (inactive) execution alike.
  *
  * The card's left/right edges carry the one-column step chevrons: they move the
  * card to the directly adjacent column (the same manual transition a drop would
  * fire) and are disabled at the board's edges and whenever that move is blocked.
  * The board resolves the target and blocker; the card only renders them.
  *
- * The link and the chevrons are siblings of the card button, not children: a
- * button may not hold interactive content, and a nested anchor would not be
- * keyboard-reachable. Clicking them acts on the card instead of opening it.
+ * The detail button, the checkbox, the corner controls and the chevrons are
+ * siblings of the card body: each click reaches only its own control, so a link
+ * jumps, the checkbox marks, a chevron steps, and nothing opens the detail by
+ * accident. The tags, the meta row and the card's empty space stay inert.
  *
  * Memoized: the card re-renders only when its own task record changes, so a
  * status/filter update on one card (or scrolling) never re-renders every
- * card on the board. The per-card onClick is built with a stable task reference
- * by the board, so the memo boundary is effective.
+ * card on the board. The per-card handlers are built with a stable task
+ * reference by the board, so the memo boundary is effective.
  */
-import { type DragEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { type DragEvent } from 'react';
 import type { TaskRecord, TaskStatus, WaitingReason } from '../../core/tasks.ts';
 import type { QueuedTransition, StepBlocker, TransitionError } from '../../core/transitions.ts';
 /** Compact relative/absolute time label. */
@@ -45,7 +47,7 @@ export declare function isCardDraggable(task: TaskRecord): boolean;
  * must end first (`running`). Only the drag onto Done may bypass the run.
  */
 export declare function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean;
-declare function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
+declare function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
     task: TaskRecord;
     pending: boolean;
     /** A merge release of this card runs in the Host's background. */
@@ -87,11 +89,12 @@ declare function TaskCardInner({ task, pending, releasePending, releaseLocked, p
     rightTarget?: TaskStatus;
     /** Why a step right is unavailable (`edge` = no column there). */
     rightBlocker?: StepBlocker;
-    onClick: (event: MouseEvent<HTMLButtonElement>) => void;
-    onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
-    onDoubleClick: () => void;
-    onDragStart: (event: DragEvent<HTMLButtonElement>) => void;
-    onDragEnd: (event: DragEvent<HTMLButtonElement>) => void;
+    /** Mark or unmark the card; `extend` walks the range from the last marked card. */
+    onSelect: (id: string, extend: boolean) => void;
+    /** Open the card's detail (the title and excerpt are the only entry). */
+    onOpen: (id: string) => void;
+    onDragStart: (event: DragEvent<HTMLElement>) => void;
+    onDragEnd: (event: DragEvent<HTMLElement>) => void;
     onOpenSession: (sessionId: string) => void;
     onTogglePause: (task: TaskRecord) => void;
     /** Stop the conversation right now (the Host says it is running). */

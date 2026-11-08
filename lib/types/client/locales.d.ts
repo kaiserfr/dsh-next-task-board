@@ -107,6 +107,7 @@ export declare const zh: {
     'card.pause': string;
     'card.stopSession': string;
     'card.resume': string;
+    'card.select': string;
     'card.step.left': string;
     'card.step.right': string;
     'card.step.edge': string;

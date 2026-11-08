@@ -171,11 +171,17 @@ async function drop(column: HTMLElement, dataTransfer: ReturnType<typeof transfe
   })
 }
 
-function cardWith(container: HTMLElement, title: string): HTMLButtonElement {
-  const found = Array.from(container.querySelectorAll<HTMLButtonElement>('button[data-dsh-part="card"]'))
+function cardWith(container: HTMLElement, title: string): HTMLElement {
+  const found = Array.from(container.querySelectorAll<HTMLElement>('[data-dsh-part="card"]'))
     .find(card => card.textContent?.includes(title))
   if (found === undefined) throw new Error(`card not rendered: ${title}`)
   return found
+}
+
+function checkboxWith(container: HTMLElement, title: string): HTMLInputElement {
+  const box = cardWith(container, title).parentElement?.querySelector<HTMLInputElement>('[data-dsh-part="card-select"]')
+  if (box === null || box === undefined) throw new Error(`card checkbox not rendered: ${title}`)
+  return box
 }
 
 describe('detail transition buttons', () => {
@@ -292,7 +298,7 @@ describe('card transition badges and queued drops', () => {
       { pendingTaskIds: ['task-a'] },
       { archiveTask: archive },
     ))
-    await click(cardWith(container, 'A'))
+    await click(checkboxWith(container, 'A'))
     const bulkArchive = container.querySelector<HTMLButtonElement>('button[data-dsh-part="bulk-archive"]')
     expect(bulkArchive?.disabled).toBe(true)
     if (bulkArchive !== null) await click(bulkArchive)
@@ -342,8 +348,8 @@ describe('card transition badges and queued drops', () => {
       { pendingTaskIds: ['task-b'] },
       { moveTasks: async (ids) => { batches.push([...ids]); return true } },
     ))
-    await click(cardWith(container, 'A'))
-    await click(cardWith(container, 'B'), { ctrlKey: true })
+    await click(checkboxWith(container, 'A'))
+    await click(checkboxWith(container, 'B'))
     const dataTransfer = transfer()
     await dragStart(cardWith(container, 'A'), dataTransfer)
     expect(JSON.parse(dataTransfer.data['application/x-dsh-taskboard-cards'] ?? '[]')).toEqual(['task-a', 'task-b'])

@@ -109,7 +109,7 @@ describe('card column-step chevrons', () => {
     expect(right.disabled).toBe(false)
     expect(right.getAttribute('data-target')).toBe('clarification')
     expect(right.getAttribute('data-blocker')).toBeNull()
-    expect(board.container.querySelector('button[data-dsh-part="card"]')!.getAttribute('data-has-step')).toBe('true')
+    expect(board.container.querySelector('[data-dsh-part="card"]')!.getAttribute('data-has-step')).toBe('true')
   })
 
   it('uses the directly adjacent column, not the next allowed one', async () => {

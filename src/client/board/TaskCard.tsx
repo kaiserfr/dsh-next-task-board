@@ -1,26 +1,28 @@
 /**
- * Task card: the board's column item. A plain click marks the card (the
- * board owns the Ctrl/Shift/Space rules), a double click opens the task
- * detail — it never executes anything directly (detail holds the transition
- * buttons, including the run starts). A card whose latest execution carries a
- * session also renders a direct session link, for a running (active) and a
- * settled (inactive) execution alike.
+ * Task card: the board's column item. The card body itself is not a click
+ * target: its title and the short description below it form one button that
+ * opens the task detail — the detail holds the transition buttons, including
+ * the run starts. Selection is a separate, visually unlabelled checkbox in the
+ * card's top-left corner; the board owns the Shift range rule. A card whose
+ * latest execution carries a session also renders a direct session link, for a
+ * running (active) and a settled (inactive) execution alike.
  *
  * The card's left/right edges carry the one-column step chevrons: they move the
  * card to the directly adjacent column (the same manual transition a drop would
  * fire) and are disabled at the board's edges and whenever that move is blocked.
  * The board resolves the target and blocker; the card only renders them.
  *
- * The link and the chevrons are siblings of the card button, not children: a
- * button may not hold interactive content, and a nested anchor would not be
- * keyboard-reachable. Clicking them acts on the card instead of opening it.
+ * The detail button, the checkbox, the corner controls and the chevrons are
+ * siblings of the card body: each click reaches only its own control, so a link
+ * jumps, the checkbox marks, a chevron steps, and nothing opens the detail by
+ * accident. The tags, the meta row and the card's empty space stay inert.
  *
  * Memoized: the card re-renders only when its own task record changes, so a
  * status/filter update on one card (or scrolling) never re-renders every
- * card on the board. The per-card onClick is built with a stable task reference
- * by the board, so the memo boundary is effective.
+ * card on the board. The per-card handlers are built with a stable task
+ * reference by the board, so the memo boundary is effective.
  */
-import { memo, type DragEvent, type KeyboardEvent, type MouseEvent } from 'react'
+import { memo, type DragEvent } from 'react'
 import type { TaskRecord, TaskStatus, WaitingReason } from '../../core/tasks.ts'
 import { isTaskExecuting, isTaskPaused, tagTone } from '../../core/tasks.ts'
 import type { ColumnStep, QueuedTransition, StepBlocker, TransitionError } from '../../core/transitions.ts'
@@ -134,7 +136,7 @@ function CardStepButton({ taskId, direction, target, blocker, disabled, queued, 
   )
 }
 
-function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onClick, onKeyDown, onDoubleClick, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
+function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** A merge release of this card runs in the Host's background. */
@@ -176,11 +178,12 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
   rightTarget?: TaskStatus
   /** Why a step right is unavailable (`edge` = no column there). */
   rightBlocker?: StepBlocker
-  onClick: (event: MouseEvent<HTMLButtonElement>) => void
-  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void
-  onDoubleClick: () => void
-  onDragStart: (event: DragEvent<HTMLButtonElement>) => void
-  onDragEnd: (event: DragEvent<HTMLButtonElement>) => void
+  /** Mark or unmark the card; `extend` walks the range from the last marked card. */
+  onSelect: (id: string, extend: boolean) => void
+  /** Open the card's detail (the title and excerpt are the only entry). */
+  onOpen: (id: string) => void
+  onDragStart: (event: DragEvent<HTMLElement>) => void
+  onDragEnd: (event: DragEvent<HTMLElement>) => void
   onOpenSession: (sessionId: string) => void
   onTogglePause: (task: TaskRecord) => void
   /** Stop the conversation right now (the Host says it is running). */
@@ -266,8 +269,26 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
 
   return (
     <div className={css.cardBox} data-dsh-part="card-box">
-      <button
-        type="button"
+      {!archived && (
+        // The card's mark: a native checkbox, deliberately without a visible
+        // label (aria-label carries the name). It is a sibling of the body, so
+        // marking never opens the detail; Shift extends the range from the
+        // board's anchor.
+        <input
+          type="checkbox"
+          className={css.cardSelect}
+          data-dsh-part="card-select"
+          checked={selected}
+          readOnly
+          aria-label={t('card.select')}
+          title={t('card.select')}
+          onClick={(event) => {
+            event.stopPropagation()
+            onSelect(task.id, event.shiftKey)
+          }}
+        />
+      )}
+      <div
         className={css.card}
         data-status={archived ? 'archived' : task.status}
         data-dsh-part="card"
@@ -279,19 +300,24 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
         data-releasable={releasable || undefined}
         data-has-step={!archived || undefined}
         data-answering={answering || undefined}
+        data-selectable={archived ? undefined : true}
         data-selected={selected || undefined}
         data-dragging={dragging || undefined}
         data-waiting={waitingReason === undefined ? undefined : true}
-        aria-pressed={archived ? undefined : selected}
         draggable={isDraggable}
         onDragStart={isDraggable ? onDragStart : undefined}
         onDragEnd={isDraggable ? onDragEnd : undefined}
-        onClick={onClick}
-        onKeyDown={onKeyDown}
-        onDoubleClick={onDoubleClick}
         title={transitionErrorTextOf ?? waitingTooltip ?? (task.description !== '' ? task.description : task.title)}
       >
-        <span className={css.cardTitle}>{task.title}</span>
+        <button
+          type="button"
+          className={css.cardDetailTarget}
+          data-dsh-part="card-detail-target"
+          onClick={() => { onOpen(task.id) }}
+        >
+          <span className={css.cardTitle}>{task.title}</span>
+          {task.description !== '' && <span className={css.cardExcerpt}>{task.description}</span>}
+        </button>
         {task.tags !== undefined && task.tags.length > 0 && (
           <span className={css.cardTags}>
             {task.tags.map(tag => (
@@ -308,7 +334,6 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
             ))}
           </span>
         )}
-        {task.description !== '' && <span className={css.cardExcerpt}>{task.description}</span>}
         <span className={css.cardMeta}>
           <span className={css.cardTime}>{t('board.updated')} {formatTime(task.updatedAt)}</span>
           {pendingTransition !== undefined && (
@@ -386,7 +411,7 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
           </span>
         )}
         {merge !== undefined && (
-          // The merge verdict, in the free bottom-left corner: is this result in
+          // The merge verdict, in the card's flow at the bottom-left: is this result in
           // the base branch, still waiting, resolving a conflict, or failed? A
           // merged card also names when, so the badge carries the fact the human
           // looks for after releasing.
@@ -419,7 +444,7 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
             {waitingReason === undefined ? t('card.queued') : t('card.waiting')}
           </span>
         )}
-      </button>
+      </div>
       {showStopControl && (
         <button
           type="button"
@@ -453,7 +478,7 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
         // The card's own merge entry: the same Host action as the detail's
         // "Freigeben (Merge)" and the drop on Done — deliberately no second
         // implementation, and the confirmation the board opens before it stays
-        // the same dialog. It sits in the corner the question symbol uses, and
+        // the same dialog. It sits in the gutter spot the question symbol uses, and
         // the two can never show at once: the question watch follows cards with
         // an open run and the clarification column, while this control exists
         // only in `tested`. A sibling button like pause and the chevrons — a
@@ -498,9 +523,10 @@ function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTr
       )}
       {!archived && awaitingAnswerSessionId !== undefined && (
         // The card's conversation waits for the human: a question-mark anchor in
-        // the free top-left corner jumps into that very session, where the
-        // question card or the chat that asked sits. Same sibling/click rules as
-        // the session link below — the card's own click must never also fire.
+        // the card's bottom-left gutter (below the selection checkbox and the
+        // vertically centered step chevron) jumps into that very session, where
+        // the question card or the chat that asked sits. Same sibling/click rules
+        // as the session link below — the card's own click must never also fire.
         <a
           className={css.cardQuestion}
           data-dsh-part="card-awaiting-answer"

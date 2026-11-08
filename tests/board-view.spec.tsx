@@ -44,8 +44,8 @@ function task(overrides: Partial<TaskRecord> = {}): TaskRecord {
 }
 
 /** The card button of the running column whose title text matches. */
-function runningCardWith(container: HTMLElement, title: string): HTMLButtonElement {
-  const cards = Array.from(container.querySelectorAll('section[data-status="running"] button[data-dsh-part="card"]'))
+function runningCardWith(container: HTMLElement, title: string): HTMLElement {
+  const cards = Array.from(container.querySelectorAll('section[data-status="running"] [data-dsh-part="card"]'))
   const found = cards.find(card => card.textContent?.includes(title))
   if (found === undefined) throw new Error(`no running card titled ${title}`)
   return found as HTMLButtonElement
@@ -135,7 +135,7 @@ describe('TaskBoard card drag-and-drop status changes (#1195)', () => {
     })
     await act(async () => { root.render(<TaskBoard controller={controller} />) })
 
-    const cards = container.querySelectorAll('button[data-dsh-part="card"]')
+    const cards = container.querySelectorAll('[data-dsh-part="card"]')
     expect(cards).toHaveLength(3)
 
     // Todo card is draggable
@@ -399,7 +399,7 @@ describe('TaskBoard running-card marking and runner-column order', () => {
 
     const running = container.querySelector('section[data-status="running"]')
     expect(running).not.toBeNull()
-    const cards = Array.from(running!.querySelectorAll('button[data-dsh-part="card"]'))
+    const cards = Array.from(running!.querySelectorAll('[data-dsh-part="card"]'))
     expect(cards.map(card => card.textContent)).toEqual([
       expect.stringContaining('exec'),
       expect.stringContaining('q-old'),
@@ -417,7 +417,7 @@ describe('TaskBoard running-card marking and runner-column order', () => {
     expect(cards[1]!.querySelector('[data-dsh-part="card-waiting"]')).not.toBeNull()
 
     const todo = container.querySelector('section[data-status="clarification"]')
-    expect(Array.from(todo!.querySelectorAll('button[data-dsh-part="card"]'))
+    expect(Array.from(todo!.querySelectorAll('[data-dsh-part="card"]'))
       .map(card => card.getAttribute('title'))).toEqual(['todo-1', 'todo-2'])
   })
 
@@ -559,6 +559,8 @@ describe('TaskBoard multi-selection and group drag', () => {
   async function render(tasks: TaskRecord[], overrides?: Partial<BoardController>): Promise<{
     container: HTMLElement
     card(title: string): HTMLElement
+    checkbox(title: string): HTMLInputElement
+    detail(title: string): HTMLButtonElement
     column(status: string): HTMLElement
     bar(): HTMLElement | null
     marked(): string[]
@@ -570,10 +572,20 @@ describe('TaskBoard multi-selection and group drag', () => {
     roots.push(root)
     await act(async () => { root.render(<TaskBoard controller={fakeController({ tasks }, overrides)} />) })
     const card = (title: string): HTMLElement => {
-      const found = Array.from(container.querySelectorAll<HTMLElement>('button[data-dsh-part="card"]'))
-        .find(entry => entry.getAttribute('title') === title)
+      const found = Array.from(container.querySelectorAll<HTMLElement>('[data-dsh-part="card"]'))
+        .find(entry => entry.querySelector('[data-dsh-part="card-detail-target"]')?.firstElementChild?.textContent === title)
       if (found === undefined) throw new Error(`card not rendered: ${title}`)
       return found
+    }
+    const checkbox = (title: string): HTMLInputElement => {
+      const box = card(title).parentElement?.querySelector<HTMLInputElement>('[data-dsh-part="card-select"]')
+      if (box === null || box === undefined) throw new Error(`card checkbox not rendered: ${title}`)
+      return box
+    }
+    const detail = (title: string): HTMLButtonElement => {
+      const target = card(title).querySelector<HTMLButtonElement>('[data-dsh-part="card-detail-target"]')
+      if (target === null) throw new Error(`card detail target not rendered: ${title}`)
+      return target
     }
     const column = (status: string): HTMLElement => {
       const found = container.querySelector<HTMLElement>(`section[data-status="${status}"]`)
@@ -588,44 +600,29 @@ describe('TaskBoard multi-selection and group drag', () => {
     return {
       container,
       card,
+      checkbox,
+      detail,
       column,
       bulk,
       bar: () => container.querySelector<HTMLElement>('[data-dsh-part="selection-bar"]'),
-      marked: () => Array.from(container.querySelectorAll<HTMLElement>('button[data-selected="true"]'))
-        .map(entry => entry.getAttribute('title')!),
+      marked: () => Array.from(container.querySelectorAll<HTMLElement>('[data-dsh-part="card"][data-selected="true"]'))
+        .map(entry => entry.querySelector('[data-dsh-part="card-detail-target"]')?.firstElementChild?.textContent ?? ''),
     }
   }
 
   // `detail: 1` is what a real mouse click reports; the DOM's synthetic
-  // `element.click()` (and a keyboard Enter) reports `detail: 0`, which the
-  // board treats as "open the detail". A keyboard Space never gets that far:
-  // the board consumes the keydown itself (see `space` below).
+  // `element.click()` (and a keyboard Enter/Space on the title button) reports
+  // `detail: 0` and still reaches the button's own click handler.
   const click = async (element: HTMLElement, init: MouseEventInit = {}): Promise<void> => {
     await act(async () => {
       element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, ...init }))
     })
   }
 
+  // `element.click()` is what Enter/Space on a focused button produces; it is
+  // the keyboard's route to the detail (the title/excerpt button).
   const keyClick = async (element: HTMLElement): Promise<void> => {
     await act(async () => { element.click() })
-  }
-
-  const doubleClick = async (element: HTMLElement): Promise<void> => {
-    await act(async () => {
-      element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }))
-    })
-  }
-
-  // Space on a focused card: the board handles the keydown and swallows the
-  // click the browser would fire on keyup, so the helper only dispatches the
-  // click when the event was not consumed.
-  const space = async (element: HTMLElement, init: KeyboardEventInit = {}): Promise<KeyboardEvent> => {
-    const event = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true, ...init })
-    await act(async () => {
-      element.dispatchEvent(event)
-      if (!event.defaultPrevented) element.click()
-    })
-    return event
   }
 
   const dragStart = async (element: HTMLElement, dataTransfer: Transfer): Promise<void> => {
@@ -643,19 +640,26 @@ describe('TaskBoard multi-selection and group drag', () => {
     })
   }
 
-  it('marks exactly one card with a plain click and offers the count plus a way out', async () => {
+  it('marks exactly one card with its checkbox and offers the count plus a way out', async () => {
     const opened: string[] = []
     const board = await render(
       [task({ id: 't-a', title: 'A' }), task({ id: 't-b', title: 'B' })],
       { openTask: (id) => { opened.push(id) } },
     )
 
+    // The card body is inert: it neither marks nor opens the detail.
     await click(board.card('A'))
+    expect(board.marked()).toEqual([])
+    expect(opened).toEqual([])
+
+    await click(board.checkbox('A'))
+    expect(board.checkbox('A').checked).toBe(true)
+    expect(board.checkbox('A').getAttribute('aria-label')).toBe(zh['card.select'])
     expect(board.card('A').getAttribute('data-selected')).toBe('true')
     expect(board.card('B').getAttribute('data-selected')).toBeNull()
     expect(board.bar()?.textContent).toContain('1')
     expect(board.bar()?.textContent).toContain(zh['board.selectionClear'])
-    // The click marks; it no longer opens the detail behind the user's back.
+    // Marking is the checkbox's own action; it never opens the detail.
     expect(opened).toEqual([])
 
     await click(board.container.querySelector<HTMLElement>('[data-dsh-part="selection-bar"] button')!)
@@ -663,29 +667,33 @@ describe('TaskBoard multi-selection and group drag', () => {
     expect(board.card('A').getAttribute('data-selected')).toBeNull()
   })
 
-  it('replaces the selection with a plain click on another card', async () => {
+  it('marks two cards independently with their checkboxes', async () => {
     const board = await render([task({ id: 't-a', title: 'A' }), task({ id: 't-b', title: 'B' })])
 
-    await click(board.card('A'))
-    await click(board.card('B'))
+    await click(board.checkbox('A'))
+    await click(board.checkbox('B'))
+    expect(board.marked()).toEqual(['A', 'B'])
+    expect(board.bar()?.textContent).toContain('2')
+
+    await click(board.checkbox('A'))
     expect(board.marked()).toEqual(['B'])
     expect(board.bar()?.textContent).toContain('1')
   })
 
-  it('adds a card with Ctrl and removes it with Ctrl again', async () => {
+  it('toggles a card in and out with its checkbox', async () => {
     const board = await render([
       task({ id: 't-a', title: 'A' }),
       task({ id: 't-b', title: 'B' }),
       task({ id: 't-c', title: 'C' }),
     ])
 
-    await click(board.card('A'))
-    await click(board.card('B'), { ctrlKey: true })
-    await click(board.card('C'), { metaKey: true })
+    await click(board.checkbox('A'))
+    await click(board.checkbox('B'))
+    await click(board.checkbox('C'))
     expect(board.marked()).toEqual(['A', 'B', 'C'])
     expect(board.bar()?.textContent).toContain('3')
 
-    await click(board.card('B'), { ctrlKey: true })
+    await click(board.checkbox('B'))
     expect(board.marked()).toEqual(['A', 'C'])
     expect(board.bar()?.textContent).toContain('2')
   })
@@ -698,13 +706,13 @@ describe('TaskBoard multi-selection and group drag', () => {
       task({ id: 't-d', title: 'D' }),
     ])
 
-    // The anchor is the last plainly clicked card; the range replaces the
-    // selection, and the anchor itself stays put for the next Shift click.
-    await click(board.card('B'))
-    await click(board.card('D'), { shiftKey: true })
+    // The anchor is the last toggled checkbox; Shift walks the range and the
+    // anchor itself stays put for the next Shift click.
+    await click(board.checkbox('B'))
+    await click(board.checkbox('D'), { shiftKey: true })
     expect(board.marked()).toEqual(['B', 'C', 'D'])
 
-    await click(board.card('C'), { shiftKey: true })
+    await click(board.checkbox('C'), { shiftKey: true })
     expect(board.marked()).toEqual(['B', 'C'])
   })
 
@@ -715,74 +723,72 @@ describe('TaskBoard multi-selection and group drag', () => {
       task({ id: 't-d', title: 'D', status: 'clarification' }),
     ])
 
-    await click(board.card('A'))
-    await click(board.card('D'), { shiftKey: true })
+    await click(board.checkbox('A'))
+    await click(board.checkbox('D'), { shiftKey: true })
     // Columns left to right, cards top to bottom: backlog A, then todo C and D.
     expect(board.marked()).toEqual(['A', 'C', 'D'])
   })
 
   it('marks only the clicked card with Shift while nothing is marked yet', async () => {
     const board = await render([task({ id: 't-a', title: 'A' }), task({ id: 't-b', title: 'B' })])
-    await click(board.card('B'), { shiftKey: true })
+    await click(board.checkbox('B'), { shiftKey: true })
     expect(board.marked()).toEqual(['B'])
   })
 
   it('clears the selection when free board space is clicked', async () => {
     const board = await render([task({ id: 't-a', title: 'A' })])
-    await click(board.card('A'))
+    await click(board.checkbox('A'))
     expect(board.bar()).not.toBeNull()
 
     await click(board.container.querySelector<HTMLElement>('[data-dsh-taskboard-board]')!)
     expect(board.bar()).toBeNull()
   })
 
-  it('opens the detail on a double click and on a keyboard click, not on a plain mark', async () => {
+  it('opens the detail from the title and its excerpt only, and keeps the selection', async () => {
     const opened: string[] = []
     const board = await render(
-      [task({ id: 't-a', title: 'A' })],
+      [task({ id: 't-a', title: 'A', description: 'the short text' })],
       { openTask: (id) => { opened.push(id) } },
     )
 
+    // The checkbox marks; the card body (tags, meta, empty space) stays inert.
+    await click(board.checkbox('A'))
     await click(board.card('A'))
     expect(opened).toEqual([])
-    await doubleClick(board.card('A'))
-    expect(opened).toEqual(['t-a'])
+    expect(board.card('A').getAttribute('data-selected')).toBe('true')
 
-    // `element.click()` is what Enter/Space on a focused button produces; a
-    // keyboard has no Ctrl/Shift click, so it keeps the direct route.
-    await keyClick(board.card('A'))
+    // Title + excerpt are one button; a mouse click and a keyboard activation
+    // (`element.click()` is what Enter/Space on a button produces) both open it.
+    await click(board.detail('A'))
+    expect(opened).toEqual(['t-a'])
+    await keyClick(board.detail('A'))
     expect(opened).toEqual(['t-a', 't-a'])
     // Opening the detail keeps the selection: inspecting a marked card is a
     // separate intention from marking it.
     expect(board.card('A').getAttribute('data-selected')).toBe('true')
   })
 
-  it('marks from the keyboard: Space takes the same modifiers as the mouse', async () => {
+  it('toggles with the checkbox and extends the range with Shift', async () => {
     const opened: string[] = []
     const board = await render(
       [task({ id: 't-a', title: 'A' }), task({ id: 't-b', title: 'B' }), task({ id: 't-c', title: 'C' })],
       { openTask: (id) => { opened.push(id) } },
     )
 
-    // Plain Space is the keyboard's plain click: this card alone.
-    await space(board.card('A'))
+    // A checkbox click toggles this card; the checkbox is the only mark.
+    await click(board.checkbox('A'))
     expect(board.marked()).toEqual(['A'])
-    // Ctrl+Space adds B, a second Ctrl+Space takes it out again.
-    await space(board.card('B'), { ctrlKey: true })
+    await click(board.checkbox('B'))
     expect(board.marked()).toEqual(['A', 'B'])
-    await space(board.card('B'), { ctrlKey: true })
+    await click(board.checkbox('B'))
     expect(board.marked()).toEqual(['A'])
-    // Shift+Space walks the range from the anchor (the Ctrl-marked B) to C.
-    await space(board.card('C'), { shiftKey: true })
+    // Shift+click walks the range from the anchor (the toggled B) to C.
+    await click(board.checkbox('C'), { shiftKey: true })
     expect(board.marked()).toEqual(['B', 'C'])
-    // Space only marks; the detail stays Enter's job.
+    // Marking never opens the detail; the title button is the keyboard's route.
     expect(opened).toEqual([])
-    // The keydown is consumed, so the button never fires its synthetic click
-    // (and the page never scrolls).
-    const consumed = await space(board.card('A'))
-    expect(consumed.defaultPrevented).toBe(true)
-    expect(board.marked()).toEqual(['A'])
-    expect(opened).toEqual([])
+    await keyClick(board.detail('C'))
+    expect(opened).toEqual(['t-c'])
   })
 
   it('carries the whole selection on a marked card and moves it as one batch', async () => {
@@ -800,8 +806,8 @@ describe('TaskBoard multi-selection and group drag', () => {
       },
     )
 
-    await click(board.card('A'))
-    await click(board.card('B'), { shiftKey: true })
+    await click(board.checkbox('A'))
+    await click(board.checkbox('B'), { shiftKey: true })
     const dataTransfer = transfer()
     await dragStart(board.card('A'), dataTransfer)
     // The lead id keeps `text/plain` compatible; the whole set rides the
@@ -835,7 +841,7 @@ describe('TaskBoard multi-selection and group drag', () => {
       },
     )
 
-    await click(board.card('A'))
+    await click(board.checkbox('A'))
     const dataTransfer = transfer()
     await dragStart(board.card('C'), dataTransfer)
     expect(JSON.parse(dataTransfer.data[BATCH_DRAG_MIME]!)).toEqual(['t-c'])
@@ -859,8 +865,8 @@ describe('TaskBoard multi-selection and group drag', () => {
       },
     )
 
-    await click(board.card('A'))
-    await click(board.card('B'), { ctrlKey: true })
+    await click(board.checkbox('A'))
+    await click(board.checkbox('B'))
     const dataTransfer = transfer()
     await dragStart(board.card('A'), dataTransfer)
     // testing → testing is not a transition, so B stays behind.
@@ -876,7 +882,7 @@ describe('TaskBoard multi-selection and group drag', () => {
       { moveTask: (id, status) => { singles.push({ id, status }) } },
     )
 
-    await click(board.card('B'))
+    await click(board.checkbox('B'))
     const dataTransfer = transfer()
     await dragStart(board.card('B'), dataTransfer)
     await drop(board.column('testing'), dataTransfer)
@@ -892,8 +898,8 @@ describe('TaskBoard multi-selection and group drag', () => {
       { moveTasks: async (ids) => { started.push(...ids); return true } },
     )
 
-    await click(board.card('A'))
-    await click(board.card('B'), { shiftKey: true })
+    await click(board.checkbox('A'))
+    await click(board.checkbox('B'), { shiftKey: true })
     const dataTransfer = transfer()
     await dragStart(board.card('A'), dataTransfer)
     await drop(board.column('running'), dataTransfer)
@@ -917,8 +923,8 @@ describe('TaskBoard multi-selection and group drag', () => {
     await click(bulkArchive)
     expect(archived).toEqual([])
 
-    await click(board.card('B'))
-    await click(board.card('C'), { shiftKey: true })
+    await click(board.checkbox('B'))
+    await click(board.checkbox('C'), { shiftKey: true })
     expect(bulkArchive.disabled).toBe(false)
     await click(bulkArchive)
 
@@ -938,11 +944,11 @@ describe('TaskBoard multi-selection and group drag', () => {
     )
     const bulkArchive = board.bulk('bulk-archive')
 
-    await click(board.card('Run'))
+    await click(board.checkbox('Run'))
     // Nothing in the selection can be archived, so the button stays refused.
     expect(bulkArchive.disabled).toBe(true)
 
-    await click(board.card('Todo'), { ctrlKey: true })
+    await click(board.checkbox('Todo'))
     await click(bulkArchive)
     expect(archived).toEqual(['t-todo'])
   })
@@ -954,8 +960,8 @@ describe('TaskBoard multi-selection and group drag', () => {
       { deleteTask: (id) => { deleted.push(id) } },
     )
 
-    await click(board.card('A'))
-    await click(board.card('B'), { ctrlKey: true })
+    await click(board.checkbox('A'))
+    await click(board.checkbox('B'))
     await click(board.bulk('bulk-delete'))
     expect(deleted).toEqual([])
 
@@ -1032,8 +1038,8 @@ describe('TaskBoard multi-selection and group drag', () => {
         { moveTasks: async (ids) => { started.push(...ids); return true } },
       )
 
-      await click(board.card('Open'))
-      await click(board.card('Clear'), { ctrlKey: true })
+      await click(board.checkbox('Open'))
+      await click(board.checkbox('Clear'))
       const dataTransfer = transfer()
       await dragStart(board.card('Open'), dataTransfer)
       await drop(board.column('running'), dataTransfer)
