@@ -213,6 +213,7 @@ describe('follow-up card badge', () => {
         sessionRunning={false}
         hasFollowUpSource
         followUpSourceHint={t('card.followUpSourceHint', { titles: 'Follow-up: Login flow' })}
+        followUpAvailable={false}
         onSelect={() => {}}
         onOpen={() => {}}
         onDragStart={() => {}}
@@ -221,10 +222,45 @@ describe('follow-up card badge', () => {
         onTogglePause={() => {}}
         onStopSession={() => {}}
         onRelease={() => {}}
+        onFollowUp={() => {}}
         onStep={() => {}}
       />,
     )
     expect(container.querySelector('[data-dsh-part="card-follow-up"]')).not.toBeNull()
     expect(container.querySelector('[data-dsh-part="card-follow-up-source"]')).not.toBeNull()
+  })
+
+  it('offers the follow-up glyph only when the board allows it, without opening the detail', async () => {
+    const onFollowUp = vi.fn()
+    const source = card()
+    const cardProps = (available: boolean) => ({
+      task: source,
+      pending: false,
+      selected: false,
+      dragging: false,
+      sessionRunning: false,
+      followUpAvailable: available,
+      onSelect: () => {},
+      onOpen: () => {},
+      onDragStart: () => {},
+      onDragEnd: () => {},
+      onOpenSession: () => {},
+      onTogglePause: () => {},
+      onStopSession: () => {},
+      onRelease: () => {},
+      onFollowUp,
+      onStep: () => {},
+    })
+    const withButton = render(<TaskCard {...cardProps(true)} />)
+    const button = withButton.querySelector<HTMLButtonElement>('[data-dsh-part="card-follow-up-button"]')
+    expect(button).not.toBeNull()
+    expect(button!.getAttribute('aria-label')).toBe(t('detail.followUp'))
+    // A sibling of the card body, never a second detail click target.
+    expect(button!.closest('[data-dsh-part="card-detail-target"]')).toBeNull()
+    await act(async () => { button!.click() })
+    expect(onFollowUp).toHaveBeenCalledWith(source)
+
+    const without = render(<TaskCard {...cardProps(false)} />)
+    expect(without.querySelector('[data-dsh-part="card-follow-up-button"]')).toBeNull()
   })
 })

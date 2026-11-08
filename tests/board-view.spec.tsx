@@ -977,6 +977,51 @@ describe('TaskBoard multi-selection and group drag', () => {
     expect(board.bar()).toBeNull()
   })
 
+  it('offers the follow-up glyph on a Done card and opens the empty follow-up dialog', async () => {
+    const board = await render([task({ id: 't-done', title: 'Done card', status: 'done' })])
+    const button = board.container.querySelector<HTMLButtonElement>('[data-dsh-part="card-follow-up-button"]')
+    expect(button).not.toBeNull()
+    await click(button!)
+
+    expect(board.container.querySelector('[data-dsh-part="new-follow-up"]')).not.toBeNull()
+    // A follow-up dialog starts empty: it carries the new task, not the source text.
+    const title = board.container.querySelector<HTMLInputElement>(`[placeholder="${zh['new.titlePlaceholder']}"]`)
+    expect(title?.value).toBe('')
+  })
+
+  it('shows the card follow-up only on Done while the source is free', async () => {
+    // An unfinished follow-up owns the source: no second follow-up from the card.
+    const source = task({ id: 't-src', title: 'Source', status: 'done' })
+    const active = task({
+      id: 't-fu',
+      title: 'Follow-up',
+      status: 'backlog',
+      followUp: {
+        sourceTaskId: 't-src',
+        sessionId: 'session-src',
+        title: 'Source',
+        description: '',
+        prompt: '',
+        createdAt: 1,
+      },
+    })
+    const blocked = await render([source, active])
+    expect(blocked.container.querySelector('[data-dsh-part="card-follow-up-button"]')).toBeNull()
+
+    // Only Done gets the shortcut; Tested keeps the release arrow and the detail's button.
+    const tested = await render([task({ id: 't-tested', title: 'Tested', status: 'tested' })])
+    expect(tested.container.querySelector('[data-dsh-part="card-follow-up-button"]')).toBeNull()
+
+    // An open run keeps the source conversation busy: the Host would refuse.
+    const open = await render([task({
+      id: 't-open',
+      title: 'Open run',
+      status: 'done',
+      executions: [{ id: 'e-open', sessionId: 's', startedAt: 1, endedAt: undefined, result: undefined, error: undefined }],
+    })])
+    expect(open.container.querySelector('[data-dsh-part="card-follow-up-button"]')).toBeNull()
+  })
+
   describe('clarification step', () => {
     it('links the card own clarification chat', async () => {
       const board = await render([task({

@@ -705,6 +705,37 @@ html[data-dsh-taskboard-active]:not([data-dsh-ssh-active]) [class*='centerCol'] 
   color: var(--dsw-alias-label-primary);
 }
 
+/* The card's follow-up entry on Done cards: the same bottom-left gutter spot,
+   18px ring and sibling rules as the question symbol and the release arrow (a
+   Done card carries neither), in the business tone. It opens the same empty
+   follow-up dialog as the detail's Follow-up button. */
+.cardFollowUp {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-state-business-primary);
+  border-radius: 50%;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-state-business-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.cardFollowUp:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
 .cardRunningLabel {
   font-size: 11px;
   color: var(--dsw-alias-state-warn-primary);
@@ -1504,6 +1535,7 @@ textarea.input::-webkit-resizer {
 .cardPause:focus-visible,
 .cardQuestion:focus-visible,
 .cardRelease:focus-visible,
+.cardFollowUp:focus-visible,
 .cardStep:focus-visible,
 .primaryButton:focus-visible,
 .ghostButton:focus-visible,

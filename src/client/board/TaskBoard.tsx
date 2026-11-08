@@ -6,7 +6,7 @@
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from 'react'
 import { selectedTaskOf, type BoardController } from '../../core/controller.ts'
-import { collectKnownTags, compareWipOrder, hasFollowUpLock, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason, type WipLimits } from '../../core/tasks.ts'
+import { canStartFollowUp, collectKnownTags, compareWipOrder, hasFollowUpLock, openExecution, tagTone, waitingReasonFor, type TaskRecord, type TaskStatus, type WaitingReason, type WipLimits } from '../../core/tasks.ts'
 import { resolveStateMachine } from '../../core/state-machine.ts'
 import { columnStepOf, transitionBlockerOf, type QueuedTransition, type StepBlocker, type TransitionBlocker, type TransitionError } from '../../core/transitions.ts'
 import { t } from '../locales.ts'
@@ -174,7 +174,7 @@ export function matchesTagFilter(task: TaskRecord, selected: readonly string[]):
  * re-renders only when its own task changes — not when a sibling card status,
  * the filter, or the selection moves.
  */
-const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
+const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, followUpAvailable, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onFollowUp, onStep, sessionRunning }: {
   task: TaskRecord
   pending: boolean
   /** The Host is merging this card in the background. */
@@ -190,6 +190,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   hasFollowUpSource?: boolean
   /** Titles of this card's follow-ups, for the source badge's tooltip. */
   followUpSourceHint?: string
+  /** The board offers the card's follow-up entry (Done, source free). */
+  followUpAvailable?: boolean
   /** Why the card waits for its lane's WIP slot; undefined when it holds or needs none. */
   waitingReason?: WaitingReason
   /** The reason as ready-to-show text (stable per blocker, so memo stays effective). */
@@ -215,6 +217,8 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
   onStopSession: (task: TaskRecord) => void
   /** Ask to release this card for the merge (the Host's `approve-merge`). */
   onRelease: (task: TaskRecord) => void
+  /** Open the empty follow-up dialog for this Done card. */
+  onFollowUp: (task: TaskRecord) => void
   /** Fire the manual transition into the adjacent column (same as a drop). */
   onStep: (id: string, status: TaskStatus) => void
   /** The Host says this card's conversation is running right now. */
@@ -237,6 +241,7 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       awaitingAnswerSessionId={awaitingAnswerSessionId}
       hasFollowUpSource={hasFollowUpSource}
       followUpSourceHint={followUpSourceHint}
+      followUpAvailable={followUpAvailable}
       leftTarget={leftTarget}
       leftBlocker={leftBlocker}
       rightTarget={rightTarget}
@@ -249,6 +254,7 @@ const MemoTaskCard = memo(function MemoTaskCard({ task, pending, releasePending,
       onTogglePause={onTogglePause}
       onStopSession={onStopSession}
       onRelease={onRelease}
+      onFollowUp={onFollowUp}
       onStep={onStep}
       sessionRunning={sessionRunning}
     />
@@ -288,6 +294,9 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   // dialog the detail's "Freigeben (Merge)" opens: merging ends the review, so
   // the board never does it on one click. `base` is the branch the dialog names.
   const [confirmRelease, setConfirmRelease] = useState<{ taskId: string; base: string } | undefined>(undefined)
+  // The Done card whose follow-up dialog is open (the card glyph; the detail has
+  // its own copy of the same dialog).
+  const [followUpSource, setFollowUpSource] = useState<TaskRecord | undefined>(undefined)
   // The Shift range starts at the anchor: the card the last plain or Ctrl click
   // landed on. A ref, not state, so marking a card never changes the memoized
   // cards' props — only the cards whose `selected` flag flips re-render.
@@ -501,6 +510,11 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
   const requestRelease = useCallback((task: TaskRecord): void => {
     if (task.archivedAt !== undefined || task.status !== 'tested') return
     setConfirmRelease({ taskId: task.id, base: task.git?.base ?? 'main' })
+  }, [])
+  // The card's follow-up glyph only opens the empty dialog; the Host re-validates
+  // the source and resolves its conversation and branch from its own ledger.
+  const requestFollowUp = useCallback((task: TaskRecord): void => {
+    setFollowUpSource(task)
   }, [])
   // The bulk pause is deliberately global (not filter-scoped, unlike the
   // selection actions): "pause all running work" must not silently skip cards
@@ -915,6 +929,8 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                   onTogglePause={togglePause}
                   onStopSession={stopSession}
                   onRelease={requestRelease}
+                  onFollowUp={requestFollowUp}
+                  followUpAvailable={false}
                   onStep={stepTask}
                   sessionRunning={snapshot.host?.runningSessions?.[task.id] === true}
                 />
@@ -957,6 +973,13 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                     const left = columnStepOf(task, machine, 'left', snapshot.host?.sessionDefaultPermission, followUpLocked)
                     const right = columnStepOf(task, machine, 'right', snapshot.host?.sessionDefaultPermission, followUpLocked)
                     const followUpTitles = followUpTitlesBySource.get(task.id)
+                    // The card's follow-up shortcut only exists on Done (tested
+                    // carries the release arrow in that gutter, the other source
+                    // columns keep the detail's button) and only while the Host
+                    // would accept it and no card action is in flight.
+                    const followUpAvailable = task.status === 'done'
+                      && !pendingSet.has(task.id)
+                      && canStartFollowUp(task, snapshot.tasks)
                     // A run the Host holds back because the machine is
                     // overloaded says so; the WIP wait keeps its own text.
                     const pressure = pressureWaitingIds.has(task.id)
@@ -991,6 +1014,8 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
                         onTogglePause={togglePause}
                         onStopSession={stopSession}
                         onRelease={requestRelease}
+                        onFollowUp={requestFollowUp}
+                        followUpAvailable={followUpAvailable}
                         onStep={stepTask}
                         sessionRunning={snapshot.host?.runningSessions?.[task.id] === true}
                       />
@@ -1014,6 +1039,16 @@ export function TaskBoard({ controller }: { controller: BoardController }) {
           controller={controller}
           {...(projectId === '' ? {} : { defaultWorkspaceId: projectId })}
           onClose={() => { setShowNew(false) }}
+        />
+      )}
+      {followUpSource !== undefined && (
+        // The card glyph and the detail's Follow-up button open the same empty
+        // dialog; the Host resolves the source's text, conversation and branch
+        // from its own ledger (the browser sends only `followUpOf`).
+        <NewTaskModal
+          controller={controller}
+          followUpSource={followUpSource}
+          onClose={() => { setFollowUpSource(undefined) }}
         />
       )}
       {confirmDeleteSelection && (

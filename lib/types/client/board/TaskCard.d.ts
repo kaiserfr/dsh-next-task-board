@@ -15,7 +15,10 @@
  * The detail button, the checkbox, the corner controls and the chevrons are
  * siblings of the card body: each click reaches only its own control, so a link
  * jumps, the checkbox marks, a chevron steps, and nothing opens the detail by
- * accident. The tags, the meta row and the card's empty space stay inert.
+ * accident. The tags, the meta row and the card's empty space stay inert. A Done
+ * card also carries the follow-up entry (↳) in the bottom-left gutter the
+ * question symbol and the release arrow use; it opens the same empty follow-up
+ * dialog as the detail view.
  *
  * Memoized: the card re-renders only when its own task record changes, so a
  * status/filter update on one card (or scrolling) never re-renders every
@@ -47,7 +50,7 @@ export declare function isCardDraggable(task: TaskRecord): boolean;
  * must end first (`running`). Only the drag onto Done may bypass the run.
  */
 export declare function isCardBulkActionable(task: TaskRecord, pending: boolean): boolean;
-declare function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onStep, sessionRunning }: {
+declare function TaskCardInner({ task, pending, releasePending, releaseLocked, pendingTransition, transitionError, timeZone, selected, dragging, waitingReason, waitingTooltip, awaitingAnswerSessionId, hasFollowUpSource, followUpSourceHint, followUpAvailable, leftTarget, leftBlocker, rightTarget, rightBlocker, onSelect, onOpen, onDragStart, onDragEnd, onOpenSession, onTogglePause, onStopSession, onRelease, onFollowUp, onStep, sessionRunning }: {
     task: TaskRecord;
     pending: boolean;
     /** A merge release of this card runs in the Host's background. */
@@ -68,6 +71,8 @@ declare function TaskCardInner({ task, pending, releasePending, releaseLocked, p
     hasFollowUpSource?: boolean;
     /** Titles of this card's follow-ups, for the source badge's tooltip. */
     followUpSourceHint?: string;
+    /** The board offers the card's follow-up entry (Done, source free, no action in flight). */
+    followUpAvailable?: boolean;
     /**
      * Why the card waits for its lane's WIP slot (undefined when it waits for
      * nothing). The reason itself is not rendered; the tooltip carries the text.
@@ -101,6 +106,8 @@ declare function TaskCardInner({ task, pending, releasePending, releaseLocked, p
     onStopSession: (task: TaskRecord) => void;
     /** Ask to release the card for the merge (the Host's `approve-merge`). */
     onRelease: (task: TaskRecord) => void;
+    /** Open the empty follow-up dialog for this Done card (the Host resolves the source). */
+    onFollowUp: (task: TaskRecord) => void;
     /** Fire the manual transition into the adjacent column (same as a drop). */
     onStep: (taskId: string, status: TaskStatus) => void;
     /** Whether the card's conversation is running right now (derived by the Host). */
