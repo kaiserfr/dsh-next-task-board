@@ -128,20 +128,26 @@ describe('card → session jump', () => {
     expect(view.container.querySelector('[data-dsh-part="card-session"]')).toBeNull()
   })
 
-  it('keeps the double click opening the detail while a mark does not', async () => {
+  it('opens the detail from the title only; the body and the mark do not', async () => {
     const view = render({ tasks: [task({ status: 'clarification', executions: [settledRun(10, 'session-old')] })] })
     await view.render()
 
-    const card = view.container.querySelector('button[data-dsh-part="card"]') as HTMLButtonElement
-    await act(async () => {
-      card.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }))
-    })
+    const card = view.container.querySelector<HTMLElement>('[data-dsh-part="card"]')!
+    const box = view.container.querySelector<HTMLInputElement>('[data-dsh-part="card-select"]')!
+    const target = view.container.querySelector<HTMLButtonElement>('[data-dsh-part="card-detail-target"]')!
+
+    // The card body (tags, meta, empty space) is inert.
+    await act(async () => { card.click() })
+    expect(view.details).toEqual([])
+    expect(card.getAttribute('data-selected')).toBeNull()
+
+    // The checkbox marks; it never opens the detail.
+    await act(async () => { box.click() })
     expect(view.details).toEqual([])
     expect(card.getAttribute('data-selected')).toBe('true')
 
-    await act(async () => {
-      card.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, detail: 2 }))
-    })
+    // Title/excerpt is the only way to the detail.
+    await act(async () => { target.click() })
     expect(view.details).toEqual(['t1'])
     expect(view.opened).toEqual([])
   })
